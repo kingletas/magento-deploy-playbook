@@ -48,6 +48,10 @@ changed, because there's nothing before it.
 - Five structural checks over the repository itself: no roles, every `notify`
   resolves, every include resolves, no path above the playbook directory, no
   stray environment lookups.
+- ansible-core 2.21 and ansible-lint 26, replacing the 2.13 and 6.8 lines that
+  were end of life. Needs Python 3.12 or newer, which `make venv` checks for.
+  `deprecation_warnings` is on, because a warning is the only notice you get
+  before the next removal.
 - `.ordane.yml`, so the playbook works with the Ordane console out of the box.
   Only the throwaway `docker` fleet is launchable, `deploy` is graded dangerous
   and asks for the environment's name, and the targets are grouped. Which

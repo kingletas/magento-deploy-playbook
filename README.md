@@ -524,10 +524,10 @@ how people find out the hard way:
   credentials. `tests/test-vars-contract.yml` asserts they stay off in the
   committed defaults, because a notifier turned on in a shared default points
   at whatever account its credentials belong to.
-- **`ansible-core` 2.13 and Python 3.8.9 are both end of life.** Pinned in
-  `requirements.txt` and `.python-version` so the current state is
-  reproducible. Flip `deprecation_warnings = True` in `ansible.cfg` before
-  attempting the upgrade -- that is when the warnings are the point.
+- **Needs Python 3.12 or newer.** ansible-core 2.20 dropped everything below
+  it, and pip on an older interpreter resolves an ansible-core from 2023
+  rather than refusing. `make venv` checks and says so; override the
+  interpreter with `make venv PYTHON=python3.12`.
 - **`--check` proves little here.** The playbook builds a release on the
   builder and extracts it on the fleet, so a dry run skips the interesting
   half. `make docker-test` is the answer, and

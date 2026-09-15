@@ -32,6 +32,9 @@ else
   ANSIBLE_GALAXY   := ansible-galaxy
 endif
 
+# The interpreter the virtualenv is built from. Must be 3.12 or newer.
+PYTHON ?= python3
+
 # Extra ansible-playbook arguments, e.g. make deploy EXTRA='--check -vv'
 EXTRA ?=
 
@@ -135,8 +138,13 @@ lint:
 
 ## venv: build the python virtualenv from requirements.txt
 venv:
+	@$(PYTHON) -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' || { \
+		echo "ERROR: $(PYTHON) is $$($(PYTHON) -V 2>&1), and ansible-core 2.20 and"; \
+		echo "       later need 3.12 or newer. pip on an older one resolves an"; \
+		echo "       ansible-core from 2023 instead of refusing."; \
+		echo "       Run: make venv PYTHON=python3.12"; exit 1; }
 	@rm -rf $(VENV)
-	python3 -m venv $(VENV)
+	$(PYTHON) -m venv $(VENV)
 	$(VENV)/bin/pip install --upgrade pip
 	$(VENV)/bin/pip install -r requirements.txt
 	@echo "Now run: make collections"

@@ -1,47 +1,40 @@
 # Rebuild the venv with `make venv && make collections`.
 #
+# NEEDS PYTHON 3.12 OR NEWER. ansible-core 2.20 dropped everything below it, and
+# pip on an older interpreter silently resolves an ansible-core from 2023
+# instead of refusing. `make venv` checks the version and says so.
+#
 # Fully pinned, transitive dependencies included. A partial pin lets a release
 # nobody asked for break the build with nothing in the repository having
-# changed. ansible-compat is the live example: 4.x and later raise
-# AttributeError inside ansible-lint 6.8.7, so an unpinned install produced a
-# lint step that could not start at all.
+# changed, and this file has already been bitten by one.
 #
 # Regenerate on the Python the workflows pin, from the four direct packages
 # rather than from this file, or pip has nothing left to resolve:
 #
-#   1. Put the four direct packages and `ansible-compat<4` in a file.
-#   2. Install them on the Python the workflows pin, and `pip freeze | sort`.
-#
-# Regenerating from THIS file instead leaves pip nothing to resolve, and adding
-# a constraint on top of a full freeze conflicts with it.
-#
-# KNOWN DEBT: ansible-core 2.13 and the Python 3.8.9 in .python-version are both
-# end of life and need a coordinated upgrade. Flip
-# `deprecation_warnings = True` in ansible.cfg before attempting it.
+#   1. Put the four direct packages in a file, yamllint unpinned.
+#   2. Install them on that Python, and `pip freeze | sort`.
 
 # What this playbook uses directly.
-ansible==6.7.0
-ansible-core==2.13.13
-yamllint==1.32.0
-ansible-lint==6.8.7
+ansible==14.4.0
+ansible-core==2.21.4
+yamllint==1.38.0
+ansible-lint==26.8.0
 
 # Transitive. Pinned so two installs a month apart are the same install.
 Jinja2==3.1.6
 MarkupSafe==3.0.3
 PyYAML==6.0.3
-Pygments==2.21.0
-ansible-compat==3.0.2
+ansible-compat==26.8.0
 attrs==26.1.0
 black==26.5.1
 bracex==3.0.1
 cffi==2.1.1
 click==8.5.0
 cryptography==50.0.1
+distro==1.9.0
 filelock==3.32.6
 jsonschema-specifications==2025.9.1
 jsonschema==4.26.0
-markdown-it-py==4.2.0
-mdurl==0.1.2
 mypy_extensions==1.1.0
 packaging==26.3
 pathspec==1.1.1
@@ -49,11 +42,9 @@ platformdirs==4.11.8
 pycparser==3.0
 pytokens==0.4.1
 referencing==0.37.0
-resolvelib==0.8.1
-rich==15.0.0
+resolvelib==1.2.1
 rpds-py==2026.6.3
 ruamel.yaml.clib==0.2.15
-ruamel.yaml==0.17.40
+ruamel.yaml==0.19.1
 subprocess-tee==0.4.2
-typing_extensions==4.16.0
 wcmatch==11.0.1

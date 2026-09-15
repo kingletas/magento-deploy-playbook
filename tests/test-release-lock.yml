@@ -77,9 +77,11 @@
     # or dropped from handlers/main.yml, Ansible fails at RUNTIME, not at
     # syntax-check -- so prove the name still resolves.
     - name: The notify target still exists
+      vars:
+        handlers_source: "{{ lookup('file', 'handlers/main.yml') }}"
       ansible.builtin.assert:
         that:
-          - lookup('file', 'handlers/main.yml') is search('name: Ping Filters URL')
+          - "handlers_source is search('name: Ping Filters URL')"
         fail_msg: >-
           release.yml notifies 'Ping Filters URL' but no such handler is defined
           in handlers/main.yml.

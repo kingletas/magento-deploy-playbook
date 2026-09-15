@@ -1,0 +1,4 @@
+#!/bin/bash
+# Stands in for `varnishadm` on the varnish host. Logs its arguments and succeeds.
+echo "[fake-varnishadm] $*" >> /tmp/build-log 2>/dev/null || true
+exit 0

@@ -130,4 +130,8 @@ The maintenance-mode step is the one worth singling out, because it is the
 shape of the whole problem. It used to be a handler triggered by `notify` on a
 `stat` task -- and **a `stat` never reports changed**, so the handler never
 fired and a deploy ran against a live site with no maintenance page. Nothing
-errored. It's a plain task now.
+errored. It's a plain task now, and it runs in the incoming release: `var` is
+not shared, so a flag written in the release being replaced stops covering
+anything the moment the symlink flips. It runs only when `setup:db:status` or
+`app:config:status` exits 2, and an exit code other than 0 or 2 stops the
+cutover before anything goes live.

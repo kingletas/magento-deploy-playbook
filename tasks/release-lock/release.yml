@@ -1,11 +1,9 @@
 ---
 ###
 # Drop the build lock taken by acquire.yml, which supplies release_lock_file.
-# This is the last thing that runs, so the notify doubles as "deploy finished".
 ###
 
 - name: Remove the lock file
   ansible.builtin.file:
     path: "{{ release_lock_file }}"
     state: absent
-  notify: Ping Filters URL

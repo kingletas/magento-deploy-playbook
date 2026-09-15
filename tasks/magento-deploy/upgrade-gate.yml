@@ -1,0 +1,34 @@
+---
+###
+# Decides whether this release needs setup:upgrade, and so a maintenance window.
+#
+#   db_config, app_config   the looped registers from setup:db:status and
+#                           app:config:status, read from the incoming release.
+#   releases.complete       false never migrates, because nothing goes live.
+#
+# Both commands exit 0 when up to date and 2 when there is work to do. Anything
+# else means the status could not be read, and the cutover stops here.
+###
+
+# Looped registers are dicts with a .results list. `| first | default({})` keeps
+# an empty admin group from raising here instead of failing the assert below.
+- name: Read the status exit codes
+  ansible.builtin.set_fact:
+    upgrade_gate_db_rc: "{{ (db_config.results | default([]) | first | default({})).rc | default('missing') }}"
+    upgrade_gate_config_rc: "{{ (app_config.results | default([]) | first | default({})).rc | default('missing') }}"
+
+- name: Refuse to cut over when the release's status cannot be read
+  ansible.builtin.assert:
+    that:
+      - upgrade_gate_db_rc | string in ['0', '2']
+      - upgrade_gate_config_rc | string in ['0', '2']
+    fail_msg: >-
+      setup:db:status exited {{ upgrade_gate_db_rc }} and app:config:status
+      exited {{ upgrade_gate_config_rc }} in the incoming release. Only 0 (up to
+      date) and 2 (work to do) are answers, so whether this release needs a
+      maintenance window is unknown. Nothing has gone live; run both commands in
+      the release to see why.
+
+- name: Decide whether the release needs setup:upgrade
+  ansible.builtin.set_fact:
+    upgrade_needed: "{{ (releases.complete | bool) and ((upgrade_gate_db_rc | string == '2') or (upgrade_gate_config_rc | string == '2')) }}"

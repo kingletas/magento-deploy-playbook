@@ -154,7 +154,7 @@ cmd_shell() { docker exec -it "mdp-${1:?usage: shell <builder|web1|web2|admin|cr
 cmd_reset() {
     for c in "${CONTAINERS[@]}"; do
         docker exec "${c}" sh -c '
-            rm -f /tmp/*.lock
+            rm -f /tmp/*.lock /tmp/magento-fake-needs-upgrade
             rm -rf /var/www/html/releases/* /var/www/html/archives/*
             rm -f /var/www/html/magento_current
         ' 2>/dev/null
@@ -174,6 +174,13 @@ truncate_logs() {
             : > /tmp/build-log 2>/dev/null || true
             chmod 666 /tmp/build-log 2>/dev/null || true
         ' 2>/dev/null
+    done
+}
+
+# `touch` or `rm -f` the file magento-fake reads to report work to do.
+set_needs_upgrade() {
+    for c in "${CONTAINERS[@]}"; do
+        docker exec "${c}" sh -c "$1 /tmp/magento-fake-needs-upgrade" 2>/dev/null
     done
 }
 
@@ -198,6 +205,17 @@ cmd_test() {
     echo ""
     echo "########## verify ##########"
     cmd_verify || die "the deploy completed but verification failed."
+    # A third deploy whose status commands report work to do, so the maintenance
+    # window and setup:upgrade are exercised as well as skipped.
+    echo ""
+    echo "########## deploy a release that needs setup:upgrade ##########"
+    truncate_logs
+    set_needs_upgrade touch
+    cmd_deploy || die "the upgrade deploy failed. bin/docker-suite logs shows what the fakes were asked to do."
+    echo ""
+    echo "########## verify the upgrade deploy ##########"
+    cmd_verify -e expect_upgrade=true || die "the upgrade deploy completed but verification failed."
+    set_needs_upgrade "rm -f"
     echo ""
     echo "All good. Tear down with: bin/docker-suite down"
 }

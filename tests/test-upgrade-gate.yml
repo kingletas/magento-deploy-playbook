@@ -1,0 +1,108 @@
+---
+###
+# tasks/magento-deploy/upgrade-gate.yml, fed the registers the two status
+# commands produce: which releases get a maintenance window, and which stop.
+#
+#   ansible-playbook -i inventory/test tests/test-upgrade-gate.yml
+###
+- name: The upgrade gate
+  hosts: builder
+  connection: local
+  gather_facts: false
+  vars:
+    up_to_date: {results: [{rc: 0, stdout: "All modules are up to date."}]}
+    needs_work: {results: [{rc: 2, stdout: "Run 'setup:upgrade' to update your DB schema and data."}]}
+    broken: {results: [{rc: 1, stdout: "No information is available: the Magento application is not installed."}]}
+    no_admin: {}
+    going_live: {complete: true}
+    not_going_live: {complete: false}
+  tasks:
+    - name: Nothing to do means no window
+      ansible.builtin.include_tasks: tasks/magento-deploy/upgrade-gate.yml
+      vars:
+        db_config: "{{ up_to_date }}"
+        app_config: "{{ up_to_date }}"
+        releases: "{{ going_live }}"
+
+    - name: Assert no window when both are up to date
+      ansible.builtin.assert:
+        that:
+          - upgrade_needed is sameas false
+        fail_msg: "Both status commands exited 0, and upgrade_needed is {{ upgrade_needed | to_json }}."
+
+    - name: Schema work means a window
+      ansible.builtin.include_tasks: tasks/magento-deploy/upgrade-gate.yml
+      vars:
+        db_config: "{{ needs_work }}"
+        app_config: "{{ up_to_date }}"
+        releases: "{{ going_live }}"
+
+    - name: Assert a window for schema work
+      ansible.builtin.assert:
+        that:
+          - upgrade_needed is sameas true
+        fail_msg: "setup:db:status exited 2, and upgrade_needed is {{ upgrade_needed | to_json }}."
+
+    - name: Config work means a window
+      ansible.builtin.include_tasks: tasks/magento-deploy/upgrade-gate.yml
+      vars:
+        db_config: "{{ up_to_date }}"
+        app_config: "{{ needs_work }}"
+        releases: "{{ going_live }}"
+
+    - name: Assert a window for config work
+      ansible.builtin.assert:
+        that:
+          - upgrade_needed is sameas true
+        fail_msg: "app:config:status exited 2, and upgrade_needed is {{ upgrade_needed | to_json }}."
+
+    - name: A deploy that does not go live never migrates
+      ansible.builtin.include_tasks: tasks/magento-deploy/upgrade-gate.yml
+      vars:
+        db_config: "{{ needs_work }}"
+        app_config: "{{ needs_work }}"
+        releases: "{{ not_going_live }}"
+
+    - name: Assert no window when nothing goes live
+      ansible.builtin.assert:
+        that:
+          - upgrade_needed is sameas false
+        fail_msg: "releases.complete is false, and upgrade_needed is {{ upgrade_needed | to_json }}."
+
+    - name: An unreadable status stops the cutover
+      block:
+        - name: Run the gate on a failed status command
+          ansible.builtin.include_tasks: tasks/magento-deploy/upgrade-gate.yml
+          vars:
+            db_config: "{{ broken }}"
+            app_config: "{{ up_to_date }}"
+            releases: "{{ going_live }}"
+
+        - name: Should not reach here
+          ansible.builtin.fail:
+            msg: "The gate accepted setup:db:status exiting 1, so a broken release would go live with no window."
+      rescue:
+        - name: Confirm it refused for the right reason
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search('exited 1')
+            fail_msg: "The gate failed, but not on the exit code. Got: {{ ansible_failed_result.msg | default('(none)') }}"
+
+    - name: No status at all stops the cutover
+      block:
+        - name: Run the gate with no registered results
+          ansible.builtin.include_tasks: tasks/magento-deploy/upgrade-gate.yml
+          vars:
+            db_config: "{{ no_admin }}"
+            app_config: "{{ no_admin }}"
+            releases: "{{ going_live }}"
+
+        - name: Should not reach here too
+          ansible.builtin.fail:
+            msg: "The gate accepted no status results, so it decided with nothing to decide on."
+      rescue:
+        - name: Confirm it refused on the missing results
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search('exited missing')
+            fail_msg: "The gate failed, but not on the missing results. Got: {{ ansible_failed_result.msg | default('(none)') }}"

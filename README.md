@@ -229,7 +229,7 @@ suites, and neither belongs on the allow list. Add your own environment to
 `environments.allow` when you have one.
 
 `deploy` is graded `high` and asks you to type the environment's name, because
-it takes the site into maintenance and flips the symlink. `unlock` is `medium`:
+it flips the symlink and, for a release with database work, takes the site into maintenance. `unlock` is `medium`:
 dropping the lock while a build is genuinely running lets a second one start.
 
 ### What the delivery numbers can and cannot source
@@ -334,15 +334,15 @@ environment.
 ## Layout
 
 ```text
-deployment.yml          seven plays: guard, preflight, build, upload, varnish,
-                        magento, prune
+deployment.yml          six plays: guard, preflight, build, upload, magento,
+                        prune
 verify-deploy.yml       asserts on the filesystem after a deploy
 unlock.yml              clears a stale build lock
-test.yml                imports the five offline suites
+test.yml                imports the six offline suites
 tests/                  the suites, plus four symlinks -- see below
     test-vars-contract.yml  test-bundler.yml
     test-release-lock.yml   test-release-prune.yml
-    test-outgoing-maintenance.yml
+    test-outgoing-maintenance.yml  test-upgrade-gate.yml
     group_vars -> ../group_vars   tasks -> ../tasks
     handlers   -> ../handlers     inventory -> ../inventory
 
@@ -437,7 +437,7 @@ evaluating it templates the values. Every suite imports preflight first.
 ## What the checks cover, and what they don't
 
 ```bash
-make check         # syntax, inventories, structure, five offline suites, lint
+make check         # syntax, inventories, structure, six offline suites, lint
 make docker-test   # the real thing, against six containers
 make docker-demo   # the same, building real Magento from GitHub
 make docker-down   # afterwards
@@ -450,7 +450,7 @@ make docker-down   # afterwards
 | `--syntax-check` × 3 | A bad include path, a malformed task, a bad play key |
 | Inventories × 4 | A hosts file where `builder`/`apps`/`admin`/`cron`/`varnish`/`web` don't all resolve. A deploy against a broken one reports "no hosts matched" and exits **0** |
 | `bin/check-structure` | A reintroduced `roles:`; a `notify` with no handler; an include path that only resolves at run time; **a parent-path reference**; **a stray `lookup('env', ...)`** |
-| `test.yml` | 93 tasks across five suites: the variable contract and the precedence guard, the disk pre-flight, the `bundler_steps` table, the build lock, the prune against a real temporary filesystem, and the replaced release's maintenance flag against another |
+| `test.yml` | 112 tasks across six suites: the variable contract and the precedence guard, the disk pre-flight, the `bundler_steps` table, the build lock, the prune against a real temporary filesystem, the replaced release's maintenance flag against another, and which status exit codes open a maintenance window or stop the cutover |
 | yamllint / ansible-lint | Formatting. A broken tool reads as **SKIP**, never as a failure |
 
 Every structural check has been negative-tested -- a deliberate fault introduced
@@ -511,8 +511,13 @@ how people find out the hard way:
   playbook still carries `var/.maintenance.flag`: run
   `php bin/magento maint:disable` in it after repointing. There is no
   `make rollback` that does it for you.
-- **No zero-downtime guarantee.** Maintenance mode goes on before the Magento
-  deploy and off after it. How long that is depends on your catalogue.
+- **No zero-downtime guarantee.** A release whose `setup:db:status` or
+  `app:config:status` reports work to do takes a maintenance window, turned on in
+  the incoming release before the flip and off after `setup:upgrade`. How long
+  that is depends on your catalogue. A release with nothing to do takes no
+  window, but every web host still flips at once: nginx and php-fpm are
+  reloaded, not restarted, so requests in flight finish, and Varnish drops
+  Magento's pages with a ban rather than a restart.
 - **No secrets management.** Ansible Vault and a password file, which is the
   floor rather than the ceiling.
 - **No CI integration shipped.** It's a playbook; call it from whatever you

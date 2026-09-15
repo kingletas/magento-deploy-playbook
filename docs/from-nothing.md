@@ -53,7 +53,7 @@ make check
 This is everything that can be verified without contacting a host, and it takes
 a few seconds. It runs a syntax check over all three playbooks, parses every
 inventory and asserts the host groups resolve, runs five structural checks over
-the repository itself, runs five offline test suites (around 93 tasks), and
+the repository itself, runs six offline test suites (around 112 tasks), and
 lints.
 
 You should see it finish without a failure. A `SKIP` next to yamllint or
@@ -81,11 +81,13 @@ playbook runs against them, exactly as it would against real servers:
 3. **Build.** Clones the repo, checks out the branch, generates a changelog,
    compiles and deploys static content, bundles the JavaScript, tars the result.
 4. **Upload.** rsyncs the tarball to every web host.
-5. **Maintenance mode**, then extract, link the shared directories, copy the
-   custom payloads.
-6. **Deploy.** Runs the Magento deploy steps, flips the `current` symlink.
+5. **Extract**, link the shared directories, copy the custom payloads.
+6. **Deploy.** Asks the new release whether it has database or config work,
+   turns maintenance on in it if so, flips the `current` symlink, reloads the
+   web services, runs `setup:upgrade` when needed, bans Magento's pages in
+   Varnish, turns maintenance off and fires the warm-up ping.
 7. **Prune.** Removes old releases and archives, keeping the live one.
-8. **Unlock**, and a warm-up ping.
+8. **Unlock.**
 
 Nothing is stubbed at the Ansible layer. Every assert, every `run_once`, every
 `delegate_to` and every handler runs for real. What is faked is inside the

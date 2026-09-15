@@ -1,15 +1,23 @@
 #!/bin/bash
 # Stands in for `php bin/magento`. Logs the subcommand and succeeds.
 #
-# `setup:db:status` and `app:config:status` are the two whose OUTPUT the
-# playbook branches on: tasks/magento-deploy/main.yml only runs setup:upgrade if
-# one of them reports work to do. Both report "up to date" here, so the default
-# path is the no-upgrade path. Set MAGENTO_FAKE_NEEDS_UPGRADE=1 in the
-# container to exercise the other branch.
+# `setup:db:status` and `app:config:status` are the two whose EXIT CODE the
+# playbook branches on: 0 is up to date and 2 is work to do, as in Magento. Both
+# report up to date here, so the default path is the no-upgrade path. Touch
+# /tmp/magento-fake-needs-upgrade in the container to exercise the other branch;
+# `bin/docker-suite test` does that for its last deploy.
 #
 # `maint:enable` and `maint:disable` write and remove var/.maintenance.flag in
-# the release they run in, as Magento does.
-echo "[fake-magento] $*" >> /tmp/build-log 2>/dev/null || true
+# the release they run in, as Magento does, and log that directory.
+needs_upgrade() { [ -e /tmp/magento-fake-needs-upgrade ]; }
+
+case "$1" in
+  maint:enable|maint:disable)
+    echo "[fake-magento] $* in ${PWD}" >> /tmp/build-log 2>/dev/null || true ;;
+  *)
+    echo "[fake-magento] $*" >> /tmp/build-log 2>/dev/null || true ;;
+esac
+
 case "$1" in
   maint:enable)
     mkdir -p var && touch var/.maintenance.flag
@@ -20,18 +28,18 @@ case "$1" in
     echo "Disabled maintenance mode"
     ;;
   setup:db:status)
-    if [ "${MAGENTO_FAKE_NEEDS_UPGRADE:-0}" = "1" ]; then
-      echo "Declarative Schema is not up to date"
-    else
-      echo "All modules are up to date."
+    if needs_upgrade; then
+      echo "Run 'setup:upgrade' to update your DB schema and data."
+      exit 2
     fi
+    echo "All modules are up to date."
     ;;
   app:config:status)
-    if [ "${MAGENTO_FAKE_NEEDS_UPGRADE:-0}" = "1" ]; then
-      echo "Config files have changed"
-    else
-      echo "Config files are up to date."
+    if needs_upgrade; then
+      echo "Config files have changed. Run app:config:import or setup:upgrade command to synchronize configuration."
+      exit 2
     fi
+    echo "Config files are up to date."
     ;;
   *) echo "ok: $*" ;;
 esac

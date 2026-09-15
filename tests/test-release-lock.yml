@@ -72,19 +72,3 @@
         fail_msg: >-
           release.yml left {{ expected_lock }} behind. Every later deploy for
           this environment would refuse to start.
-
-    # release.yml notifies "Ping Filters URL". If that handler is ever renamed
-    # or dropped from handlers/main.yml, Ansible fails at RUNTIME, not at
-    # syntax-check -- so prove the name still resolves.
-    - name: The notify target still exists
-      vars:
-        handlers_source: "{{ lookup('file', 'handlers/main.yml') }}"
-      ansible.builtin.assert:
-        that:
-          - "handlers_source is search('name: Ping Filters URL')"
-        fail_msg: >-
-          release.yml notifies 'Ping Filters URL' but no such handler is defined
-          in handlers/main.yml.
-  handlers:
-    - name: Playbook handlers
-      ansible.builtin.import_tasks: handlers/main.yml

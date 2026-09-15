@@ -2,12 +2,20 @@
 ###
 # Put Magento onto the extracted release and cut over to it.
 #
-# Two things hold throughout. No `changed_when` on these commands, deliberately:
-# they report changed every run, and that is what fires the handlers. And
-# `run_once` is load-bearing on every delegated task -- without it
+# Two things hold throughout. No `changed_when` on commands that change the
+# store, deliberately: they report changed every run, and that is what fires the
+# handlers. And `run_once` is load-bearing on every delegated task -- without it
 # `delegate_to: item` with `loop: groups.admin` runs once per WEB host, so a
 # five-host fleet fires the same command five times at one admin.
+#
+# `var` is per release, so a maintenance flag only covers the release it was
+# written in. Maintenance goes on in the incoming release, before the flip, and
+# only when the release has database or config work to do.
 ###
+
+- name: Name the incoming release
+  ansible.builtin.set_fact:
+    incoming_release: "{{ releases.path }}{{ release_id }}"
 
 # Read before the flip: afterwards `current` resolves to the new release.
 - name: Record which release is live before the cutover
@@ -16,61 +24,88 @@
     follow: false
   register: outgoing_link
 
-- name: Reset the current symlink
-  ansible.builtin.file:
-    src: '{{ releases.path }}{{ release_id }}'
-    path: '{{ releases.current }}'
-    state: link
-    force: true
-  become: true
-  when: releases.complete | bool
-  notify:
-    - Restart PHP
-    - Restart nginx
-    - Stop lingering PHP processes
-
-- name: Restart the web services
-  ansible.builtin.service:
-    name: '{{ item }}'
-    state: restarted
-  become: true
-  loop:
-    - '{{ php_service }}'
-    - nginx
-
-# After the restart, so no worker is still serving the outgoing release, and
-# before setup:upgrade, so a deploy that fails from here on leaves a release to
-# roll back to that is not in maintenance.
-- name: Take the replaced release out of maintenance mode
-  ansible.builtin.include_tasks: tasks/release-outgoing-maintenance.yml
-  vars:
-    outgoing_release: "{{ outgoing_link.stat.lnk_source | default('') if outgoing_link.stat.islnk | default(false) else '' }}"
-
 # `var` is not in the archive, so Magento creates var/log on this call, owned by
 # whoever runs it. Every later step runs as system.user and must be able to write.
 - name: Check for setup upgrade, the first bin/magento call on the release
   ansible.builtin.command: "php bin/magento setup:db:status"
   args:
-    chdir: '{{ releases.current }}'
+    chdir: '{{ incoming_release }}'
   become: true
   become_user: '{{ system.user }}'    # not root; see above
   run_once: true
   delegate_to: "{{ item }}"
   loop: "{{ groups.admin }}"
   register: db_config
+  changed_when: false
   failed_when: false
 
 - name: "Check for app config status"
   ansible.builtin.command: "php bin/magento app:config:status"
   args:
-    chdir: '{{ releases.current }}'
+    chdir: '{{ incoming_release }}'
   become_user: '{{ system.user }}'
   become: true
   run_once: true
-  failed_when: false
   delegate_to: "{{ item }}"
   loop: "{{ groups.admin }}"
   register: app_config
+  changed_when: false
+  failed_when: false
+
+- name: Decide whether this release needs a maintenance window
+  ansible.builtin.import_tasks: tasks/magento-deploy/upgrade-gate.yml
+
+- name: "DORA: record the cutover start"
+  ansible.builtin.include_tasks: tasks/dora-event.yml
+  vars:
+    dora_phase: cutover.started
+    dora_extra:
+      maintenance: "{{ upgrade_needed | bool }}"
+
+- name: Enable maintenance mode in the incoming release
+  ansible.builtin.command: "php bin/magento maint:enable"
+  args:
+    chdir: '{{ incoming_release }}'
+  become: true
+  become_user: '{{ system.user }}'
+  when: upgrade_needed | bool
+  notify: Open the PagerDuty maintenance window
+
+- name: "DORA: record maintenance mode on"
+  ansible.builtin.include_tasks: tasks/dora-event.yml
+  vars:
+    dora_phase: maintenance.enabled
+  when: upgrade_needed | bool
+
+- name: Reset the current symlink
+  ansible.builtin.file:
+    src: '{{ incoming_release }}'
+    path: '{{ releases.current }}'
+    state: link
+    force: true
+  become: true
+  when: releases.complete | bool
+  notify:
+    - Stop lingering PHP processes
+
+# A php-fpm worker keeps the path it resolved `current` to, so the flip takes
+# effect only after this. A reload lets in-flight requests finish.
+- name: Reload the web services, so they serve the new release
+  ansible.builtin.service:
+    name: '{{ item }}'
+    state: reloaded
+  become: true
+  loop:
+    - '{{ php_service }}'
+    - nginx
+
+# After the reload, so no worker is still serving the outgoing release, and
+# before setup:upgrade, so a deploy that fails from here on leaves a release to
+# roll back to that is not in maintenance.
+- name: Take the replaced release out of maintenance mode
+  ansible.builtin.include_tasks: tasks/release-outgoing-maintenance.yml
+  vars:
+    outgoing_release: "{{ outgoing_link.stat.lnk_source | default('') if outgoing_link.stat.islnk | default(false) else '' }}"
 
 - name: Flush magento cache
   ansible.builtin.command: "php bin/magento cache:flush"
@@ -91,18 +126,9 @@
   run_once: true
   delegate_to: "{{ item }}"
   loop: "{{ groups.admin }}"
-  # Both registers are LOOPED, so each is a dict with a .results list. Never
-  # `"text" in db_config`: that tests the dict's KEYS, is permanently false, and
-  # silently stops the gate. `| first | default({})` because an empty admin
-  # group leaves results absent and a bare [0] raises mid-maintenance.
-  when: >-
-    ((db_config.results | default([]) | first | default({})).stdout | default(''))
-      is search('Declarative Schema is not up to date')
-    or
-    ((app_config.results | default([]) | first | default({})).stdout | default(''))
-      is search('Config files have changed')
+  when: upgrade_needed | bool
 
-- name: Flush and enforce cache... disable maintenance mode
+- name: Flush and enforce cache
   ansible.builtin.command: "php bin/magento {{ item }}"
   args:
     chdir: '{{ releases.current }}'
@@ -111,17 +137,34 @@
   loop:
     - "cache:flush"
     - "cache:enable"
-    - "maint:disable"
-  # PHP caches the symlink-resolved path, so a worker that resolved it before
-  # the cutover still serves the previous release. This handler runs at the end
-  # of the play, after maintenance is lifted.
   notify:
-    - Restart PHP
     # - Flush the Yottaa edge cache    # a lower environment is not behind it
     - Notify Slack
     - Create the New Relic deployment marker
     - Post the Noibu release webhook
     - Report which notifications landed
+
+# The ban Magento's own full-page purge sends. Only its pages go: static files
+# move to new versioned URLs and media is shared, so both stay cached.
+- name: Invalidate Magento's pages in Varnish
+  ansible.builtin.command:
+    argv: [varnishadm, ban, obj.http.X-Magento-Tags, "~", "."]
+    # Otherwise `~` expands to the become user's home directory.
+    expand_argument_vars: false
+  become: true
+  run_once: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups.varnish }}"
+  when: releases.complete | bool
+
+# Unconditional: it also clears a flag a failed attempt left in this release.
+- name: Disable maintenance mode
+  ansible.builtin.command: "php bin/magento maint:disable"
+  args:
+    chdir: '{{ releases.current }}'
+  become_user: '{{ system.user }}'
+  become: true
+  notify: Warm the caches
 
 - name: Reset the indexers, which killing PHP leaves marked running
   ansible.builtin.command: "php bin/magento ind:reset"

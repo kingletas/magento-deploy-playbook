@@ -30,7 +30,7 @@ This is the important table. The suite tests **orchestration**, not Magento.
 |---|---|
 | SSH to every host, as `ubuntu`, with `become` | `php` -- dispatches to the composer or Magento fake |
 | **The builder-to-web rsync push** (`synchronize`, `delegate_to: builder`) | `composer` -- answers the module's `--format=json` option probe, then creates the directories a real install leaves |
-| `git clone` / `reset` / `fetch` / `checkout` from a real bare repo | `bin/magento` -- logs the subcommand; `setup:db:status` and `app:config:status` report "up to date"; `maint:enable` and `maint:disable` write and remove `var/.maintenance.flag` |
+| `git clone` / `reset` / `fetch` / `checkout` from a real bare repo | `bin/magento` -- logs the subcommand; `setup:db:status` and `app:config:status` exit 0, or 2 when `/tmp/magento-fake-needs-upgrade` exists; `maint:enable` and `maint:disable` write and remove `var/.maintenance.flag` |
 | Real tar and untar, real file ownership and modes | `manipulus` -- logs the invocation; `docker run`, for the magepack path |
 | The `current` symlink flip, and the shared symlinks into an EFS-shaped path | `service` -- sysv shims in `/etc/init.d/` because there's no init system |
 | Every assert, gate, `run_once`, `delegate_to` and handler in the playbook | PagerDuty / New Relic / Noibu / Slack -- off via `notify_via_*` |
@@ -53,7 +53,7 @@ builder   ── clones, builds, tars, and rsyncs to the fleet
 web1 web2 ── [apps]
 admin     ── [admin]   the delegate target for every Magento CLI step
 cron      ── [cron]
-varnish   ── restarted by its own play
+varnish   ── receives the page ban (`varnishadm` is a fake)
           └─ apps + admin + cron are [web:children]
 ```
 

@@ -15,6 +15,29 @@ changed, because there's nothing before it.
   symlink at one served the maintenance page. The deploy now removes the flag
   from the release it replaced. Releases replaced before this still carry it;
   run `php bin/magento maint:disable` in one before rolling back to it.
+- `setup:upgrade` now runs behind the maintenance page. The page was turned on
+  in the release being replaced, and `var` is not shared, so once the symlink
+  flipped the new release served customers with no flag while the upgrade ran.
+  Maintenance now goes on in the incoming release, before the flip.
+- A status command that fails no longer counts as "nothing to do". If
+  `setup:db:status` or `app:config:status` exits anything but 0 or 2, the deploy
+  stops before the symlink flips.
+
+### Changed
+
+- A release with no database or config work takes no maintenance window. The
+  deploy asks the incoming release first and turns maintenance on only when
+  either status command exits 2.
+- nginx and php-fpm are reloaded after the flip instead of restarted, twice, so
+  requests in flight finish. Nothing restarts them after maintenance is off.
+- Varnish is no longer restarted. The deploy bans Magento's pages with
+  `varnishadm ban obj.http.X-Magento-Tags ~ .`, the same ban Magento's own
+  purge sends, so static files and media stay cached. The varnish host needs
+  `varnishadm` and the playbook's become user needs to be able to run it.
+- The warm-up ping fires when maintenance comes off, before the prune and the
+  lock release, rather than as the very last step.
+- Two new deployment events: `cutover.started` before anything changes, with
+  whether this release takes a window, and `maintenance.enabled` when it does.
 
 ### Added
 

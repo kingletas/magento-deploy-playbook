@@ -32,6 +32,7 @@ RUN mkdir -p /var/www/html/releases /var/www/html/archives /var/www/html/shared 
 COPY fakes/ /usr/local/bin/
 RUN chmod +x /usr/local/bin/composer /usr/local/bin/magento-fake \
              /usr/local/bin/docker /usr/local/bin/php /usr/local/bin/manipulus \
+             /usr/local/bin/varnishadm \
     # The service module has no systemd to talk to in a container, so it falls
     # back to sysv and shells out to /etc/init.d/<name>. Install the shims there
     # and drop them from PATH.

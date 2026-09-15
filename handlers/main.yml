@@ -94,7 +94,9 @@
   run_once: true
   become: false
 
-- name: Ping Filters URL
+# Notified by maint:disable, so it runs when the Magento play ends, before the
+# prune and the lock release rather than after them.
+- name: Warm the caches
   ansible.builtin.uri:
     url: "{{ item }}"
     method: GET
@@ -122,26 +124,8 @@
   delegate_to: "{{ builder }}"
   run_once: true
 
-# These loop over `groups.apps + groups.admin`, so every inventory must define
+# This loops over `groups.cron + groups.admin`, so every inventory must define
 # them. `make check` parses each one and asserts they resolve.
-
-- name: Restart PHP
-  ansible.builtin.service:
-    name: '{{ php_service }}'
-    state: restarted
-  become: true
-  delegate_to: "{{ item }}"
-  run_once: true
-  loop: "{{ groups.apps + groups.admin }}"
-
-- name: Restart nginx
-  ansible.builtin.service:
-    name: nginx
-    state: restarted
-  become: true
-  run_once: true
-  delegate_to: "{{ item }}"
-  loop: "{{ groups.apps + groups.admin }}"
 
 # pkill exits 1 when it matched nothing, which is the ordinary case.
 - name: Stop lingering PHP processes

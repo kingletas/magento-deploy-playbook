@@ -186,6 +186,76 @@
           {{ maintenance_flags.results | selectattr('stat.exists')
              | map(attribute='item.path') | map('basename') | list }}
 
+    - name: Read this host's fake-tool call log
+      ansible.builtin.slurp:
+        src: /tmp/build-log
+      register: host_log_raw
+
+    - name: Split the log into lines
+      ansible.builtin.set_fact:
+        host_log: "{{ (host_log_raw.content | b64decode).split('\n') }}"
+
+    - name: The web services were reloaded, never restarted
+      ansible.builtin.assert:
+        that:
+          - host_log | select('search', '\[fake-service\] ' ~ php_service ~ ' reload$') | list | length >= 1
+          - host_log | select('search', '\[fake-service\] nginx reload$') | list | length >= 1
+          - host_log | select('search', '\[fake-service\] .* restart$') | list | length == 0
+        fail_msg: >-
+          {{ inventory_hostname }} did not reload {{ php_service }} and nginx, or
+          restarted something. A restart drops the requests in flight. Log was:
+          {{ host_log | select('search', 'fake-service') | list }}
+
+    # Maintenance goes on only for a release with work to do, and in that
+    # release: a flag written in the outgoing one never covers the upgrade.
+    - name: No maintenance window for a release with nothing to do
+      ansible.builtin.assert:
+        that:
+          - host_log | select('search', '\[fake-magento\] maint:enable') | list | length == 0
+        fail_msg: >-
+          maint:enable ran on {{ inventory_hostname }} although both status
+          commands reported up to date.
+      when: not (expect_upgrade | default(false) | bool)
+
+    - name: Maintenance went on in the incoming release, before the reload
+      vars:
+        enables: "{{ host_log | select('search', '\\[fake-magento\\] maint:enable') | list }}"
+        first_enable_line: "{{ enables | first | default('') }}"
+        first_reload_line: "{{ host_log | select('search', ' reload$') | first | default('') }}"
+      ansible.builtin.assert:
+        that:
+          - enables | length == 1
+          - enables[0] is search(' in ' ~ current_link.stat.lnk_source ~ '$')
+          - first_reload_line | length > 0
+          - host_log.index(first_enable_line) < host_log.index(first_reload_line)
+        fail_msg: >-
+          On {{ inventory_hostname }} maint:enable must run once, in the release
+          now live ({{ current_link.stat.lnk_source }}), before the services reload
+          onto it.
+          It ran as {{ enables }}.
+      when: expect_upgrade | default(false) | bool
+
+- name: Verify Varnish was invalidated, not restarted
+  hosts: varnish
+  gather_facts: false
+  tasks:
+    - name: Read the varnish host's call log
+      ansible.builtin.slurp:
+        src: /tmp/build-log
+      register: varnish_log_raw
+
+    - name: One ban on Magento's pages, and no restart
+      vars:
+        varnish_log: "{{ (varnish_log_raw.content | b64decode).split('\n') }}"
+      ansible.builtin.assert:
+        that:
+          - varnish_log | select('search', '\[fake-varnishadm\] ban obj\.http\.X-Magento-Tags ~ \.$') | list | length == 1
+          - varnish_log | select('search', '\[fake-service\] varnish') | list | length == 0
+        fail_msg: >-
+          Expected exactly one `ban obj.http.X-Magento-Tags ~ .` and no service
+          call on {{ inventory_hostname }}. A restart empties static files and
+          media as well as pages. Log was: {{ varnish_log }}
+
 - name: Verify the admin-only steps ran once, not once per web host
   hosts: admin
   gather_facts: false
@@ -221,16 +291,35 @@
           The setup:upgrade gate did not run its status checks, so it cannot
           have decided correctly whether an upgrade was needed.
 
-    # The fakes report "up to date", so the gate must NOT have run an upgrade.
-    # Set MAGENTO_FAKE_NEEDS_UPGRADE=1 in the containers to test the other side.
-    - name: Setup upgrade was correctly skipped
+    # The fakes report up to date unless /tmp/magento-fake-needs-upgrade exists,
+    # and `bin/docker-suite test` passes expect_upgrade=true when it does.
+    - name: Setup upgrade ran exactly when the gate said so
+      vars:
+        upgrades: "{{ admin_log.split('\n') | select('search', '\\[fake-magento\\] setup:upgrade') | list | length }}"
       ansible.builtin.assert:
         that:
-          - not (admin_log is search('setup:upgrade'))
+          - (upgrades | int) == (1 if expect_upgrade | default(false) | bool else 0)
         fail_msg: >-
-          setup:upgrade ran even though both status commands reported up to
-          date. That is the block/rescue firing when it should not, or the gate
-          misreading the looped register.
+          setup:upgrade ran {{ upgrades }} times with
+          expect_upgrade={{ expect_upgrade | default(false) }}. Once when the
+          status commands exit 2, never when they exit 0.
+
+    - name: The upgrade ran inside the maintenance window
+      vars:
+        lines: "{{ admin_log.split('\n') }}"
+        enable_line: "{{ lines | select('search', '\\[fake-magento\\] maint:enable') | first | default('') }}"
+        upgrade_line: "{{ lines | select('search', '\\[fake-magento\\] setup:upgrade') | first | default('') }}"
+        disable_line: "{{ lines | select('search', '\\[fake-magento\\] maint:disable') | last | default('') }}"
+      ansible.builtin.assert:
+        that:
+          - enable_line | length > 0
+          - upgrade_line | length > 0
+          - disable_line | length > 0
+          - lines.index(enable_line) < lines.index(upgrade_line) < lines.index(disable_line)
+        fail_msg: >-
+          On {{ inventory_hostname }} the order must be maint:enable, then
+          setup:upgrade, then maint:disable. Log was: {{ lines }}
+      when: expect_upgrade | default(false) | bool
 
 - name: Verify the lock was released
   hosts: builder

@@ -68,7 +68,7 @@
           commit_count: "{{ built_commit_count.stdout | default('') | trim }}"
           builder: "{{ inventory_hostname }}"
 
-- name: Upload the archive and take the site down
+- name: Upload the archive and unpack the release
   hosts: web
   become: true
   gather_facts: false
@@ -85,31 +85,6 @@
     - name: Unarchive the release on the host
       ansible.builtin.import_tasks: tasks/deploy/unarchive.yml
       when: releases.unarchive
-
-    - name: Ensure there is a magento bin directory
-      ansible.builtin.stat:
-        path: "{{ releases.current }}/bin/magento"
-      register: magento_bin_path_validation
-
-    - name: Enable Magento's maintenance mode
-      ansible.builtin.command: "php bin/magento maint:enable"
-      args:
-        chdir: "{{ releases.current }}"
-      become: true
-      become_user: "{{ system.user }}"
-      changed_when: true
-      when: magento_bin_path_validation.stat.exists
-      notify: Open the PagerDuty maintenance window
-
-- name: Clear Varnish, so it stops serving the release being replaced
-  hosts: "varnish"
-  become: true
-  gather_facts: false
-  tasks:
-    - name: Restart Varnish
-      ansible.builtin.service:
-        name: varnish
-        state: restarted
 
 - name: Deploy Magento to the web hosts (includes admin & cron)
   hosts: "web"

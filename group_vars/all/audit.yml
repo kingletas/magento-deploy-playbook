@@ -1,0 +1,12 @@
+---
+###
+# Where the audit tool lives. The per-environment audit settings are in
+# inventory/<env>/group_vars/all.yml; this is the playbook's own path to its
+# tool, which does not vary by environment.
+#
+# The offline suites run from tests/, one level below the tool, hence the second
+# path rather than a copy of this variable in every suite.
+###
+audit_tool: >-
+  {{ (playbook_dir ~ '/bin/audit-log') if (playbook_dir ~ '/bin/audit-log') is exists
+     else (playbook_dir | dirname) ~ '/bin/audit-log' }}

@@ -20,6 +20,20 @@
     - name: Take the build lock
       ansible.builtin.import_tasks: tasks/release-lock/acquire.yml
 
+    - name: Check every varnish host can be invalidated
+      ansible.builtin.import_tasks: tasks/controls/varnish-ready.yml
+
+  tasks:
+    - name: "Audit: record the deploy request"
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: deploy.started
+        audit_detail:
+          branch: "{{ branch_name }}"
+          reused_release: "{{ use_existing_release | bool }}"
+          goes_live: "{{ deployment_complete | bool }}"
+          playbook_commit: "{{ lookup('pipe', 'git -C ' ~ (playbook_dir | quote) ~ ' rev-parse HEAD 2>/dev/null || true') }}"
+
 - name: "Building the release"
   hosts: builder
   vars:
@@ -30,6 +44,9 @@
   pre_tasks:
     - name: Sync the repository checkout
       ansible.builtin.import_tasks: tasks/packaging/git.yml
+
+    - name: Refuse a commit nobody approved
+      ansible.builtin.import_tasks: tasks/approval/verify.yml
 
     - name: Build the release
       ansible.builtin.import_tasks: tasks/packaging/deploy.yml
@@ -66,6 +83,15 @@
         dora_extra:
           commit_to: "{{ built_commit.stdout | default('') | trim }}"
           commit_count: "{{ built_commit_count.stdout | default('') | trim }}"
+          builder: "{{ inventory_hostname }}"
+
+    - name: "Audit: record the build"
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: build.succeeded
+        audit_detail:
+          commit: "{{ built_commit.stdout | default('') | trim }}"
+          artefact_sha256: "{{ release_sha256 }}"
           builder: "{{ inventory_hostname }}"
 
 - name: Upload the archive and unpack the release
@@ -106,6 +132,15 @@
         dora_extra:
           outcome: success
 
+    - name: "Audit: record the cutover"
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: cutover.succeeded
+        audit_detail:
+          maintenance_window: "{{ upgrade_needed | bool }}"
+          setup_upgrade_ran: "{{ upgrade_needed | bool }}"
+          backup_id: "{{ backup_id | default('') }}"
+
 - name: Clean old releases on the web hosts and the builder
   hosts: "web builder"
   become: true
@@ -121,6 +156,13 @@
 
     - name: Drop the build lock
       ansible.builtin.import_tasks: tasks/release-lock/release.yml
+
+    - name: "Audit: record the finished deploy"
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: deploy.finished
+        audit_detail:
+          outcome: success
 
   handlers:
     - name: Playbook handlers

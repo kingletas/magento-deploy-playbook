@@ -1,0 +1,27 @@
+---
+###
+# The cutover bans Magento's pages on every varnish host. A host without
+# varnishadm fails that task AFTER the release is live, so it is found first.
+###
+# `command -v` is a shell builtin, hence sh -c rather than the bare binary.
+- name: Check every varnish host has varnishadm
+  ansible.builtin.command:
+    argv: [sh, -c, command -v varnishadm]
+  register: varnishadm_present
+  changed_when: false
+  failed_when: false
+  delegate_to: "{{ item }}"
+  loop: "{{ groups.varnish | default([]) }}"
+  run_once: true
+
+- name: Refuse a varnish host with no varnishadm
+  ansible.builtin.assert:
+    that:
+      - varnishadm_present.results | rejectattr('rc', 'equalto', 0) | list | length == 0
+    fail_msg: >-
+      varnishadm is missing on
+      {{ varnishadm_present.results | rejectattr('rc', 'equalto', 0) | map(attribute='item') | join(', ') }}.
+      The cutover bans Magento's pages there, and without it the deploy would
+      fail after the release is already live. Install the Varnish CLI on that
+      host, or point the varnish group at the host that runs Varnish.
+  run_once: true

@@ -338,3 +338,32 @@
           /tmp/{{ suffix | lower }}.lock survived the run. Every later deploy
           for this environment would refuse to start until `make unlock`.
         success_msg: "Lock released. Deploy verified end to end."
+
+# Only reached when every assertion above passed.
+- name: Record that the deploy verified
+  hosts: web
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Read which release is live
+      ansible.builtin.stat:
+        path: "{{ releases.current }}"
+        follow: false
+      register: verified_link
+      run_once: true
+
+    - name: Name the verified release
+      ansible.builtin.set_fact:
+        release_id: "{{ verified_link.stat.lnk_source | basename }}"
+      run_once: true
+
+    - name: Resolve who ran the verification
+      ansible.builtin.import_tasks: tasks/audit/actor.yml
+
+    - name: "Audit: record the verification"
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: deploy.verified
+        audit_detail:
+          outcome: passed
+          upgrade_expected: "{{ expect_upgrade | default(false) | bool }}"

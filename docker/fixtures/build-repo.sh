@@ -20,6 +20,16 @@ git -c user.email=suite@local -c user.name=Suite commit -q -m "fixture: initial 
 # changelog step in git.yml builds one.
 printf 'fixture change\n' >> pub/index.php
 git -c user.email=suite@local -c user.name=Suite commit -q -am "fixture: a second commit"
+# The deploy refuses a commit without an approval: a tag signed by a key in
+# docker/keys/allowed_signers, by someone other than the deployer.
+KEY="${HERE}/../keys/approver"
+if [ -f "${KEY}" ]; then
+    git -c gpg.format=ssh -c user.signingkey="${KEY}" \
+        -c user.email=approver@example.invalid -c user.name=approver \
+        tag -s -m "approved for the suite" "approved/${BRANCH}"
+else
+    echo "WARNING: ${KEY} is missing, so the fixture carries no approval tag." >&2
+fi
 git clone -q --bare . "${BARE}"
 cd "${HERE}" && rm -rf "${WORK}"
 echo "bare repo: ${BARE} (branch ${BRANCH})"

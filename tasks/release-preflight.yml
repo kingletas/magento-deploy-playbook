@@ -50,6 +50,9 @@
 - name: Check the warm-up settings
   ansible.builtin.import_tasks: warmup/validate.yml
 
+- name: Check the audit, approval and backup settings
+  ansible.builtin.import_tasks: controls/validate.yml
+
 - name: Set the builder
   ansible.builtin.set_fact:
     builder: "{{ groups.builder[0] }}"

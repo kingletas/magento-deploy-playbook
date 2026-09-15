@@ -21,6 +21,12 @@
       {{ inventory_hostname }}. Either the upload stage was skipped
       (releases.upload is {{ releases.upload }}) or it did not reach this host.
 
+- name: Check the archive is the one the builder made
+  ansible.builtin.import_tasks: tasks/deploy/verify-archive.yml
+  vars:
+    archive_path: "{{ releases.archive }}{{ release_id }}.tgz"
+    digest_path: "{{ releases.archive }}{{ release_id }}.tgz.sha256"
+
 # So {{ system.user }} owns the archive before it is extracted.
 - name: Update the package permissions
   ansible.builtin.file:

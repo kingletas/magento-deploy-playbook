@@ -94,3 +94,12 @@
           {% if warmup_verdict.failures | length %}Not 2xx, first 20:
           {% for failure in warmup_verdict.failures[:20] %}{{ failure.url }} -> {{ failure.status }}{{ '' if loop.last else ', ' }}{% endfor %}{% endif %}
       run_once: true
+
+    - name: "Audit: record the warm-up"
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: warmup.completed
+        audit_detail:
+          requested: "{{ warmup_verdict.requested | int }}"
+          ok: "{{ warmup_verdict.ok | int }}"
+          percent: "{{ warmup_verdict.percent }}"

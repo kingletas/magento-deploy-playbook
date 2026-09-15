@@ -1,0 +1,23 @@
+---
+###
+# One failing backup for tests/test-controls.yml: `bad.command` must stop the
+# deploy with the backup's own message.
+###
+- name: "Refuse {{ bad.label }}"
+  block:
+    - name: "Back up with {{ bad.label }}"
+      ansible.builtin.include_tasks: tasks/backup/run.yml
+      vars:
+        releases: {complete: true}
+        upgrade_needed: true
+        backup: {run: always, command: "{{ bad.command }}", timeout: 30}
+
+    - name: "Should not reach here with {{ bad.label }}"
+      ansible.builtin.fail:
+        msg: "run.yml carried on after {{ bad.label }}."
+  rescue:
+    - name: "Confirm the backup stopped the deploy for {{ bad.label }}"
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.msg is search('backup did not complete')
+        fail_msg: "Failed, but not as a backup failure: {{ ansible_failed_result.msg | default('(none)') }}"

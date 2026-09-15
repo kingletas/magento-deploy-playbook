@@ -58,6 +58,36 @@ warmup:
   timeout: 30
   fail_below: 0
 
+# audit - the append-only, hash-chained log of every deploy, on the control node.
+#   path      where the log lives. Keep it; `make audit-verify` checks it
+#   forward   a command and arguments that receive each record on stdin, such as
+#             "logger -t magento-deploy". Send it somewhere nobody here can
+#             rewrite: the local chain shows tampering, it cannot prevent it
+#   required  stop the deploy when a record cannot be written or forwarded
+audit:
+  path: ~/.local/state/magento-deploy-playbook/example.audit.jsonl
+  forward: ""
+  required: true
+
+# approval - build only a commit someone other than the deployer approved: a tag
+# matching tag_pattern on the commit, signed with an SSH key in allowed_signers
+# (OpenSSH allowed_signers format, a path on the control node).
+approval:
+  required: true
+  allowed_signers: /etc/magento-deploy/allowed_signers
+  tag_pattern: "approved/*"
+
+# backup - a command run on the first admin host before maintenance goes on and
+# the symlink flips. Its last line of output is recorded as the backup id.
+#   run      never, window (only when the release takes a maintenance window)
+#            or always
+#   command  runs with bash; it must print the snapshot or dump name last
+#   timeout  seconds before the backup counts as failed
+backup:
+  run: window
+  command: /usr/local/bin/snapshot-magento-database
+  timeout: 3600
+
 # kill_php - kill lingering PHP workers on cron and admin before the cutover.
 kill_php: false
 

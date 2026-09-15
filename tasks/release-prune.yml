@@ -129,11 +129,12 @@
       }}
   when: archives_dir_exists
 
+# Each archive's .sha256 goes with it, so digests do not outlive their archives.
 - name: Remove old archives
   ansible.builtin.file:
     path: "{{ releases.archive }}/{{ item }}"
     state: absent
-  loop: "{{ archives_to_remove | default([]) }}"
+  loop: "{{ archives_to_remove | default([]) | product(['', '.sha256']) | map('join') | list }}"
   loop_control:
     label: "{{ item }}"
   when: archives_dir_exists

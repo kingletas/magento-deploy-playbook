@@ -1,0 +1,33 @@
+---
+###
+# Appends one event to the audit log on the control node, chained to the record
+# before it, and forwards it when audit.forward is set.
+#
+#   audit_event    the event name, e.g. deploy.started.
+#   audit_detail   optional fields for this event.
+#
+# With audit.required on, a record that cannot be written stops the play.
+###
+- name: "Audit: record {{ audit_event }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ audit_tool }}"
+      - append
+      - --path
+      - "{{ audit.path }}"
+      - --forward
+      - "{{ audit.forward }}"
+    stdin: >-
+      {{ {'event': audit_event,
+          'env_name': env_name,
+          'release': release_id | default(''),
+          'actor': deployer_actor | default({})}
+         | combine(audit_detail | default({}))
+         | to_json }}
+    expand_argument_vars: false
+  register: audit_append
+  delegate_to: localhost
+  run_once: true
+  become: false
+  changed_when: true
+  failed_when: audit_append.rc != 0 and (audit.required | bool)

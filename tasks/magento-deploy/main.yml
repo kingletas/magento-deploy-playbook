@@ -62,6 +62,17 @@
     dora_extra:
       maintenance: "{{ upgrade_needed | bool }}"
 
+- name: "Audit: record the cutover start"
+  ansible.builtin.include_tasks: tasks/audit/record.yml
+  vars:
+    audit_event: cutover.started
+    audit_detail:
+      maintenance_window: "{{ upgrade_needed | bool }}"
+      artefact_sha256: "{{ release_sha256 | default('') }}"
+
+- name: Back up when this release requires it
+  ansible.builtin.import_tasks: tasks/backup/run.yml
+
 - name: Enable maintenance mode in the incoming release
   ansible.builtin.command: "php bin/magento maint:enable"
   args:
@@ -75,6 +86,12 @@
   ansible.builtin.include_tasks: tasks/dora-event.yml
   vars:
     dora_phase: maintenance.enabled
+  when: upgrade_needed | bool
+
+- name: "Audit: record maintenance mode on"
+  ansible.builtin.include_tasks: tasks/audit/record.yml
+  vars:
+    audit_event: maintenance.enabled
   when: upgrade_needed | bool
 
 - name: Reset the current symlink

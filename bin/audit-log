@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""A tamper-evident, append-only audit log of deploys, as JSON lines.
+
+Each record carries the SHA-256 of the record before it, so editing, removing
+or reordering any line breaks every hash after it and `verify` says where.
+
+  bin/audit-log append --path FILE [--forward "CMD ARG..."]   a record on stdin
+  bin/audit-log verify --path FILE
+  bin/audit-log evidence --path FILE --release ID --out DIR
+
+The chain proves the log has not been changed since it was written. It does not
+stop someone with write access from replacing the whole file, so forward each
+record to a store you cannot rewrite, such as syslog or object-locked storage.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fcntl
+import hashlib
+import json
+import os
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+GENESIS = "0" * 64
+SCHEMA = 1
+
+
+class ChainError(Exception):
+    """The log is not a valid chain; carries the 1-based line number."""
+
+    def __init__(self, line: int, reason: str) -> None:
+        super().__init__(f"line {line}: {reason}")
+        self.line = line
+
+
+def record_hash(record: dict) -> str:
+    """SHA-256 of the record's canonical JSON, excluding its own hash."""
+    body = {k: v for k, v in record.items() if k != "hash"}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def read_chain(path: Path) -> list[dict]:
+    """Every record in order, raising ChainError at the first broken link."""
+    records: list[dict] = []
+    if not path.exists():
+        return records
+    previous = GENESIS
+    with path.open(encoding="utf-8") as handle:
+        for number, line in enumerate(handle, 1):
+            if not line.strip():
+                raise ChainError(number, "blank line")
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ChainError(number, f"not JSON ({exc.msg})") from exc
+            if not isinstance(record, dict):
+                raise ChainError(number, "not a JSON object")
+            if record.get("seq") != number:
+                raise ChainError(number, f"seq is {record.get('seq')!r}, expected {number}")
+            if record.get("prev_hash") != previous:
+                raise ChainError(number, "prev_hash does not match the record before it")
+            if record.get("hash") != record_hash(record):
+                raise ChainError(number, "hash does not match the record's contents")
+            previous = record["hash"]
+            records.append(record)
+    return records
+
+
+def append(path: Path, payload: dict, forward: str) -> dict:
+    """Chain payload onto the log under an exclusive lock and return the record."""
+    reserved = {"schema", "seq", "prev_hash", "hash", "recorded_at"} & payload.keys()
+    if reserved:
+        raise ValueError(f"the record may not set {', '.join(sorted(reserved))}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    with lock_path.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        chain = read_chain(path)
+        record = {
+            "schema": SCHEMA,
+            "seq": len(chain) + 1,
+            "recorded_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "prev_hash": chain[-1]["hash"] if chain else GENESIS,
+            **payload,
+        }
+        record["hash"] = record_hash(record)
+        line = json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(path, 0o600)
+    if forward:
+        subprocess.run(shlex.split(forward), input=line, text=True, check=True, timeout=60)
+    return record
+
+
+def write_evidence(path: Path, release: str, out: Path) -> Path:
+    """Write the release's records, the chain position and a summary to out."""
+    chain = read_chain(path)
+    selected = [r for r in chain if r.get("release") == release]
+    if not selected:
+        raise LookupError(f"no records for release {release!r} in {path}")
+    out.mkdir(parents=True, exist_ok=True)
+    files = {
+        "audit.jsonl": "".join(json.dumps(r, sort_keys=True, ensure_ascii=False) + "\n" for r in selected),
+        "chain.txt": chain_text(path, chain, selected),
+        "summary.md": summary_markdown(release, selected),
+    }
+    for name, text in files.items():
+        (out / name).write_text(text, encoding="utf-8")
+    sums = "".join(
+        f"{hashlib.sha256((out / name).read_bytes()).hexdigest()}  {name}\n" for name in sorted(files)
+    )
+    (out / "SHA256SUMS").write_text(sums, encoding="utf-8")
+    return out
+
+
+def chain_text(path: Path, chain: list[dict], selected: list[dict]) -> str:
+    """Where the release's records sit in the full chain, so a copy can be checked against it."""
+    lines = [
+        f"log: {path}",
+        f"records in log: {len(chain)}",
+        f"head hash: {chain[-1]['hash']}",
+        "chain verified: yes",
+        "",
+        "seq  prev_hash  hash  event",
+    ]
+    lines += [f"{r['seq']}  {r['prev_hash']}  {r['hash']}  {r.get('event', '')}" for r in selected]
+    return "\n".join(lines) + "\n"
+
+
+def summary_markdown(release: str, selected: list[dict]) -> str:
+    """A reviewer's one-page account of the release, built only from its records."""
+    def first(event: str) -> dict:
+        return next((r for r in selected if r.get("event") == event), {})
+
+    started = first("deploy.started")
+    build = first("build.succeeded")
+    approval = first("approval.verified")
+    backup = first("backup.succeeded")
+    verified = first("deploy.verified")
+    finished = first("deploy.finished")
+    actor = started.get("actor", {})
+    rows = [
+        ("Environment", started.get("env_name", "not recorded")),
+        ("Deployed by", f"{actor.get('git_email', 'unknown')} as {actor.get('os_user', 'unknown')} "
+                        f"from {actor.get('control_host', 'unknown')}"),
+        ("Started", started.get("recorded_at", "not recorded")),
+        ("Commit", build.get("commit", "not recorded")),
+        ("Artefact SHA-256", build.get("artefact_sha256", "not recorded")),
+        ("Approved by", f"{approval.get('signer')} (tag {approval.get('tag')})" if approval else "no approval recorded"),
+        ("Backup", backup.get("backup_id", "none taken")),
+        ("Maintenance window", "yes" if first("maintenance.enabled") else "no"),
+        ("Finished", finished.get("recorded_at", "not recorded: the deploy did not complete")),
+        ("Verified", verified.get("recorded_at", "not recorded: verify-deploy.yml has not passed")),
+    ]
+    table = "\n".join(f"| {k} | {v} |" for k, v in rows)
+    events = "\n".join(f"- `{r['recorded_at']}` {r.get('event')}" for r in selected)
+    return (
+        f"# Release {release}\n\n"
+        "Built from the audit log records for this release. `SHA256SUMS` covers every file here, "
+        "and `chain.txt` places each record in the full log.\n\n"
+        f"| | |\n|---|---|\n{table}\n\n## Events\n\n{events}\n"
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    add = sub.add_parser("append", help="chain a JSON record from stdin onto the log")
+    add.add_argument("--path", required=True)
+    add.add_argument("--forward", default="", help="a command and arguments that receive the record on stdin")
+    check = sub.add_parser("verify", help="check every link in the log")
+    check.add_argument("--path", required=True)
+    bundle = sub.add_parser("evidence", help="write one release's records and a summary")
+    bundle.add_argument("--path", required=True)
+    bundle.add_argument("--release", required=True)
+    bundle.add_argument("--out", required=True)
+    args = parser.parse_args(argv)
+    path = Path(args.path).expanduser()
+
+    try:
+        if args.command == "append":
+            payload = json.load(sys.stdin)
+            if not isinstance(payload, dict):
+                raise ValueError("the record on stdin must be a JSON object")
+            record = append(path, payload, args.forward)
+            print(record["hash"])
+        elif args.command == "verify":
+            chain = read_chain(path)
+            if not chain:
+                print(f"{path}: no records")
+                return 0
+            print(f"{path}: {len(chain)} records, chain intact, head {chain[-1]['hash']}")
+        else:
+            out = write_evidence(path, args.release, Path(args.out).expanduser())
+            print(f"evidence for {args.release}: {out}")
+    except ChainError as exc:
+        print(f"{path}: chain broken at {exc}. Nothing after that line can be trusted.", file=sys.stderr)
+        return 2
+    except (ValueError, LookupError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        print(f"audit-log {args.command}: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

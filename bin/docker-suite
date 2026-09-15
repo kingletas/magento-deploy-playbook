@@ -6,6 +6,7 @@
 #   bin/docker-suite up        build the image and start the six containers
 #   bin/docker-suite deploy    run the full playbook against them
 #   bin/docker-suite verify    assert on what the deploy actually produced
+#   bin/docker-suite audit     check the audit chain and write an evidence bundle
 #   bin/docker-suite test      up + deploy + verify (what `make docker-test` runs)
 #   bin/docker-suite logs      show the fake tools' call log per container
 #   bin/docker-suite reset     clear locks and releases, to repeat a run
@@ -30,6 +31,16 @@ INVENTORY_DIR="${PLAYBOOK_DIR}/inventory/docker"
 INVENTORY="${INVENTORY_DIR}/hosts"
 CONTAINERS=(mdp-builder mdp-web1 mdp-web2 mdp-admin mdp-cron mdp-varnish)
 
+# Who approves the fixture release, and who deploys it. They must differ: the
+# playbook refuses a release approved by the person deploying it. The deployer is
+# handed to git through the environment rather than the operator's own config.
+APPROVER="approver@example.invalid"
+DEPLOYER="deployer@example.invalid"
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=user.email GIT_CONFIG_VALUE_0="${DEPLOYER}"
+
+# The audit log this environment writes, from inventory/docker/group_vars/all.yml.
+AUDIT_LOG_PATH="${PLAYBOOK_DIR}/local.d/audit/docker.audit.jsonl"
+
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 cmd_up() {
@@ -46,10 +57,22 @@ cmd_up() {
         echo "Generated a throwaway keypair in docker/keys/."
     fi
 
-    # The builder clones this by path, so it has to exist before `up`.
-    [ -d "${DOCKER_DIR}/fixtures/magento-repo.git" ] \
-        || "${DOCKER_DIR}/fixtures/build-repo.sh" develop \
-        || die "could not build the fixture repo."
+    # An approver's signing key and the allowed_signers file the deploy checks
+    # the fixture's approval tag against. Throwaway, generated once, gitignored.
+    if [ ! -f "${DOCKER_DIR}/keys/approver" ]; then
+        ssh-keygen -q -t ed25519 -N '' -C approver -f "${DOCKER_DIR}/keys/approver" < /dev/null \
+            || die "could not generate the approver key."
+        printf '%s namespaces="git" %s\n' "${APPROVER}" "$(cat "${DOCKER_DIR}/keys/approver.pub")" \
+            > "${DOCKER_DIR}/keys/allowed_signers"
+        echo "Generated a throwaway approver key in docker/keys/."
+    fi
+
+    # The builder clones this by path, so it has to exist before `up`. Rebuilt
+    # when it predates the approval tag, which a deploy now refuses to build without.
+    if [ ! -d "${DOCKER_DIR}/fixtures/magento-repo.git" ] \
+       || ! git --git-dir="${DOCKER_DIR}/fixtures/magento-repo.git" tag -l 'approved/*' | grep -q .; then
+        "${DOCKER_DIR}/fixtures/build-repo.sh" develop || die "could not build the fixture repo."
+    fi
 
     ( cd "${DOCKER_DIR}" && docker compose build && docker compose up -d ) \
         || die "compose failed."
@@ -117,10 +140,29 @@ ansible_ssh_private_key_file=${DOCKER_DIR}/keys/id_test
 # in the operator's agent before the suite's own, and six containers with the
 # default MaxAuthTries reject the connection with "Too many authentication
 # failures" before the right key is ever tried.
-ansible_ssh_common_args=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o IdentityAgent=none
+ansible_ssh_common_args=-o StrictHostKeyChecking=yes -o UserKnownHostsFile=${INVENTORY_DIR}/known_hosts -o IdentitiesOnly=yes -o IdentityAgent=none
 EOF
     } > "${out}"
     echo "Wrote ${out#"${PLAYBOOK_DIR}/"} from the running containers."
+    cmd_known_hosts
+}
+
+# Host keys are checked everywhere, so the suite trusts the containers it just
+# started: scan them once into known_hosts for the control node, and install the
+# same file on the builder for its rsync to the web hosts.
+cmd_known_hosts() {
+    local known="${INVENTORY_DIR}/known_hosts" ips=() ip
+    for c in "${CONTAINERS[@]}"; do
+        ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${c}")
+        ips+=("${ip}")
+    done
+    ssh-keyscan -T 10 -t ed25519,ecdsa,rsa "${ips[@]}" > "${known}" 2>/dev/null \
+        || die "could not scan the containers' host keys."
+    [ -s "${known}" ] || die "ssh-keyscan returned no host keys."
+    docker cp "${known}" mdp-builder:/home/ubuntu/.ssh/known_hosts \
+        && docker exec mdp-builder sh -c 'chown ubuntu:ubuntu /home/ubuntu/.ssh/known_hosts && chmod 600 /home/ubuntu/.ssh/known_hosts' \
+        || die "could not install known_hosts on the builder."
+    echo "Scanned ${#ips[@]} host keys into ${known#"${PLAYBOOK_DIR}/"} and onto the builder."
 }
 
 # Runs the playbook exactly the way a real deploy runs it: from the playbook
@@ -186,6 +228,27 @@ set_needs_upgrade() {
 
 cmd_down() { ( cd "${DOCKER_DIR}" && docker compose down -v --remove-orphans ); }
 
+# The deploy records what it did; this proves the record is intact and complete.
+cmd_audit() {
+    "${PLAYBOOK_DIR}/bin/audit-log" verify --path "${AUDIT_LOG_PATH}" || return 1
+    local release
+    release=$(python3 -c "
+import json, sys
+records = [json.loads(line) for line in open(sys.argv[1])]
+finished = [r for r in records if r.get('event') == 'deploy.finished']
+print(finished[-1]['release'] if finished else '')
+" "${AUDIT_LOG_PATH}")
+    [ -n "${release}" ] || die "no finished deploy in ${AUDIT_LOG_PATH}."
+    "${PLAYBOOK_DIR}/bin/audit-log" evidence --path "${AUDIT_LOG_PATH}" --release "${release}" \
+        --out "${PLAYBOOK_DIR}/local.d/evidence/docker/${release}" || return 1
+    for event in deploy.started approval.verified build.succeeded backup.succeeded \
+                 cutover.started maintenance.enabled cutover.succeeded deploy.finished deploy.verified; do
+        grep -q "\"event\": \"${event}\"" "${PLAYBOOK_DIR}/local.d/evidence/docker/${release}/audit.jsonl" \
+            || die "the evidence for ${release} has no ${event} record."
+    done
+    echo "Audit chain intact, and ${release}'s evidence carries every event."
+}
+
 cmd_test() {
     cmd_up || exit 1
     # `up` on already-running containers is a no-op, so /tmp/build-log and any
@@ -217,6 +280,9 @@ cmd_test() {
     cmd_verify -e expect_upgrade=true || die "the upgrade deploy completed but verification failed."
     set_needs_upgrade "rm -f"
     echo ""
+    echo "########## audit trail ##########"
+    cmd_audit || die "the audit trail is incomplete or has been changed." 
+    echo ""
     echo "All good. Tear down with: bin/docker-suite down"
 }
 
@@ -225,6 +291,7 @@ case "${1:-}" in
     inventory) shift; cmd_inventory "$@" ;;
     deploy)  shift; cmd_deploy "$@" ;;
     verify)  shift; cmd_verify "$@" ;;
+    audit)   shift; cmd_audit "$@" ;;
     test)    shift; cmd_test "$@" ;;
     logs)    shift; cmd_logs "$@" ;;
     shell)   shift; cmd_shell "$@" ;;

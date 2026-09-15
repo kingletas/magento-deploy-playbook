@@ -138,7 +138,7 @@ hosts and addresses are nobody else's business. An inventory has to live under
 copying `inventory/example/` -- the template -- and editing two files;
 `make check` then tells you if you forgot a key or invented one.
 
-All three declare **the same twelve keys**, and `make check` fails if one of
+All three declare **the same fifteen keys**, and `make check` fails if one of
 them forgets a key or invents one:
 
 | Key | What it decides |
@@ -151,6 +151,9 @@ them forgets a key or invents one:
 | `deployment_complete` | Whether the `current` symlink is repointed |
 | `git_repo` | Where the release is cloned from |
 | `warmup` | Whether and how the storefront is warmed once maintenance is off. See [Warming the storefront](#warming-the-storefront) |
+| `audit` | Where the deploy's audit log is written, whether it is forwarded, and whether a record that fails stops the deploy |
+| `approval` | Whether a release needs a signed approval, and whose signatures count |
+| `backup` | Whether a backup runs before the cutover, what command takes it, and how long it may take |
 | `kill_php` | Whether PHP is killed before the cutover |
 | `archive_min_bytes` | The floor the built tarball must exceed |
 | `release_disk_min_bytes` | Free space each host must have **before** the deploy starts |
@@ -184,6 +187,62 @@ deploy gives you the numbers to set it from.
 **`suffix` is an environment-slot identifier, not a branch derivation.** It is a
 literal. Deriving it from `branch_name` would give every branch its own prune
 scope, and releases from other branches would then never be pruned.
+
+## Controls, approvals and the audit log
+
+A deploy here records what it did, refuses code nobody approved, and can take a
+backup before it touches anything. All three are per environment and off or
+empty until you set them:
+
+```yaml
+audit:
+  path: ~/.local/state/magento-deploy-playbook/staging.audit.jsonl
+  forward: ""          # a command that receives each record on stdin
+  required: true       # a record that cannot be written stops the deploy
+
+approval:
+  required: true
+  allowed_signers: /etc/magento-deploy/allowed_signers
+  tag_pattern: "approved/*"
+
+backup:
+  run: window          # never | window | always
+  command: /usr/local/bin/snapshot-magento-database
+  timeout: 3600
+```
+
+**The audit log is append-only and hash-chained.** Each record carries the SHA-256
+of the one before it, so an edited, removed or reordered line breaks every hash
+after it:
+
+```bash
+make audit-verify environment=staging
+make evidence environment=staging release=20260915_1789512159_staging
+```
+
+A release's evidence bundle holds its records, its place in the chain, a summary
+and `SHA256SUMS`. The chain shows tampering; it cannot prevent it, so set
+`forward` to something that ships each record somewhere nobody here can rewrite.
+
+**An approval is a signed git tag.** Someone other than the deployer signs a tag
+on the commit with an SSH key listed in `allowed_signers`, and the build refuses
+to start without one:
+
+```bash
+git tag -s approved/2026-09-15 -m "reviewed" <commit>   # with gpg.format=ssh
+```
+
+The deployer is whoever `git config user.email` names on the control node, which
+they set themselves. The signature is the control; the deployer check only stops
+a release being approved by the person shipping it.
+
+**The backup runs before maintenance goes on and before the symlink moves**, on
+the first admin host. Its last line of output is recorded as the backup's name,
+and a backup that fails or names nothing stops the deploy with the old release
+still serving.
+
+What all of this is evidence of, and what it is not, is in
+[docs/compliance.md](docs/compliance.md).
 
 ## Warming the storefront
 
@@ -370,15 +429,18 @@ environment.
 ## Layout
 
 ```text
-deployment.yml          six plays: guard, preflight, build, upload, magento,
-                        prune
+deployment.yml          seven plays: guard, preflight, build, upload, magento,
+                        prune, warm-up threshold
 verify-deploy.yml       asserts on the filesystem after a deploy
+audit.yml               checks the audit chain, writes an evidence bundle
 unlock.yml              clears a stale build lock
-test.yml                imports the seven offline suites
+test.yml                imports the eight offline suites
 tests/                  the suites, plus four symlinks -- see below
     test-vars-contract.yml  test-bundler.yml
     test-release-lock.yml   test-release-prune.yml
     test-outgoing-maintenance.yml  test-upgrade-gate.yml
+    test-warmup.yml               test-controls.yml
+    test_audit_log.py             (python, run by bin/check)
     group_vars -> ../group_vars   tasks -> ../tasks
     handlers   -> ../handlers     inventory -> ../inventory
 
@@ -388,7 +450,7 @@ Makefile                the entry point
 docker.mk         the docker-* targets
 
 group_vars/all/         environment-INDEPENDENT defaults
-    system.yml releases.yml git.yml build.yml dora.yml
+    system.yml releases.yml git.yml build.yml dora.yml audit.yml
     notifications.yml   credentials + payloads; placeholders, encrypt it
 inventory/<env>/        environment-SPECIFIC everything
 
@@ -473,7 +535,7 @@ evaluating it templates the values. Every suite imports preflight first.
 ## What the checks cover, and what they don't
 
 ```bash
-make check         # syntax, inventories, structure, seven offline suites, lint
+make check         # syntax, inventories, structure, the audit tool, eight offline suites, lint
 make docker-test   # the real thing, against six containers
 make docker-demo   # the same, building real Magento from GitHub
 make docker-down   # afterwards
@@ -486,7 +548,7 @@ make docker-down   # afterwards
 | `--syntax-check` × 3 | A bad include path, a malformed task, a bad play key |
 | Inventories × 4 | A hosts file where `builder`/`apps`/`admin`/`cron`/`varnish`/`web` don't all resolve. A deploy against a broken one reports "no hosts matched" and exits **0** |
 | `bin/check-structure` | A reintroduced `roles:`; a `notify` with no handler; an include path that only resolves at run time; **a parent-path reference**; **a stray `lookup('env', ...)`** |
-| `test.yml` | 208 tasks across seven suites: the variable contract and the precedence guard, the disk pre-flight, the `bundler_steps` table, the build lock, the prune against a real temporary filesystem, the replaced release's maintenance flag against another, and which status exit codes open a maintenance window or stop the cutover, and the warm-up against a local web server |
+| `test.yml` | 266 tasks across eight suites: the variable contract and the precedence guard, the disk pre-flight, the `bundler_steps` table, the build lock, the prune against a real temporary filesystem, the replaced release's maintenance flag against another, and which status exit codes open a maintenance window or stop the cutover, and the warm-up against a local web server, and the audit, integrity, backup and approval controls against a real git repository and real signing keys |
 | yamllint / ansible-lint | Formatting. A broken tool reads as **SKIP**, never as a failure |
 
 Every structural check has been negative-tested -- a deliberate fault introduced
@@ -511,7 +573,7 @@ make deploy environment=staging
 ```
 
 `make check` will tell you if you forgot a key or added one the other
-environments don't have. Set every one of the twelve explicitly, even where
+environments don't have. Set every one of the fifteen explicitly, even where
 the value is the same as everywhere else. An environment that omits a key falls
 back to whatever happens to be around, which is exactly the failure mode the
 shell profiles had.

@@ -1,0 +1,26 @@
+---
+###
+# One refused approval for tests/test-controls.yml: the commit at
+# `commits[bad.commit]` must not build, for `bad.reason`.
+###
+- name: "Check out the commit with {{ bad.label }}"
+  ansible.builtin.command: "git checkout -q {{ commits[bad.commit] }}"
+  args:
+    chdir: "{{ wdir }}"
+  changed_when: true
+
+- name: "Refuse {{ bad.label }}"
+  block:
+    - name: "Verify the approval with {{ bad.label }}"
+      ansible.builtin.include_tasks: tasks/approval/verify.yml
+
+    - name: "Should not reach here with {{ bad.label }}"
+      ansible.builtin.fail:
+        msg: "verify.yml accepted a commit with {{ bad.label }}."
+  rescue:
+    - name: "Confirm the refusal names why for {{ bad.label }}"
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.msg is search('no approval from someone other')
+          - ansible_failed_result.msg is search(bad.reason)
+        fail_msg: "Refused, but not for the expected reason: {{ ansible_failed_result.msg | default('(none)') }}"

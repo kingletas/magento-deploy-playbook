@@ -41,7 +41,8 @@
     archive: true
     compress: true
     # private_key: "{{ ssh.key_path }}"
-    verify_host: false
+    # The builder must already trust each web host's key. See README, host keys.
+    verify_host: true
     set_remote_user: true
     rsync_timeout: 600
   delegate_to: "{{ builder }}"

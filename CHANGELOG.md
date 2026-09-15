@@ -25,6 +25,36 @@ changed, because there's nothing before it.
 
 ### Changed
 
+- Every deploy is now recorded in an append-only, hash-chained audit log on the
+  control node: nine events per release carrying the commit, the artefact's
+  SHA-256, the approver, the backup, and who deployed from where.
+  `make audit-verify environment=<env>` re-checks every link, and
+  `make evidence environment=<env> release=<id>` writes one release's records,
+  its place in the chain, a summary and `SHA256SUMS`. Set `audit.forward` to
+  send each record somewhere nobody with access here can rewrite.
+- A release is built only if someone other than the deployer signed a tag on its
+  commit with a key in `approval.allowed_signers`. Off until you set
+  `approval.required`.
+- A backup can be required before the cutover. `backup.run` is never, window
+  (only when the release takes a maintenance window) or always; the command runs
+  on the first admin host and its last line of output is recorded as the backup's
+  name. A backup that fails or names nothing stops the deploy with the previous
+  release still live.
+- The builder records the archive's SHA-256, and every host refuses to unpack an
+  archive that does not match it.
+- Host key checking is on. Ansible and the builder's rsync both verify the host
+  they are talking to, so hosts must be in `known_hosts` before a deploy. The
+  Docker suite scans its own containers.
+- Tasks that handle a token set `no_log`, so credentials stay out of `-v` output
+  and callback plugins.
+- A varnish host with no `varnishadm` is refused before the build, rather than
+  failing the cutover after the release is already live.
+- `bin/check-structure` fails a task that templates a secret without `no_log`, a
+  plaintext secret in the committed notification defaults, and anything that
+  turns off host key checking.
+- New: `docs/compliance.md`, mapping each control to the file that implements it
+  and the test that proves it, and saying what it does not cover.
+
 - A release with no database or config work takes no maintenance window. The
   deploy asks the incoming release first and turns maintenance on only when
   either status command exits 2.

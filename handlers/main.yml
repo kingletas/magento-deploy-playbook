@@ -17,6 +17,7 @@
   delegate_to: localhost
   run_once: true
   become: false
+  no_log: true
   failed_when: false
   when: notify_via_slack | default(true) | bool
 
@@ -33,6 +34,7 @@
   run_once: true
   become: false
   register: pagerduty_result
+  no_log: true
   failed_when: false
   when: notify_via_pagerduty | default(false) | bool
 
@@ -53,6 +55,7 @@
   run_once: true
   become: false
   register: newrelic_result
+  no_log: true
   failed_when: false
   when: notify_via_newrelic | default(false) | bool
 
@@ -112,6 +115,7 @@
   with_items: '{{ yotta.sites }}'
   delegate_to: "{{ builder }}"
   run_once: true
+  no_log: true
 
 # This loops over `groups.cron + groups.admin`, so every inventory must define
 # them. `make check` parses each one and asserts they resolve.

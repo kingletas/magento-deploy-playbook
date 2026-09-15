@@ -1,0 +1,97 @@
+---
+###
+# Refuses to build a commit nobody approved. An approval is a tag matching
+# approval.tag_pattern on the checked-out commit, signed with an SSH key listed in
+# approval.allowed_signers, by someone other than the deployer.
+#
+# The deployer is whoever `git config user.email` names on the control node,
+# which they can set themselves. What cannot be forged is the approver's
+# signature, so the signer check is the control and the deployer check stops a
+# release being approved by the person shipping it by mistake.
+###
+- name: Check the release was approved
+  when: approval.required
+  block:
+    - name: Read the commit the build checked out
+      ansible.builtin.command: git rev-parse HEAD
+      args:
+        chdir: "{{ wdir }}"
+      register: approval_commit
+      changed_when: false
+
+    - name: List the approval tags on that commit
+      ansible.builtin.command:
+        argv: [git, tag, --points-at, HEAD, --list, "{{ approval.tag_pattern }}"]
+      args:
+        chdir: "{{ wdir }}"
+      register: approval_tags
+      changed_when: false
+
+    - name: Put the allowed signers on the builder
+      ansible.builtin.copy:
+        src: "{{ approval.allowed_signers }}"
+        dest: "/tmp/{{ release_id }}.allowed_signers"
+        mode: "0644"
+
+    - name: Verify each approval tag's signature
+      ansible.builtin.command:
+        argv:
+          - git
+          - -c
+          - gpg.format=ssh
+          - -c
+          - "gpg.ssh.allowedSignersFile=/tmp/{{ release_id }}.allowed_signers"
+          - verify-tag
+          - "{{ item }}"
+      args:
+        chdir: "{{ wdir }}"
+      loop: "{{ approval_tags.stdout_lines }}"
+      register: approval_signatures
+      changed_when: false
+      failed_when: false
+
+    - name: Keep the valid approvals from someone other than the deployer
+      ansible.builtin.set_fact:
+        approvals_by_others: >-
+          {%- set found = [] -%}
+          {%- for result in approval_signatures.results | default([]) -%}
+          {%- set good = result.stderr | default('') | regex_findall('Good "git" signature for (\S+) with (\S+) key (\S+)') -%}
+          {%- if result.rc == 0 and good and good[0][0] | lower != deployer_actor.git_email | lower -%}
+          {%- set _ = found.append({'tag': result.item, 'signer': good[0][0], 'key': good[0][2]}) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ found }}
+        approvals_by_deployer: >-
+          {{ approval_signatures.results | default([])
+             | selectattr('rc', 'equalto', 0)
+             | map(attribute='stderr')
+             | select('search', 'signature for ' ~ (deployer_actor.git_email | regex_escape) ~ ' with', ignorecase=true)
+             | list | length }}
+
+    - name: Refuse a release nobody else approved
+      ansible.builtin.assert:
+        that:
+          - approvals_by_others | length > 0
+        fail_msg: >-
+          Commit {{ approval_commit.stdout }} has no approval from someone other
+          than the deployer ({{ deployer_actor.git_email }}). Tags matching
+          '{{ approval.tag_pattern }}' on it: {{ approval_tags.stdout_lines | default([]) }}.
+          {{ 'Every valid signature on them belongs to the deployer.' if approvals_by_deployer | int > 0
+             else 'None is signed by a key in ' ~ approval.allowed_signers ~ '.' }}
+          Ask an approver to sign one: git tag -s <tag> {{ approval_commit.stdout }}
+          with gpg.format=ssh, and push it.
+
+    - name: "Audit: record the approval"
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: approval.verified
+        audit_detail:
+          commit: "{{ approval_commit.stdout }}"
+          tag: "{{ approvals_by_others[0].tag }}"
+          signer: "{{ approvals_by_others[0].signer }}"
+          signing_key: "{{ approvals_by_others[0].key }}"
+  always:
+    - name: Remove the allowed signers from the builder
+      ansible.builtin.file:
+        path: "/tmp/{{ release_id }}.allowed_signers"
+        state: absent

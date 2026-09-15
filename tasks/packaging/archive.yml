@@ -49,6 +49,26 @@
     success_msg: >-
       Archive: {{ (built_archive.stat.size | int / 1048576) | round(1) }} MB
 
+# Every host checks its copy against this before extracting it.
+- name: Hash the archive
+  ansible.builtin.stat:
+    path: "{{ releases.archive }}{{ release_id }}.tgz"
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: built_archive_digest
+
+- name: Record the archive's SHA-256 beside it
+  ansible.builtin.copy:
+    dest: "{{ releases.archive }}{{ release_id }}.tgz.sha256"
+    content: "{{ built_archive_digest.stat.checksum }}  {{ release_id }}.tgz\n"
+    mode: "0644"
+  become: true
+  become_user: '{{ ansible_user }}'
+
+- name: Keep the digest for the audit record
+  ansible.builtin.set_fact:
+    release_sha256: "{{ built_archive_digest.stat.checksum }}"
+
 - name: Copy release locally
   ansible.builtin.fetch:
     src: '{{ releases.archive }}/{{ release_id }}.tgz'

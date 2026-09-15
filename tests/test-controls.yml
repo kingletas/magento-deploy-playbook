@@ -1,0 +1,268 @@
+---
+###
+# The audit, integrity, backup and approval controls, run for real against a
+# temporary directory, a local git repository and throwaway signing keys.
+#
+#   ansible-playbook -i inventory/test tests/test-controls.yml
+###
+- name: The audit, integrity, backup and approval controls
+  hosts: builder
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_become: false
+    root: /tmp/magento-deploy-playbook-controls-test
+    env_name: test
+    release_id: 20260101_1700000001_test
+    builder: test-builder
+    deployer_actor: {git_email: deployer@example.invalid, os_user: ci, remote_user: ci, control_host: test}
+    audit: {path: "/tmp/magento-deploy-playbook-controls-test/audit.jsonl", forward: "", required: true}
+  tasks:
+    # Facts outrank play vars, and the suites before this one leave their own
+    # behind on this host, so the fixture's values are set as facts.
+    - name: Use the fixture's own identity and audit log
+      ansible.builtin.set_fact:
+        env_name: test
+        release_id: 20260101_1700000001_test
+        builder: test-builder
+        deployer_actor: {git_email: deployer@example.invalid, os_user: ci, remote_user: ci, control_host: test}
+        audit: {path: "{{ root }}/audit.jsonl", forward: "", required: true}
+
+    - name: Reset the fixture tree
+      ansible.builtin.file:
+        path: "{{ root }}"
+        state: absent
+
+    - name: Create the fixture tree
+      ansible.builtin.file:
+        path: "{{ root }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: [archives, keys]
+
+    ###
+    # Integrity: an archive is extracted only if it matches the builder's digest.
+    ###
+    - name: Write an archive and the digest the builder would record
+      ansible.builtin.shell: |
+        set -euo pipefail
+        printf 'release contents' > {{ root }}/archives/{{ release_id }}.tgz
+        sha256sum {{ root }}/archives/{{ release_id }}.tgz | sed 's| .*/|  |' > {{ root }}/archives/{{ release_id }}.tgz.sha256
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: An untouched archive passes
+      ansible.builtin.include_tasks: tasks/deploy/verify-archive.yml
+      vars:
+        archive_path: "{{ root }}/archives/{{ release_id }}.tgz"
+        digest_path: "{{ root }}/archives/{{ release_id }}.tgz.sha256"
+
+    - name: Change one byte of the archive
+      ansible.builtin.shell: printf 'release c0ntents' > {{ root }}/archives/{{ release_id }}.tgz
+      changed_when: true
+
+    - name: A changed archive is refused
+      block:
+        - name: Check the changed archive
+          ansible.builtin.include_tasks: tasks/deploy/verify-archive.yml
+          vars:
+            archive_path: "{{ root }}/archives/{{ release_id }}.tgz"
+            digest_path: "{{ root }}/archives/{{ release_id }}.tgz.sha256"
+
+        - name: Should not reach here
+          ansible.builtin.fail:
+            msg: "verify-archive.yml accepted an archive that differs from the builder's digest."
+      rescue:
+        - name: Confirm it refused on the digest
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search('will not be extracted')
+            fail_msg: "Failed, but not on the digest: {{ ansible_failed_result.msg | default('(none)') }}"
+
+    ###
+    # Audit: records chain, and a failed write stops the play only when required.
+    ###
+    - name: Record two events
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: "{{ item }}"
+        audit_detail: {note: fixture}
+      loop: [deploy.started, deploy.finished]
+
+    - name: Verify the chain with the tool
+      ansible.builtin.command: "{{ audit_tool }} verify --path {{ audit.path }}"
+      register: chain
+      changed_when: false
+
+    - name: Assert both records chained, with the actor
+      vars:
+        records: "{{ lookup('file', audit.path).splitlines() | map('from_json') | list }}"
+      ansible.builtin.assert:
+        that:
+          - chain.stdout is search('2 records, chain intact')
+          - records | map(attribute='event') | list == ['deploy.started', 'deploy.finished']
+          - records[1].prev_hash == records[0].hash
+          - records[0].actor.git_email == 'deployer@example.invalid'
+          - records[0].release == release_id
+        fail_msg: "{{ chain.stdout }} {{ records }}"
+
+    - name: A forward that fails is tolerated when the audit is optional
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit: {path: "{{ root }}/audit.jsonl", forward: "false", required: false}
+        audit_event: optional.forward
+
+    - name: A forward that fails stops the play when the audit is required
+      block:
+        - name: Record with a failing forward
+          ansible.builtin.include_tasks: tasks/audit/record.yml
+          vars:
+            audit: {path: "{{ root }}/audit.jsonl", forward: "false", required: true}
+            audit_event: required.forward
+
+        - name: Should not reach here either
+          ansible.builtin.fail:
+            msg: "record.yml carried on after a required audit record could not be forwarded."
+      rescue:
+        - name: Confirm the audit write was what failed
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.cmd is defined
+              - ansible_failed_result.rc != 0
+            fail_msg: "Failed, but not in the audit write: {{ ansible_failed_result }}"
+
+    ###
+    # Backup: runs only when asked, records its name, and stops on failure.
+    ###
+    - name: A window backup runs when the release takes a window
+      ansible.builtin.include_tasks: tasks/backup/run.yml
+      vars:
+        releases: {complete: true}
+        upgrade_needed: true
+        backup: {run: window, command: "echo working; echo snapshot-0001", timeout: 30}
+
+    - name: Assert the backup's name was kept and recorded
+      ansible.builtin.assert:
+        that:
+          - backup_id == 'snapshot-0001'
+          - lookup('file', audit.path) is search('snapshot-0001')
+        fail_msg: "backup_id={{ backup_id | default('unset') }}"
+
+    - name: Forget the backup name
+      ansible.builtin.set_fact:
+        backup_id: unset
+
+    - name: A window backup is skipped when there is no window
+      ansible.builtin.include_tasks: tasks/backup/run.yml
+      vars:
+        releases: {complete: true}
+        upgrade_needed: false
+        backup: {run: window, command: "echo should-not-run", timeout: 30}
+
+    - name: Assert nothing ran
+      ansible.builtin.assert:
+        that:
+          - backup_id == 'unset'
+        fail_msg: "A window backup ran for a release with no window."
+
+    - name: Refuse each bad backup
+      ansible.builtin.include_tasks: refuse-backup.yml
+      loop:
+        - {label: a command that fails, command: "echo partial; exit 3"}
+        - {label: a command that names nothing, command: "true"}
+      loop_control:
+        loop_var: bad
+        label: "{{ bad.label }}"
+
+    - name: Assert each failed backup was recorded
+      ansible.builtin.assert:
+        that:
+          - lookup('file', audit.path).splitlines() | select('search', 'backup.failed') | list | length == 2
+        fail_msg: "Expected two backup.failed records."
+
+    ###
+    # Approval: a signed tag from an allowed approver who is not the deployer.
+    ###
+    - name: Build a repository whose commits carry different approvals
+      ansible.builtin.shell: |
+        set -eu
+        cd {{ root }}
+        for who in approver deployer stranger; do
+          ssh-keygen -q -t ed25519 -N '' -C "$who" -f keys/$who < /dev/null
+        done
+        {
+          printf 'approver@example.invalid namespaces="git" %s\n' "$(cat keys/approver.pub)"
+          printf 'deployer@example.invalid namespaces="git" %s\n' "$(cat keys/deployer.pub)"
+        } > keys/allowed_signers
+        git init -q -b main repo && cd repo
+        commit() { printf '%s\n' "$1" > file; git add file; git -c user.email=dev@example.invalid -c user.name=Dev commit -q -m "$1"; }
+        sign() { git -c gpg.format=ssh -c user.signingkey={{ root }}/keys/$1 -c user.email=$1@example.invalid -c user.name=$1 tag -s -m approve "$2"; }
+        commit one;   sign approver approved/by-approver
+        commit two;   sign deployer approved/by-deployer
+        commit three; git -c user.email=a@example.invalid -c user.name=a tag -a -m unsigned approved/unsigned
+        commit four;  sign stranger approved/by-stranger
+        commit five
+        git log --format=%H --reverse > {{ root }}/commits
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Read the commits
+      ansible.builtin.set_fact:
+        commits: "{{ lookup('file', root ~ '/commits').splitlines() }}"
+        approval: {required: true, allowed_signers: "{{ root }}/keys/allowed_signers", tag_pattern: "approved/*"}
+        wdir: "{{ root }}/repo"
+
+    - name: Check out the approver-signed commit
+      ansible.builtin.command: "git checkout -q {{ commits[0] }}"
+      args:
+        chdir: "{{ wdir }}"
+      changed_when: true
+
+    - name: An approval from someone else passes
+      ansible.builtin.include_tasks: tasks/approval/verify.yml
+
+    - name: Assert the approver was recorded
+      ansible.builtin.assert:
+        that:
+          - approvals_by_others[0].signer == 'approver@example.invalid'
+          - approvals_by_others[0].tag == 'approved/by-approver'
+          - lookup('file', audit.path) is search('approver@example.invalid')
+        fail_msg: "approvals from others: {{ approvals_by_others }}"
+
+    - name: Refuse each commit without a valid approval from someone else
+      ansible.builtin.include_tasks: refuse-approval.yml
+      loop:
+        - {label: signed only by the deployer, commit: 1, reason: "belongs to the deployer"}
+        - {label: an unsigned tag, commit: 2, reason: "None is signed"}
+        - {label: signed by a key not allowed, commit: 3, reason: "None is signed"}
+        - {label: no tag on the commit, commit: 4, reason: "None is signed"}
+      loop_control:
+        loop_var: bad
+        label: "{{ bad.label }}"
+
+    - name: Assert the signers file never stays on the builder
+      ansible.builtin.stat:
+        path: "/tmp/{{ release_id }}.allowed_signers"
+      register: leftover_signers
+      failed_when: leftover_signers.stat.exists
+
+    ###
+    # Varnish: a host that cannot be invalidated stops the deploy up front.
+    ###
+    - name: A varnish host without varnishadm is refused before anything is built
+      block:
+        - name: Check the fake fleet, which has no Varnish
+          ansible.builtin.include_tasks: tasks/controls/varnish-ready.yml
+
+        - name: Should not reach here without varnishadm
+          ansible.builtin.fail:
+            msg: "varnish-ready.yml accepted a host with no varnishadm."
+      rescue:
+        - name: Confirm it named the host and the fix
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search('varnishadm is missing on')
+              - ansible_failed_result.msg is search('test-varnish')
+            fail_msg: "Refused, but not for the missing varnishadm: {{ ansible_failed_result.msg | default('(none)') }}"

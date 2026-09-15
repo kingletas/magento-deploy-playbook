@@ -1,0 +1,65 @@
+---
+###
+# Runs backup.command on the first admin host before maintenance goes on and the
+# symlink flips, when backup.run asks for it. The last line of its output is
+# recorded as the backup's identifier. A failed or silent backup stops the deploy
+# while the old release is still serving.
+#
+#   upgrade_needed   from the upgrade gate; `window` backs up only then.
+###
+- name: Back up before the cutover
+  when:
+    - releases.complete | bool
+    - backup.run == 'always' or (backup.run == 'window' and upgrade_needed | bool)
+  block:
+    - name: Run the backup command
+      ansible.builtin.shell:
+        cmd: "{{ backup.command }}"
+        executable: /bin/bash
+      delegate_to: "{{ groups.admin[0] }}"
+      run_once: true
+      async: "{{ backup.timeout }}"
+      poll: 5
+      register: backup_result
+      changed_when: true
+      # The command can carry credentials. Run it on the admin host to see its output.
+      no_log: true
+
+    - name: Refuse a backup that named nothing
+      ansible.builtin.assert:
+        that:
+          - backup_result.stdout_lines | default([]) | select | list | length > 0
+        fail_msg: >-
+          The backup command exited 0 but printed nothing, so there is no
+          identifier to restore from. Make its last line of output the snapshot
+          or dump name.
+      run_once: true
+
+    - name: Keep the backup's identifier
+      ansible.builtin.set_fact:
+        backup_id: "{{ backup_result.stdout_lines | select | list | last | trim }}"
+      run_once: true
+
+    - name: "Audit: record the backup"
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: backup.succeeded
+        audit_detail:
+          backup_id: "{{ backup_id }}"
+          reason: "{{ backup.run }}"
+  rescue:
+    - name: "Audit: record the failed backup"
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: backup.failed
+        audit_detail:
+          reason: "{{ backup.run }}"
+          error: "{{ ansible_failed_result.msg | default('') | truncate(500) }}"
+
+    - name: Stop the deploy without a backup
+      ansible.builtin.fail:
+        msg: >-
+          The backup did not complete, so the deploy stopped before maintenance
+          mode and before the symlink flip. The previous release is still live.
+          {{ ansible_failed_result.msg | default('') }}
+      run_once: true

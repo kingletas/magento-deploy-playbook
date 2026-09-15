@@ -29,3 +29,6 @@
 
 - name: The warm-up, against a local web server
   ansible.builtin.import_playbook: tests/test-warmup.yml
+
+- name: The audit, integrity, backup and approval controls
+  ansible.builtin.import_playbook: tests/test-controls.yml

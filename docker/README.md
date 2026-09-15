@@ -34,7 +34,9 @@ This is the important table. The suite tests **orchestration**, not Magento.
 | Real tar and untar, real file ownership and modes | `manipulus` -- logs the invocation; `docker run`, for the magepack path |
 | The `current` symlink flip, and the shared symlinks into an EFS-shaped path | `service` -- sysv shims in `/etc/init.d/` because there's no init system |
 | Every assert, gate, `run_once`, `delegate_to` and handler in the playbook | PagerDuty / New Relic / Noibu / Slack -- off via `notify_via_*` |
-| The build lock, including refusing a second concurrent build | |
+| The build lock, including refusing a second concurrent build | `varnishadm` -- logs the ban the cutover sends |
+| The approval check: a real SSH-signed tag, verified against a real allowed_signers file | |
+| The audit log, written and chain-verified on the control node | |
 | The prune, including refusing to delete the live release | |
 | The full variable contract, resolved from `inventory/docker/` | |
 

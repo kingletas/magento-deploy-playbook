@@ -50,6 +50,21 @@ warmup:
   timeout: 1
   fail_below: 0
 
+# audit, approval, backup - see inventory/example/. The offline suites set their
+# own values; these keep the key set whole.
+audit:
+  path: /tmp/magento-deploy-playbook-test.audit.jsonl
+  forward: ""
+  required: true
+approval:
+  required: false
+  allowed_signers: ""
+  tag_pattern: "approved/*"
+backup:
+  run: never
+  command: ""
+  timeout: 1
+
 # kill_php - kill lingering PHP workers before the cutover. Off: no fleet.
 kill_php: false
 

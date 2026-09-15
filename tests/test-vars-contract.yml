@@ -121,6 +121,9 @@
           - deployment_complete is defined
           - git_repo is defined
           - warmup is defined
+          - audit is defined
+          - approval is defined
+          - backup is defined
           - kill_php is defined
           - archive_min_bytes is defined
           - release_disk_min_bytes is defined

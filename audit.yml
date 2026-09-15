@@ -1,0 +1,50 @@
+---
+###
+# Checks the environment's audit log and, given `release=`, writes that release's
+# evidence bundle to local.d/evidence/<env>/<release>/.
+#
+#   make audit-verify environment=<env>
+#   make evidence environment=<env> release=<release id>
+###
+- name: Check the audit log and collect evidence
+  hosts: builder
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Verify the audit log's chain
+      ansible.builtin.command:
+        argv: ["{{ audit_tool }}", verify, --path, "{{ audit.path }}"]
+        expand_argument_vars: false
+      register: audit_verify
+      delegate_to: localhost
+      run_once: true
+      changed_when: false
+
+    - name: Report the chain
+      ansible.builtin.debug:
+        msg: "{{ audit_verify.stdout }}"
+      run_once: true
+
+    - name: Write the evidence bundle
+      ansible.builtin.command:
+        argv:
+          - "{{ audit_tool }}"
+          - evidence
+          - --path
+          - "{{ audit.path }}"
+          - --release
+          - "{{ release }}"
+          - --out
+          - "{{ playbook_dir }}/local.d/evidence/{{ env_name }}/{{ release }}"
+        expand_argument_vars: false
+      register: evidence_bundle
+      delegate_to: localhost
+      run_once: true
+      changed_when: true
+      when: release | default('', true) | length > 0
+
+    - name: Report where the evidence is
+      ansible.builtin.debug:
+        msg: "{{ evidence_bundle.stdout }}"
+      run_once: true
+      when: evidence_bundle is not skipped

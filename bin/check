@@ -11,7 +11,7 @@
 #   2. bin/check-structure. Catches what --syntax-check cannot: a reintroduced
 #      `roles:`, a notify with no handler, a parent-path reference, a stray
 #      lookup('env', ...).
-#   3. test.yml -- the seven offline suites, run for real against
+#   3. test.yml -- the eight offline suites, run for real against
 #      inventory/test. No host is contacted; every play is connection: local.
 #   4. yamllint, if it is available.
 #
@@ -36,7 +36,7 @@ command -v ansible-playbook >/dev/null \
 fail=0
 
 echo "Syntax:"
-for playbook in deployment.yml verify-deploy.yml test.yml; do
+for playbook in deployment.yml verify-deploy.yml audit.yml test.yml; do
     if output=$(ansible-playbook --syntax-check -i inventory/test "${playbook}" 2>&1); then
         printf '  ok    %s\n' "${playbook}"
     else
@@ -78,6 +78,16 @@ if [ -n "${python}" ]; then
     "${python}" bin/check-structure || fail=$((fail + 1))
 else
     echo "  SKIP  no python3 found, cannot run bin/check-structure"
+fi
+
+echo ""
+echo "Audit log tool:"
+if output=$("${python:-python3}" -m unittest tests/test_audit_log.py 2>&1); then
+    printf '  ok    bin/audit-log: %s\n' "$(printf '%s\n' "${output}" | grep -oE 'Ran [0-9]+ tests')"
+else
+    echo "  FAIL  bin/audit-log"
+    printf '%s\n' "${output}" | tail -30 | sed 's/^/          /'
+    fail=$((fail + 1))
 fi
 
 echo ""

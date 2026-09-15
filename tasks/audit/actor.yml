@@ -1,0 +1,21 @@
+---
+###
+# Resolves deployer_actor, the identity every audit record carries.
+###
+- name: Read the deployer's git identity on the control node
+  ansible.builtin.command: git config user.email
+  register: deployer_git_email
+  delegate_to: localhost
+  run_once: true
+  become: false
+  changed_when: false
+  failed_when: false
+
+- name: Resolve who is running the deploy
+  ansible.builtin.set_fact:
+    deployer_actor:
+      os_user: "{{ lookup('env', 'USER') }}"
+      git_email: "{{ deployer_git_email.stdout | default('') | trim }}"
+      remote_user: "{{ ansible_user | default('') }}"
+      control_host: "{{ lookup('pipe', 'hostname') }}"
+  run_once: true

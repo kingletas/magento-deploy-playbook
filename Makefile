@@ -59,7 +59,7 @@ endif
 
 environments := $(notdir $(patsubst %/,%,$(wildcard inventory/*/)))
 
-.PHONY: help check lint venv collections test deploy verify unlock magepack-image \
+.PHONY: help check lint venv collections test deploy verify unlock audit-verify evidence magepack-image \
         docker-up docker-test docker-demo docker-deploy docker-verify docker-reset \
         docker-logs docker-down
 
@@ -115,6 +115,17 @@ verify:
 	$(require_environment)
 	$(ANSIBLE_PLAYBOOK) -i inventory/$(environment) verify-deploy.yml $(EXTRA_VARS) $(EXTRA)
 
+## audit-verify: check that the environment's audit log has not been changed (needs environment=)
+audit-verify:
+	$(require_environment)
+	$(ANSIBLE_PLAYBOOK) -i inventory/$(environment) audit.yml $(EXTRA)
+
+## evidence: write one release's audit records and summary to local.d/evidence/ (needs environment= release=)
+evidence:
+	$(require_environment)
+	@test -n "$(release)" || { echo "ERROR: release= is required, e.g. make evidence environment=staging release=20260915_1789500000_staging"; exit 2; }
+	$(ANSIBLE_PLAYBOOK) -i inventory/$(environment) audit.yml --extra-var "release='$(release)'" $(EXTRA)
+
 ## unlock: remove a stale build lock left by a hard-failed deploy (needs environment=)
 unlock:
 	$(require_environment)
@@ -124,7 +135,7 @@ unlock:
 check:
 	@bin/check
 
-## test: run the seven offline suites only (what check runs as its third layer)
+## test: run the eight offline suites only (what check runs as its fourth layer)
 test:
 	$(ANSIBLE_PLAYBOOK) -i inventory/test test.yml $(EXTRA)
 

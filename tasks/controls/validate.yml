@@ -1,0 +1,72 @@
+---
+###
+# Refuses malformed `audit`, `approval` and `backup` settings before anything is
+# built, and resolves who is running the deploy.
+###
+- name: Validate the audit, approval and backup settings
+  ansible.builtin.assert:
+    that:
+      - audit is mapping
+      - audit.path is string and audit.path | length > 0
+      - audit.forward is string
+      - audit.required is boolean
+      - approval is mapping
+      - approval.required is boolean
+      - approval.allowed_signers is string
+      - approval.tag_pattern is string and approval.tag_pattern | length > 0
+      - backup is mapping
+      - backup.run in ['never', 'window', 'always']
+      - backup.command is string
+      - backup.timeout is integer and backup.timeout > 0
+    fail_msg: >-
+      inventory/{{ env_name | default('<env>') }}/group_vars/all.yml needs:
+      audit (path, forward, required), approval (required, allowed_signers,
+      tag_pattern) and backup (run: never, window or always; command; timeout in
+      seconds). See inventory/example/group_vars/all.yml.
+      Got audit={{ audit | default('<UNSET>') }}
+      approval={{ approval | default('<UNSET>') }}
+      backup={{ backup | default('<UNSET>') }}
+  run_once: true
+
+- name: Validate what the enabled controls need
+  ansible.builtin.assert:
+    that:
+      - (not approval.required) or (approval.allowed_signers | length > 0)
+      - (backup.run == 'never') or (backup.command | length > 0)
+    fail_msg: >-
+      approval.required needs allowed_signers, the OpenSSH allowed_signers file
+      of the people who may approve a release, and backup.run
+      '{{ backup.run }}' needs a backup command.
+  run_once: true
+
+- name: Check the allowed signers file exists on the control node
+  ansible.builtin.stat:
+    path: "{{ approval.allowed_signers }}"
+  register: allowed_signers_file
+  delegate_to: localhost
+  run_once: true
+  become: false
+  when: approval.required
+
+- name: Refuse a missing allowed signers file
+  ansible.builtin.assert:
+    that:
+      - allowed_signers_file.stat.exists
+    fail_msg: "approval.allowed_signers points at {{ approval.allowed_signers }}, which does not exist."
+  run_once: true
+  when: approval.required
+
+- name: Resolve who is running the deploy
+  ansible.builtin.import_tasks: tasks/audit/actor.yml
+
+# An approver has to be told apart from the deployer, so the deployer needs a name.
+- name: Refuse an anonymous deployer when approval is required
+  ansible.builtin.assert:
+    that:
+      - deployer_actor.git_email | length > 0
+    fail_msg: >-
+      approval.required is on and `git config user.email` is empty on the
+      control node, so an approval cannot be checked against the person deploying.
+      Set user.email to your own address.
+  run_once: true
+  when: approval.required

@@ -1,0 +1,41 @@
+---
+###
+# Refuses to extract an archive whose SHA-256 differs from the one the builder
+# recorded when it built the release.
+#
+#   archive_path   the archive on this host.
+#   digest_path    the .sha256 file beside the archive on the builder.
+#
+# Sets release_sha256, which the audit log records with the build.
+###
+- name: Read the digest the builder recorded
+  ansible.builtin.slurp:
+    src: "{{ digest_path }}"
+  delegate_to: "{{ builder }}"
+  run_once: true
+  register: recorded_digest
+
+- name: Parse the recorded digest
+  ansible.builtin.set_fact:
+    release_sha256: "{{ (recorded_digest.content | b64decode).split() | first | default('') }}"
+  run_once: true
+
+- name: Hash the archive on this host
+  ansible.builtin.stat:
+    path: "{{ archive_path }}"
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: host_archive_digest
+
+- name: Refuse an archive that is not the one the builder made
+  ansible.builtin.assert:
+    that:
+      - release_sha256 is match('^[0-9a-f]{64}$')
+      - host_archive_digest.stat.exists
+      - host_archive_digest.stat.checksum == release_sha256
+    fail_msg: >-
+      {{ archive_path }} on {{ inventory_hostname }} has SHA-256
+      {{ host_archive_digest.stat.checksum | default('none, it is missing') }},
+      and the builder recorded {{ release_sha256 | default('nothing') }} in
+      {{ digest_path }}. It was changed or damaged after the build, so it will
+      not be extracted. Rebuild the release rather than copying the archive by hand.

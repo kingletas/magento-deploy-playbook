@@ -63,11 +63,9 @@ RUN mkdir -p /var/run/sshd /home/ubuntu/.ssh && chmod 700 /home/ubuntu/.ssh
 COPY keys/id_test.pub /home/ubuntu/.ssh/authorized_keys
 COPY keys/id_test /home/ubuntu/.ssh/id_rsa
 COPY keys/id_test.pub /home/ubuntu/.ssh/id_rsa.pub
-# The builder rsyncs to the web hosts and must trust them without a prompt.
-# These keys are generated per run and never leave the suite.
-RUN printf 'Host *\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n' \
-        > /home/ubuntu/.ssh/config \
-    && chmod 600 /home/ubuntu/.ssh/authorized_keys /home/ubuntu/.ssh/id_rsa /home/ubuntu/.ssh/config \
+# The builder rsyncs to the web hosts with host keys checked. bin/docker-suite up
+# scans the containers and installs known_hosts on the builder.
+RUN chmod 600 /home/ubuntu/.ssh/authorized_keys /home/ubuntu/.ssh/id_rsa \
     && chown -R ubuntu:ubuntu /home/ubuntu/.ssh
 
 EXPOSE 22

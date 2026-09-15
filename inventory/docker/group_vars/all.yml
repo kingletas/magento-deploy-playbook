@@ -48,6 +48,26 @@ warmup:
   timeout: 1
   fail_below: 0
 
+# audit - see inventory/example/. Kept beside the checkout, out of git.
+audit:
+  path: "{{ playbook_dir }}/local.d/audit/docker.audit.jsonl"
+  forward: ""
+  required: true
+
+# approval - see inventory/example/. bin/docker-suite up signs the fixture
+# commit with a throwaway approver key and writes this file.
+approval:
+  required: true
+  allowed_signers: "{{ playbook_dir }}/docker/keys/allowed_signers"
+  tag_pattern: "approved/*"
+
+# backup - see inventory/example/. The fake prints a name, so the window path is
+# exercised end to end.
+backup:
+  run: window
+  command: echo "docker-backup-$(date +%s)"
+  timeout: 60
+
 # kill_php - kill lingering PHP workers before the cutover. Off: the fake fleet
 # runs none.
 kill_php: false

@@ -1,0 +1,39 @@
+# .ordane.yml: a starting point, written by `ordane init`.
+#
+# `make help` supplies the targets, their descriptions and the environments.
+# This file carries what they cannot say: which environments this console
+# may reach, what a parameter means, and which runs count as a release.
+#
+# Nothing outside this file is ever written. The playbooks are read.
+#
+# The console read 18 target(s) from the `Targets:` block that `make help` prints.
+
+environments:
+  # Nothing runs until a name is here, and an empty list is where this
+  # starts on purpose. Uncomment one when you mean it.
+  allow: [docker, local-kapelos]
+  # Found in the environment block that `make help` prints:
+  #   - docker
+  #   - example
+  #   - local-kapelos
+  #   - test
+
+# The variable a target reads to know where it runs. The console assigns this one
+# and nothing else, so a Makefile reading a different name would be handed a value
+# nobody looks at.
+environment_var: environment
+
+# The order these are declared in is the order the console shows them.
+# groups:
+#   Release: [deploy]
+
+# What the repository cannot say about one target.
+# targets:
+#   deploy:
+#     danger: high            # low | medium | high
+#     confirm: type-environment-name
+#     deploy: true            # counts towards the delivery measures
+#     params:
+#       branch_name:
+#         help: the branch to build
+#         allow_other: true

@@ -371,6 +371,36 @@ def check_nothing_needed_is_ignored() -> None:
         )
 
 
+def check_ordane_allows_only_tracked() -> None:
+    """Fail when .ordane.yml may launch against an environment nobody else has.
+
+    The console rewrites this file when you enable an environment in it, so a
+    local-only inventory can reach the allow list without anybody typing it. Its
+    directory is gitignored, so a clone gets a config naming an environment that
+    is not there -- and on a public repository, the name itself ships.
+    """
+    config = PB / ".ordane.yml"
+    if not config.exists():
+        return
+    match = re.search(r"^\s*allow:\s*\[([^\]]*)\]", config.read_text(), re.M)
+    if not match:
+        return
+    allowed = [name.strip() for name in match.group(1).split(",") if name.strip()]
+    tracked = subprocess.run(
+        ["git", "ls-files", "inventory/"],
+        cwd=PB, capture_output=True, text=True, check=False,
+    ).stdout.split()
+    known = {Path(path).parts[1] for path in tracked if len(Path(path).parts) > 1}
+    for name in allowed:
+        if name not in known:
+            errors.append(
+                f".ordane.yml allows launching against '{name}', which is not a "
+                f"tracked inventory. Either it is gitignored, in which case a "
+                f"clone cannot use it and its name should not ship, or it does "
+                f"not exist. Tracked: {', '.join(sorted(known))}."
+            )
+
+
 def main() -> int:
     check_no_roles()
     check_notifies()
@@ -379,6 +409,7 @@ def main() -> int:
     check_no_env_lookups()
     check_tests_symlinks()
     check_nothing_needed_is_ignored()
+    check_ordane_allows_only_tracked()
 
     for e in errors:
         print(f"  FAIL  {e}")

@@ -13,7 +13,7 @@
 # one and mean it; `example` is the template and `test` is the offline suites,
 # so neither belongs on this list.
 environments:
-  allow: [docker, local-kapelos]
+  allow: [docker]
 
 # The make variable that carries the environment. A Makefile reading a
 # different name would be handed a value nothing looks at.

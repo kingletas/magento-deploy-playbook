@@ -247,11 +247,12 @@ and `cutover: true`.
 The last two need a release log at `docs/dora/backfill.jsonl`, and **this
 playbook does not write one.** What it writes is a deployment event per phase to
 `dora.local.path`, which defaults to a file under your own `$HOME` rather than
-into the repository, so it is per-operator state and not a shared history.
-Those events carry what a release log needs -- the release name, the
-environment, the commit and the commit count at build time, and the cutover -- so
-a reporter that folds them into the repository would light both cards. Writing
-one is a real piece of work and is not shipped.
+into the repository. That is per-operator state, not a shared history.
+
+Those events do carry what a release log needs: the release name, the
+environment, the commit and the commit count at build time, and the cutover. A
+reporter folding them into the repository would light both cards. Writing one
+is a real piece of work and isn't shipped.
 
 Until then those two cards stay dormant and say so, which is the point: a zero
 would look like a measurement, and *nothing has shipped* and *nothing has been

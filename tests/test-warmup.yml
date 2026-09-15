@@ -1,0 +1,193 @@
+---
+###
+# tasks/warmup/, run for real against a local web server serving fixture pages
+# and sitemaps: which URLs are requested, what counts as warm, the threshold,
+# and which settings are refused.
+#
+#   ansible-playbook -i inventory/test tests/test-warmup.yml
+###
+- name: The warm-up
+  hosts: builder
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_become: false
+    fixture_root: "/tmp/magento-deploy-playbook-warmup-test"
+  tasks:
+    - name: Find a free local port
+      ansible.builtin.command: >-
+        python3 -c "import socket; s = socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1])"
+      register: free_port
+      changed_when: false
+
+    - name: Name the fixture storefront
+      ansible.builtin.set_fact:
+        base: "http://127.0.0.1:{{ free_port.stdout }}/"
+
+    - name: Reset the fixture tree
+      ansible.builtin.file:
+        path: "{{ fixture_root }}"
+        state: absent
+
+    - name: Create the fixture tree
+      ansible.builtin.file:
+        path: "{{ fixture_root }}"
+        state: directory
+        mode: "0755"
+
+    - name: Write the fixture pages and sitemaps
+      ansible.builtin.copy:
+        dest: "{{ fixture_root }}/{{ item.name }}"
+        content: "{{ item.content }}"
+        mode: "0644"
+      loop:
+        - {name: index.html, content: "home"}
+        - {name: page.html, content: "page"}
+        - {name: other.html, content: "other"}
+        - name: sitemap.xml
+          content: |
+            <?xml version="1.0" encoding="UTF-8"?>
+            <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <url><loc>{{ base }}page.html</loc></url>
+              <url><loc>{{ base }}missing.html</loc></url>
+              <url><loc>http://elsewhere.invalid/page.html</loc></url>
+              <url><loc> {{ base }}other.html?x=1&amp;y=2 </loc></url>
+            </urlset>
+        - name: sitemap_index.xml
+          content: |
+            <?xml version="1.0" encoding="UTF-8"?>
+            <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+              <sitemap><loc>{{ base }}sitemap.xml</loc></sitemap>
+              <sitemap><loc>http://elsewhere.invalid/sitemap.xml</loc></sitemap>
+            </sitemapindex>
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Start the fixture web server
+      ansible.builtin.shell: >-
+        nohup python3 -m http.server {{ free_port.stdout }} --bind 127.0.0.1
+        --directory {{ fixture_root | quote }} > /dev/null 2>&1 & echo $!
+      register: server
+      changed_when: true
+
+    - name: Wait for it to listen
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ free_port.stdout | int }}"
+        timeout: 15
+
+    - name: Run every case, then stop the server
+      block:
+        # Case 1: paths first, then the sitemap's URLs on this host, deduplicated.
+        - name: Set a warm-up with paths and a sitemap
+          ansible.builtin.set_fact:
+            warmup: {enabled: true, base_url: "{{ base }}", paths: [/, /page.html], sitemap: sitemap.xml,
+                     limit: 50, concurrency: 2, timeout: 5, fail_below: 0}
+
+        - name: Warm with paths and a sitemap
+          ansible.builtin.include_tasks: tasks/warmup/main.yml
+
+        - name: Assert the list, the order and the count
+          ansible.builtin.assert:
+            that:
+              - warmup_urls == [base, base ~ 'page.html', base ~ 'missing.html', base ~ 'other.html?x=1&y=2']
+              - warmup_verdict.requested | int == 4
+              - warmup_verdict.ok | int == 3
+              - warmup_verdict.percent | float == 75.0
+              - warmup_verdict.failures | map(attribute='url') | list == [base ~ 'missing.html']
+            fail_msg: "urls={{ warmup_urls }} verdict={{ warmup_verdict }}"
+
+        # Case 2: the limit keeps the configured paths.
+        - name: Set a limit of two
+          ansible.builtin.set_fact:
+            warmup: "{{ warmup | combine({'limit': 2}) }}"
+
+        - name: Warm with a limit of two
+          ansible.builtin.include_tasks: tasks/warmup/main.yml
+
+        - name: Assert the paths survived the cap
+          ansible.builtin.assert:
+            that:
+              - warmup_urls == [base, base ~ 'page.html']
+              - warmup_verdict.requested | int == 2
+            fail_msg: "urls={{ warmup_urls }}"
+
+        # Case 3: a sitemap index is followed one level, on this host only.
+        - name: Point at the sitemap index
+          ansible.builtin.set_fact:
+            warmup: "{{ warmup | combine({'limit': 50, 'sitemap': '/sitemap_index.xml'}) }}"
+
+        - name: Warm through a sitemap index
+          ansible.builtin.include_tasks: tasks/warmup/main.yml
+
+        - name: Assert the index resolved to the same URLs
+          ansible.builtin.assert:
+            that:
+              - warmup_urls == [base, base ~ 'page.html', base ~ 'missing.html', base ~ 'other.html?x=1&y=2']
+            fail_msg: "urls={{ warmup_urls }}"
+
+        # Case 4: a missing sitemap still warms the paths, and says why.
+        - name: Point at a sitemap that does not exist
+          ansible.builtin.set_fact:
+            warmup: "{{ warmup | combine({'sitemap': 'nope.xml'}) }}"
+
+        - name: Warm with a missing sitemap
+          ansible.builtin.include_tasks: tasks/warmup/main.yml
+
+        - name: Assert the paths were warmed and the 404 reported
+          ansible.builtin.assert:
+            that:
+              - warmup_urls == [base, base ~ 'page.html']
+              - warmup_verdict.ok | int == 2
+              - warmup_verdict.sitemap_status | int == 404
+            fail_msg: "urls={{ warmup_urls }} verdict={{ warmup_verdict }}"
+      always:
+        - name: Stop the fixture web server
+          ansible.builtin.command: "kill {{ server.stdout | int }}"
+          changed_when: true
+          failed_when: false
+
+    # The threshold, against a verdict of 75%.
+    - name: A threshold the warm-up met passes
+      ansible.builtin.include_tasks: tasks/warmup/verdict.yml
+      vars:
+        warmup: {enabled: true, fail_below: 70}
+        warmup_verdict: {requested: 4, ok: 3, percent: 75.0}
+
+    - name: A threshold the warm-up missed fails
+      block:
+        - name: Check a 75% warm-up against 80%
+          ansible.builtin.include_tasks: tasks/warmup/verdict.yml
+          vars:
+            warmup: {enabled: true, fail_below: 80}
+            warmup_verdict: {requested: 4, ok: 3, percent: 75.0}
+
+        - name: Should not reach here
+          ansible.builtin.fail:
+            msg: "verdict.yml accepted 75% against a threshold of 80%."
+      rescue:
+        - name: Confirm it failed on the threshold
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search('needed 80')
+            fail_msg: "Failed, but not on the threshold: {{ ansible_failed_result.msg | default('(none)') }}"
+
+    - name: A disabled warm-up with empty settings is accepted
+      ansible.builtin.include_tasks: tasks/warmup/validate.yml
+      vars:
+        warmup: {enabled: false, base_url: "", paths: [], sitemap: "", limit: 1, concurrency: 1, timeout: 1, fail_below: 0}
+
+    - name: Refuse each bad setting
+      ansible.builtin.include_tasks: refuse-warmup.yml
+      loop:
+        - {label: no trailing slash, change: {base_url: "http://127.0.0.1"}}
+        - {label: a path naming another host, change: {paths: ["http://elsewhere.invalid/"]}}
+        - {label: a protocol-relative path, change: {paths: ["//elsewhere.invalid/"]}}
+        - {label: a sitemap on another host, change: {sitemap: "http://elsewhere.invalid/sitemap.xml"}}
+        - {label: nothing to warm, change: {paths: [], sitemap: ""}}
+        - {label: zero concurrency, change: {concurrency: 0}}
+        - {label: a threshold above 100, change: {fail_below: 101}}
+        - {label: enabled as text, change: {enabled: "yes"}}
+      loop_control:
+        loop_var: bad
+        label: "{{ bad.label }}"

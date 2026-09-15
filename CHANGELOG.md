@@ -34,8 +34,14 @@ changed, because there's nothing before it.
   `varnishadm ban obj.http.X-Magento-Tags ~ .`, the same ban Magento's own
   purge sends, so static files and media stay cached. The varnish host needs
   `varnishadm` and the playbook's become user needs to be able to run it.
-- The warm-up ping fires when maintenance comes off, before the prune and the
-  lock release, rather than as the very last step.
+- The warm-up is configured per environment with one `warmup` setting, which
+  replaces `base_url` and `ping_url`. It warms a list of paths and the URLs in
+  a sitemap (following an index one level), capped by `limit`, `concurrency` at
+  a time, on `base_url`'s host only. It runs as soon as maintenance comes off,
+  prints how many URLs answered 2xx and which did not, and fails the run only
+  when fewer than `fail_below` percent succeed, after the lock is released. The
+  settings are checked before the build starts. The hard-coded `filters.php`
+  request is gone.
 - Two new deployment events: `cutover.started` before anything changes, with
   whether this release takes a window, and `maintenance.enabled` when it does.
 

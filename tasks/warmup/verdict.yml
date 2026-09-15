@@ -1,0 +1,25 @@
+---
+###
+# Fails the run when too few warm-up requests answered 2xx. The release is
+# already live by now, so this is an alarm, not a rollback.
+#
+#   warmup           the inventory settings; fail_below 0 never fails.
+#   warmup_verdict   set by tasks/warmup/main.yml.
+###
+- name: Check the warm-up met its threshold
+  ansible.builtin.assert:
+    that:
+      - warmup_verdict is defined
+      - (warmup_verdict.percent | float) >= (warmup.fail_below | float)
+    fail_msg: >-
+      The warm-up needed {{ warmup.fail_below }}% of its URLs to answer 2xx and
+      got {{ warmup_verdict.percent | default('no result') }}%
+      ({{ warmup_verdict.ok | default(0) }} of {{ warmup_verdict.requested | default(0) }}).
+      The release is live; this reports a slow or broken storefront, it did not
+      roll anything back.
+    success_msg: >-
+      Warm-up {{ warmup_verdict.percent | default('') }}%, threshold {{ warmup.fail_below }}%.
+  when:
+    - warmup.enabled
+    - (warmup.fail_below | float) > 0
+  run_once: true

@@ -91,8 +91,3 @@ notify_via_noibu: false
 # `current` points at, whatever these say.
 teardown_archives_to_keep: 4
 teardown_releases_to_keep: 2
-
-# ping_urls - requested once the deploy finishes, to warm the caches. ping_url
-# gates it and base_url builds it, both from the inventory.
-ping_urls:
-  - "{{ base_url }}filters.php"

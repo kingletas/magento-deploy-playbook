@@ -38,12 +38,17 @@ deployment_complete: true
 # git_repo - never cloned. Present because git.repo must resolve.
 git_repo: /nonexistent/offline-suite.git
 
-# base_url - unused here, because ping_url is off. Left empty rather than given
-# a plausible URL nothing would request.
-base_url: ""
-
-# ping_url - request the warm-up URL after the deploy. Off: nothing to warm.
-ping_url: false
+# warmup - see inventory/example/. Off: tests/test-warmup.yml turns it on
+# against its own local server.
+warmup:
+  enabled: false
+  base_url: ""
+  paths: []
+  sitemap: ""
+  limit: 1
+  concurrency: 1
+  timeout: 1
+  fail_below: 0
 
 # kill_php - kill lingering PHP workers before the cutover. Off: no fleet.
 kill_php: false

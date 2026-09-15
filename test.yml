@@ -26,3 +26,6 @@
 
 - name: Which releases get a maintenance window
   ansible.builtin.import_playbook: tests/test-upgrade-gate.yml
+
+- name: The warm-up, against a local web server
+  ansible.builtin.import_playbook: tests/test-warmup.yml

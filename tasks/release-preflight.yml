@@ -47,6 +47,9 @@
 - name: Check every host has room for a release
   ansible.builtin.import_tasks: disk-space.yml
 
+- name: Check the warm-up settings
+  ansible.builtin.import_tasks: warmup/validate.yml
+
 - name: Set the builder
   ansible.builtin.set_fact:
     builder: "{{ groups.builder[0] }}"

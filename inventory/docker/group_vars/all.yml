@@ -37,12 +37,16 @@ deployment_complete: true
 # network egress, no credentials. Rebuild with docker/fixtures/build-repo.sh.
 git_repo: /srv/magento-repo.git
 
-# base_url - unused here, because ping_url is off.
-base_url: ""
-
-# ping_url - request the warm-up URL after the deploy. Off: there is no
-# storefront to warm.
-ping_url: false
+# warmup - see inventory/example/. Off: the fake fleet serves no storefront.
+warmup:
+  enabled: false
+  base_url: ""
+  paths: []
+  sitemap: ""
+  limit: 1
+  concurrency: 1
+  timeout: 1
+  fail_below: 0
 
 # kill_php - kill lingering PHP workers before the cutover. Off: the fake fleet
 # runs none.

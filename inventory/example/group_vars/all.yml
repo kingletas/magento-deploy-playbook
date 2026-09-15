@@ -35,12 +35,28 @@ deployment_complete: true
 # git_repo - where the release is cloned from. The builder needs read access.
 git_repo: git@github.com:example-org/magento2-store.git
 
-# base_url - the storefront root, used to build the warm-up ping URL. The
-# trailing slash matters: a path is appended to it directly.
-base_url: https://stage.example.com/
-
-# ping_url - request the warm-up URL after the deploy. Requires base_url.
-ping_url: false
+# warmup - requests storefront pages from the control node once maintenance is
+# off, so the first customers do not pay for a cold cache. The paths go first,
+# then the sitemap's URLs on base_url's host, up to `limit`. It never fails the
+# deploy unless fewer than `fail_below` percent answer 2xx; 0 only reports.
+#   enabled      true or false
+#   base_url     the storefront root, ending in "/"
+#   paths        pages to warm first, each starting with "/"
+#   sitemap      a path under base_url, or "" for none. An index is followed once
+#   limit        the most URLs requested, after duplicates are removed
+#   concurrency  requests at a time, 1 to 64
+#   timeout      seconds per request
+#   fail_below   percentage of 2xx needed, 0 to 100
+warmup:
+  enabled: false
+  base_url: https://stage.example.com/
+  paths:
+    - /
+  sitemap: sitemap.xml
+  limit: 200
+  concurrency: 8
+  timeout: 30
+  fail_below: 0
 
 # kill_php - kill lingering PHP workers on cron and admin before the cutover.
 kill_php: false

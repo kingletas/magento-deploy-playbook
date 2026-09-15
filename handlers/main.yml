@@ -97,18 +97,7 @@
 # Notified by maint:disable, so it runs when the Magento play ends, before the
 # prune and the lock release rather than after them.
 - name: Warm the caches
-  ansible.builtin.uri:
-    url: "{{ item }}"
-    method: GET
-    status_code: 200
-    return_content: false
-    timeout: 60
-  delegate_to: localhost
-  run_once: true
-  loop: "{{ ping_urls }}"
-  when: ping_url
-  become: false
-  failed_when: false
+  ansible.builtin.include_tasks: tasks/warmup/main.yml
 
 # Nothing notifies this. Uncomment the notify in tasks/magento-deploy/main.yml.
 - name: Flush the Yottaa edge cache

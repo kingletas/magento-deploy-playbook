@@ -1,0 +1,26 @@
+---
+###
+# Builds the list of URLs to warm. No network: the caller fetches the sitemaps.
+#
+#   warmup                  the inventory settings.
+#   warmup_sitemap_bodies   the XML of each sitemap fetched, [] for none.
+#
+# Sets warmup_urls: the paths first, in order, then the sitemap's URLs on
+# base_url's host, without duplicates, cut to warmup.limit.
+###
+- name: Resolve the configured paths against base_url
+  ansible.builtin.set_fact:
+    warmup_path_urls: "{{ warmup.paths | map('regex_replace', '^/', warmup.base_url) | list }}"
+
+- name: Read the sitemap URLs that belong to this storefront
+  ansible.builtin.set_fact:
+    warmup_sitemap_urls: >-
+      {{ warmup_sitemap_bodies | default([])
+         | map('regex_findall', '<loc>\s*([^<\s]+)\s*</loc>') | flatten
+         | map('regex_replace', '&amp;', '&')
+         | select('match', '^https?://' ~ (warmup.base_url | urlsplit('netloc') | regex_escape) ~ '(/|$)')
+         | list }}
+
+- name: Merge, deduplicate and cap the list
+  ansible.builtin.set_fact:
+    warmup_urls: "{{ ((warmup_path_urls + warmup_sitemap_urls) | unique | list)[: warmup.limit] }}"

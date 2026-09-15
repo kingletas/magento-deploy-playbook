@@ -1,0 +1,24 @@
+---
+###
+# One refused warm-up setting for tests/test-warmup.yml: a valid enabled
+# warm-up with `bad.change` applied must fail validation.
+###
+- name: "Refuse {{ bad.label }}"
+  block:
+    - name: "Validate with {{ bad.label }}"
+      ansible.builtin.include_tasks: tasks/warmup/validate.yml
+      vars:
+        warmup: >-
+          {{ {'enabled': true, 'base_url': 'http://127.0.0.1/', 'paths': ['/'],
+              'sitemap': 'sitemap.xml', 'limit': 5, 'concurrency': 2,
+              'timeout': 5, 'fail_below': 0} | combine(bad.change) }}
+
+    - name: "Should not reach here with {{ bad.label }}"
+      ansible.builtin.fail:
+        msg: "validate.yml accepted {{ bad.label }}."
+  rescue:
+    - name: "Confirm validation refused {{ bad.label }}"
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.msg is search('warmup')
+        fail_msg: "Failed, but not in validation: {{ ansible_failed_result.msg | default('(none)') }}"

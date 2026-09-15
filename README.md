@@ -138,7 +138,7 @@ hosts and addresses are nobody else's business. An inventory has to live under
 copying `inventory/example/` -- the template -- and editing two files;
 `make check` then tells you if you forgot a key or invented one.
 
-All three declare **the same thirteen keys**, and `make check` fails if one of
+All three declare **the same twelve keys**, and `make check` fails if one of
 them forgets a key or invents one:
 
 | Key | What it decides |
@@ -150,8 +150,7 @@ them forgets a key or invents one:
 | `profile` | The text in the Slack message and the PagerDuty description |
 | `deployment_complete` | Whether the `current` symlink is repointed |
 | `git_repo` | Where the release is cloned from |
-| `base_url` | Feeds the warm-up ping URL |
-| `ping_url` | Whether the warm-up ping fires at all |
+| `warmup` | Whether and how the storefront is warmed once maintenance is off. See [Warming the storefront](#warming-the-storefront) |
 | `kill_php` | Whether PHP is killed before the cutover |
 | `archive_min_bytes` | The floor the built tarball must exceed |
 | `release_disk_min_bytes` | Free space each host must have **before** the deploy starts |
@@ -185,6 +184,43 @@ deploy gives you the numbers to set it from.
 **`suffix` is an environment-slot identifier, not a branch derivation.** It is a
 literal. Deriving it from `branch_name` would give every branch its own prune
 scope, and releases from other branches would then never be pruned.
+
+## Warming the storefront
+
+A deploy flushes Magento's cache and bans its pages in Varnish, so the first
+visitors after it build every page from scratch. The warm-up requests pages
+first, from the machine running Ansible, as soon as maintenance mode is off:
+
+```yaml
+warmup:
+  enabled: true
+  base_url: https://stage.example.com/
+  paths:                  # warmed first, in this order
+    - /
+    - /customer/account/login/
+  sitemap: sitemap.xml    # "" for none; an index is followed one level
+  limit: 200              # most URLs requested, after duplicates are removed
+  concurrency: 8          # requests at a time, 1 to 64
+  timeout: 30             # seconds per request
+  fail_below: 0           # % that must answer 2xx; 0 only reports
+```
+
+It requests the paths, then the sitemap's URLs, stopping at `limit`. Only URLs
+on `base_url`'s host are requested: a path has to start with a single `/`, and
+sitemap entries for any other host are skipped. Every setting is checked before
+the build starts, because by the time the warm-up runs the release is live.
+
+The run prints how many URLs answered 2xx and lists the first 20 that did not.
+**It never fails the deploy unless you set `fail_below`**, and even then the
+check runs last, after the prune and the lock release, and rolls nothing back:
+the release is already serving. Use it as an alarm for a storefront that came up
+broken.
+
+**It warms after traffic arrives, not before.** When there is no maintenance
+window there is no moment before customers reach the new release, and during a
+window Magento's maintenance page blocks the warm-up's requests too. Warming a
+node before it takes traffic needs a rolling deploy, which this playbook does
+not do.
 
 ## Bundling the JavaScript
 
@@ -338,7 +374,7 @@ deployment.yml          six plays: guard, preflight, build, upload, magento,
                         prune
 verify-deploy.yml       asserts on the filesystem after a deploy
 unlock.yml              clears a stale build lock
-test.yml                imports the six offline suites
+test.yml                imports the seven offline suites
 tests/                  the suites, plus four symlinks -- see below
     test-vars-contract.yml  test-bundler.yml
     test-release-lock.yml   test-release-prune.yml
@@ -437,7 +473,7 @@ evaluating it templates the values. Every suite imports preflight first.
 ## What the checks cover, and what they don't
 
 ```bash
-make check         # syntax, inventories, structure, six offline suites, lint
+make check         # syntax, inventories, structure, seven offline suites, lint
 make docker-test   # the real thing, against six containers
 make docker-demo   # the same, building real Magento from GitHub
 make docker-down   # afterwards
@@ -450,7 +486,7 @@ make docker-down   # afterwards
 | `--syntax-check` × 3 | A bad include path, a malformed task, a bad play key |
 | Inventories × 4 | A hosts file where `builder`/`apps`/`admin`/`cron`/`varnish`/`web` don't all resolve. A deploy against a broken one reports "no hosts matched" and exits **0** |
 | `bin/check-structure` | A reintroduced `roles:`; a `notify` with no handler; an include path that only resolves at run time; **a parent-path reference**; **a stray `lookup('env', ...)`** |
-| `test.yml` | 112 tasks across six suites: the variable contract and the precedence guard, the disk pre-flight, the `bundler_steps` table, the build lock, the prune against a real temporary filesystem, the replaced release's maintenance flag against another, and which status exit codes open a maintenance window or stop the cutover |
+| `test.yml` | 208 tasks across seven suites: the variable contract and the precedence guard, the disk pre-flight, the `bundler_steps` table, the build lock, the prune against a real temporary filesystem, the replaced release's maintenance flag against another, and which status exit codes open a maintenance window or stop the cutover, and the warm-up against a local web server |
 | yamllint / ansible-lint | Formatting. A broken tool reads as **SKIP**, never as a failure |
 
 Every structural check has been negative-tested -- a deliberate fault introduced
@@ -475,7 +511,7 @@ make deploy environment=staging
 ```
 
 `make check` will tell you if you forgot a key or added one the other
-environments don't have. Set every one of the thirteen explicitly, even where
+environments don't have. Set every one of the twelve explicitly, even where
 the value is the same as everywhere else. An environment that omits a key falls
 back to whatever happens to be around, which is exactly the failure mode the
 shell profiles had.

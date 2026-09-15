@@ -125,3 +125,12 @@
   handlers:
     - name: Playbook handlers
       ansible.builtin.import_tasks: handlers/main.yml
+
+# Last, so a poor warm-up never leaves the prune undone or the lock held.
+- name: Hold the warm-up to its threshold
+  hosts: web
+  become: false
+  gather_facts: false
+  tasks:
+    - name: Fail when too few warm-up requests answered 2xx
+      ansible.builtin.import_tasks: tasks/warmup/verdict.yml

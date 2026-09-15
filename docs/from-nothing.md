@@ -53,7 +53,7 @@ make check
 This is everything that can be verified without contacting a host, and it takes
 a few seconds. It runs a syntax check over all three playbooks, parses every
 inventory and asserts the host groups resolve, runs five structural checks over
-the repository itself, runs six offline test suites (around 112 tasks), and
+the repository itself, runs seven offline test suites, and
 lints.
 
 You should see it finish without a failure. A `SKIP` next to yamllint or
@@ -85,7 +85,7 @@ playbook runs against them, exactly as it would against real servers:
 6. **Deploy.** Asks the new release whether it has database or config work,
    turns maintenance on in it if so, flips the `current` symlink, reloads the
    web services, runs `setup:upgrade` when needed, bans Magento's pages in
-   Varnish, turns maintenance off and fires the warm-up ping.
+   Varnish, turns maintenance off and warms the storefront if `warmup` is on.
 7. **Prune.** Removes old releases and archives, keeping the live one.
 8. **Unlock.**
 
@@ -168,7 +168,7 @@ names aren't free-form: the handlers loop over `groups.apps + groups.admin`
 and `groups.cron + groups.admin`, so an inventory that renames one breaks at
 handler time. `builder` and `varnish` sit outside `web` on purpose.
 
-**`inventory/staging/group_vars/all.yml`** -- the thirteen keys. Every comment
+**`inventory/staging/group_vars/all.yml`** -- the twelve keys. Every comment
 in that file explains what its key decides. The three that catch people:
 
 - `deployment_complete` -- when false the deploy runs green and never flips the

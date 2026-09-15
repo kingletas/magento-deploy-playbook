@@ -1,0 +1,43 @@
+---
+###
+# Refuses malformed `warmup` settings before anything is built. The warm-up
+# itself only runs once the release is live, which is too late to find a typo.
+###
+- name: Validate the warm-up settings
+  ansible.builtin.assert:
+    that:
+      - warmup is mapping
+      - warmup.enabled is boolean
+      - warmup.base_url is string
+      - warmup.paths is sequence and warmup.paths is not string
+      - warmup.paths | select('string') | list | length == warmup.paths | length
+      - warmup.sitemap is string
+      - warmup.limit is integer and warmup.limit > 0
+      - warmup.concurrency is integer and warmup.concurrency >= 1 and warmup.concurrency <= 64
+      - warmup.timeout is integer and warmup.timeout > 0
+      - warmup.fail_below is number and warmup.fail_below >= 0 and warmup.fail_below <= 100
+    fail_msg: >-
+      `warmup` in inventory/{{ env_name | default('<env>') }}/group_vars/all.yml
+      needs every key with the right type: enabled (true/false), base_url
+      (text), paths (a list), sitemap (text, "" for none), limit (a whole
+      number above 0), concurrency (1 to 64), timeout (seconds, above 0) and
+      fail_below (a percentage, 0 to 100). Got: {{ warmup | default('<UNSET>') }}
+  run_once: true
+
+# Requests go only to base_url's host: a path cannot name another site, and
+# neither can the sitemap.
+- name: Validate what an enabled warm-up will request
+  ansible.builtin.assert:
+    that:
+      - warmup.base_url is match('^https?://[^/\s]+(/[^\s]*)?/$')
+      - warmup.paths | reject('match', '^/(?!/)') | list | length == 0
+      - warmup.sitemap is not search('://') and warmup.sitemap is not match('//')
+      - (warmup.paths | length > 0) or (warmup.sitemap | length > 0)
+    fail_msg: >-
+      With warmup.enabled on, base_url must be an http or https URL ending in
+      "/", every path must start with a single "/", the sitemap must be a path on
+      the same site, and there must be at least one path or a sitemap.
+      base_url={{ warmup.base_url }} paths={{ warmup.paths }}
+      sitemap={{ warmup.sitemap }}
+  when: warmup.enabled
+  run_once: true

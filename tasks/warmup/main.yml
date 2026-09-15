@@ -1,0 +1,96 @@
+---
+###
+# Warms the storefront once the release is live: the configured paths, then the
+# URLs in the sitemap, capped by warmup.limit and sent warmup.concurrency at a
+# time from the control node.
+#
+# Never fails the play. It sets warmup_verdict, and the last play in
+# deployment.yml compares that to warmup.fail_below once the lock is released.
+###
+- name: Warm the storefront
+  when: warmup.enabled
+  block:
+    - name: Fetch the sitemap
+      ansible.builtin.uri:
+        url: "{{ warmup.base_url }}{{ warmup.sitemap | regex_replace('^/', '') }}"
+        method: GET
+        timeout: "{{ warmup.timeout }}"
+        return_content: true
+      register: warmup_sitemap
+      when: warmup.sitemap | length > 0
+      delegate_to: localhost
+      run_once: true
+      become: false
+      failed_when: false
+
+    - name: Note whether the sitemap is an index of other sitemaps
+      ansible.builtin.set_fact:
+        warmup_sitemap_ok: "{{ (warmup_sitemap.status | default(0)) == 200 }}"
+        warmup_sitemap_is_index: "{{ (warmup_sitemap.content | default('')) is search('<sitemapindex') }}"
+      run_once: true
+
+    # One level deep, and only sitemaps on base_url's host.
+    - name: Fetch the sitemaps the index lists
+      ansible.builtin.uri:
+        url: "{{ item }}"
+        method: GET
+        timeout: "{{ warmup.timeout }}"
+        return_content: true
+      loop: >-
+        {{ (warmup_sitemap.content | regex_findall('<loc>\s*([^<\s]+)\s*</loc>'))
+           | select('match', '^https?://' ~ (warmup.base_url | urlsplit('netloc') | regex_escape) ~ '(/|$)')
+           | list }}
+      register: warmup_child_sitemaps
+      when: warmup_sitemap_ok and warmup_sitemap_is_index
+      delegate_to: localhost
+      run_once: true
+      become: false
+      failed_when: false
+
+    - name: Plan the URLs to warm
+      ansible.builtin.include_tasks: tasks/warmup/plan.yml
+      vars:
+        warmup_sitemap_bodies: >-
+          {{ (warmup_child_sitemaps.results | default([]) | selectattr('status', 'defined')
+              | selectattr('status', 'equalto', 200) | map(attribute='content') | list)
+             if warmup_sitemap_is_index
+             else ([warmup_sitemap.content] if warmup_sitemap_ok else []) }}
+
+    - name: Start from no responses
+      ansible.builtin.set_fact:
+        warmup_responses: []
+      run_once: true
+
+    - name: Request the URLs, a batch at a time
+      ansible.builtin.include_tasks: tasks/warmup/batch.yml
+      loop: "{{ warmup_urls | batch(warmup.concurrency) | list }}"
+      loop_control:
+        loop_var: warmup_batch
+
+    - name: Summarise the warm-up
+      ansible.builtin.set_fact:
+        warmup_verdict:
+          requested: "{{ warmup_responses | length }}"
+          ok: "{{ warmup_responses | selectattr('status', 'ge', 200) | selectattr('status', 'lt', 300) | list | length }}"
+          sitemap_status: "{{ warmup_sitemap.status | default('not configured') }}"
+          failures: "{{ warmup_responses | rejectattr('status', 'ge', 200) | list
+                        + warmup_responses | selectattr('status', 'ge', 300) | list }}"
+      run_once: true
+
+    - name: Add the success rate
+      ansible.builtin.set_fact:
+        warmup_verdict: >-
+          {{ warmup_verdict | combine({'percent':
+               ((warmup_verdict.ok | int) * 100 / (warmup_verdict.requested | int)) | round(1)
+               if (warmup_verdict.requested | int) > 0 else 0.0}) }}
+      run_once: true
+
+    - name: Report the warm-up
+      ansible.builtin.debug:
+        msg: >-
+          Warmed {{ warmup_verdict.ok }} of {{ warmup_verdict.requested }} URLs
+          ({{ warmup_verdict.percent }}%) from {{ warmup.base_url }}, sitemap
+          answered {{ warmup_verdict.sitemap_status }}.
+          {% if warmup_verdict.failures | length %}Not 2xx, first 20:
+          {% for failure in warmup_verdict.failures[:20] %}{{ failure.url }} -> {{ failure.status }}{{ '' if loop.last else ', ' }}{% endfor %}{% endif %}
+      run_once: true

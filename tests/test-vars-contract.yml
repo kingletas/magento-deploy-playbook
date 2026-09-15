@@ -120,8 +120,7 @@
           - php_version == '8.4'
           - deployment_complete is defined
           - git_repo is defined
-          - base_url is defined
-          - ping_url is defined
+          - warmup is defined
           - kill_php is defined
           - archive_min_bytes is defined
           - release_disk_min_bytes is defined

@@ -1,0 +1,48 @@
+---
+###
+# Requests one batch of warmup_urls in parallel from the control node and
+# appends {url, status, msg} for each to warmup_responses.
+#
+#   warmup_batch   the URLs in this batch, at most warmup.concurrency of them.
+###
+- name: Start this batch of warm-up requests
+  ansible.builtin.uri:
+    url: "{{ item }}"
+    method: GET
+    timeout: "{{ warmup.timeout }}"
+    return_content: false
+  loop: "{{ warmup_batch }}"
+  async: "{{ warmup.timeout + 10 }}"
+  poll: 0
+  register: warmup_jobs
+  delegate_to: localhost
+  run_once: true
+  become: false
+  changed_when: false
+
+- name: Wait for this batch to answer
+  ansible.builtin.async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ warmup_jobs.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  register: warmup_answers
+  until: warmup_answers.finished
+  retries: "{{ warmup.timeout + 10 }}"
+  delay: 1
+  delegate_to: localhost
+  run_once: true
+  become: false
+  failed_when: false
+
+- name: Record how this batch answered
+  ansible.builtin.set_fact:
+    warmup_responses: >-
+      {%- set batch = [] -%}
+      {%- for answer in warmup_answers.results -%}
+      {%- set _ = batch.append({'url': answer.item.item,
+                                'status': answer.status | default(-1),
+                                'msg': answer.msg | default('')}) -%}
+      {%- endfor -%}
+      {{ warmup_responses | default([]) + batch }}
+  run_once: true

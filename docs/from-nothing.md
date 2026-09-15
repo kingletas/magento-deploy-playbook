@@ -53,7 +53,7 @@ make check
 This is everything that can be verified without contacting a host, and it takes
 a few seconds. It runs a syntax check over all three playbooks, parses every
 inventory and asserts the host groups resolve, runs five structural checks over
-the repository itself, runs four offline test suites (around 87 tasks), and
+the repository itself, runs five offline test suites (around 93 tasks), and
 lints.
 
 You should see it finish without a failure. A `SKIP` next to yamllint or

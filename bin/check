@@ -11,7 +11,7 @@
 #   2. bin/check-structure. Catches what --syntax-check cannot: a reintroduced
 #      `roles:`, a notify with no handler, a parent-path reference, a stray
 #      lookup('env', ...).
-#   3. test.yml -- the four offline suites, run for real against
+#   3. test.yml -- the five offline suites, run for real against
 #      inventory/test. No host is contacted; every play is connection: local.
 #   4. yamllint, if it is available.
 #

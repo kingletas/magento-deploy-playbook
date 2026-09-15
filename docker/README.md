@@ -5,7 +5,7 @@ so the deploy path can be exercised without an AWS account, a VPN, or a
 maintenance window.
 
 ```bash
-make docker-test      # up, reset, deploy, verify -- the whole thing
+make docker-test      # up, reset, deploy twice, verify -- the whole thing
 make docker-down      # stop and remove everything
 ```
 
@@ -30,7 +30,7 @@ This is the important table. The suite tests **orchestration**, not Magento.
 |---|---|
 | SSH to every host, as `ubuntu`, with `become` | `php` -- dispatches to the composer or Magento fake |
 | **The builder-to-web rsync push** (`synchronize`, `delegate_to: builder`) | `composer` -- answers the module's `--format=json` option probe, then creates the directories a real install leaves |
-| `git clone` / `reset` / `fetch` / `checkout` from a real bare repo | `bin/magento` -- logs the subcommand; `setup:db:status` and `app:config:status` report "up to date" |
+| `git clone` / `reset` / `fetch` / `checkout` from a real bare repo | `bin/magento` -- logs the subcommand; `setup:db:status` and `app:config:status` report "up to date"; `maint:enable` and `maint:disable` write and remove `var/.maintenance.flag` |
 | Real tar and untar, real file ownership and modes | `manipulus` -- logs the invocation; `docker run`, for the magepack path |
 | The `current` symlink flip, and the shared symlinks into an EFS-shaped path | `service` -- sysv shims in `/etc/init.d/` because there's no init system |
 | Every assert, gate, `run_once`, `delegate_to` and handler in the playbook | PagerDuty / New Relic / Noibu / Slack -- off via `notify_via_*` |
@@ -76,7 +76,7 @@ varnish   ── restarted by its own play
 | `make docker-up` | Build the image, start the containers, generate the inventory |
 | `make docker-deploy` | Run the deploy exactly as a real one runs: `ansible-playbook -i inventory/docker deployment.yml`, from this directory |
 | `make docker-verify` | Assert on what the deploy left behind |
-| `make docker-test` | All three |
+| `make docker-test` | All three, deploying twice so there is a replaced release to verify |
 | `make docker-reset` | Clear locks and releases so a run can be repeated |
 | `make docker-logs` | Print each container's fake-tool call log |
 | `make docker-down` | Stop and remove |

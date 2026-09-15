@@ -7,6 +7,15 @@ Entries say what changed for somebody using this, not what the diff did.
 First public release. Everything below is what it contains rather than what
 changed, because there's nothing before it.
 
+### Fixed
+
+- Rolling back no longer lands the store in maintenance mode. Maintenance was
+  enabled in the release being replaced and disabled only in the new one, so
+  every superseded release kept `var/.maintenance.flag`, and repointing the
+  symlink at one served the maintenance page. The deploy now removes the flag
+  from the release it replaced. Releases replaced before this still carry it;
+  run `php bin/magento maint:disable` in one before rolling back to it.
+
 ### Added
 
 - Two guards on the inventory, in the playbook rather than in `make`, so they

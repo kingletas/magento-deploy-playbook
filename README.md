@@ -338,10 +338,11 @@ deployment.yml          seven plays: guard, preflight, build, upload, varnish,
                         magento, prune
 verify-deploy.yml       asserts on the filesystem after a deploy
 unlock.yml              clears a stale build lock
-test.yml                imports the four offline suites
+test.yml                imports the five offline suites
 tests/                  the suites, plus four symlinks -- see below
     test-vars-contract.yml  test-bundler.yml
     test-release-lock.yml   test-release-prune.yml
+    test-outgoing-maintenance.yml
     group_vars -> ../group_vars   tasks -> ../tasks
     handlers   -> ../handlers     inventory -> ../inventory
 
@@ -436,7 +437,7 @@ evaluating it templates the values. Every suite imports preflight first.
 ## What the checks cover, and what they don't
 
 ```bash
-make check         # syntax, inventories, structure, four offline suites, lint
+make check         # syntax, inventories, structure, five offline suites, lint
 make docker-test   # the real thing, against six containers
 make docker-demo   # the same, building real Magento from GitHub
 make docker-down   # afterwards
@@ -449,7 +450,7 @@ make docker-down   # afterwards
 | `--syntax-check` × 3 | A bad include path, a malformed task, a bad play key |
 | Inventories × 4 | A hosts file where `builder`/`apps`/`admin`/`cron`/`varnish`/`web` don't all resolve. A deploy against a broken one reports "no hosts matched" and exits **0** |
 | `bin/check-structure` | A reintroduced `roles:`; a `notify` with no handler; an include path that only resolves at run time; **a parent-path reference**; **a stray `lookup('env', ...)`** |
-| `test.yml` | 87 tasks across four suites: the variable contract and the precedence guard, the disk pre-flight, the `bundler_steps` table, the build lock, and the prune against a real temporary filesystem |
+| `test.yml` | 93 tasks across five suites: the variable contract and the precedence guard, the disk pre-flight, the `bundler_steps` table, the build lock, the prune against a real temporary filesystem, and the replaced release's maintenance flag against another |
 | yamllint / ansible-lint | Formatting. A broken tool reads as **SKIP**, never as a failure |
 
 Every structural check has been negative-tested -- a deliberate fault introduced
@@ -504,7 +505,11 @@ how people find out the hard way:
 
 - **No rollback command.** The previous releases are still on disk
   (`teardown_releases_to_keep` keeps two) and the cutover is a symlink flip, so
-  rolling back is repointing that symlink and clearing caches. There is no
+  rolling back is repointing that symlink and clearing caches. The deploy takes
+  the maintenance flag off the release it replaces, so the one you roll back to
+  is not in maintenance mode. A release replaced by an older version of this
+  playbook still carries `var/.maintenance.flag`: run
+  `php bin/magento maint:disable` in it after repointing. There is no
   `make rollback` that does it for you.
 - **No zero-downtime guarantee.** Maintenance mode goes on before the Magento
   deploy and off after it. How long that is depends on your catalogue.

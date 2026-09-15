@@ -156,6 +156,36 @@
       loop_control:
         label: "{{ item.item }}"
 
+    # Rolling back is repointing the symlink, so a release still carrying the
+    # flag comes back in maintenance mode.
+    - name: Find the releases on this host
+      ansible.builtin.find:
+        paths: "{{ releases.path }}"
+        file_type: directory
+        recurse: false
+      register: host_releases
+
+    - name: Check each release for a maintenance flag
+      ansible.builtin.stat:
+        path: "{{ item.path }}/var/.maintenance.flag"
+      loop: "{{ host_releases.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      register: maintenance_flags
+
+    - name: No release is left in maintenance mode
+      ansible.builtin.assert:
+        that:
+          - host_releases.files | length >= 1
+          - flagged | length == 0
+        fail_msg: >-
+          {{ flagged | join(', ') }} on {{ inventory_hostname }} still carries
+          var/.maintenance.flag, so rolling back to it lands in maintenance mode.
+      vars:
+        flagged: >-
+          {{ maintenance_flags.results | selectattr('stat.exists')
+             | map(attribute='item.path') | map('basename') | list }}
+
 - name: Verify the admin-only steps ran once, not once per web host
   hosts: admin
   gather_facts: false

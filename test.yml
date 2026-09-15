@@ -20,3 +20,6 @@
 
 - name: The prune, against a real filesystem
   ansible.builtin.import_playbook: tests/test-release-prune.yml
+
+- name: The replaced release's maintenance flag, against a real filesystem
+  ansible.builtin.import_playbook: tests/test-outgoing-maintenance.yml

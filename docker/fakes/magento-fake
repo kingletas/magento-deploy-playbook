@@ -6,8 +6,19 @@
 # one of them reports work to do. Both report "up to date" here, so the default
 # path is the no-upgrade path. Set MAGENTO_FAKE_NEEDS_UPGRADE=1 in the
 # container to exercise the other branch.
+#
+# `maint:enable` and `maint:disable` write and remove var/.maintenance.flag in
+# the release they run in, as Magento does.
 echo "[fake-magento] $*" >> /tmp/build-log 2>/dev/null || true
 case "$1" in
+  maint:enable)
+    mkdir -p var && touch var/.maintenance.flag
+    echo "Enabled maintenance mode"
+    ;;
+  maint:disable)
+    rm -f var/.maintenance.flag
+    echo "Disabled maintenance mode"
+    ;;
   setup:db:status)
     if [ "${MAGENTO_FAKE_NEEDS_UPGRADE:-0}" = "1" ]; then
       echo "Declarative Schema is not up to date"

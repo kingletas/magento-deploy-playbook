@@ -1,0 +1,146 @@
+---
+###
+# tasks/release-outgoing-maintenance.yml, run for real against a temporary
+# filesystem: flags the live release, cuts over, and asserts which flags remain.
+#
+#   ansible-playbook -i inventory/test tests/test-outgoing-maintenance.yml
+###
+- name: The replaced release is taken out of maintenance
+  hosts: builder
+  connection: local
+  gather_facts: false
+  vars:
+    # The task escalates on a real host; here it runs as whoever runs the suite.
+    ansible_become: false
+    # A throwaway tree under /tmp. Override with `-e flag_root=...`.
+    flag_root: "/tmp/magento-deploy-playbook-maintenance-test"
+    releases:
+      path: "{{ flag_root }}/releases/"
+      current: "{{ flag_root }}/current"
+      complete: true
+    old_release: 20260101_1700000001_testenv
+    new_release: 20260102_1700000002_testenv
+  tasks:
+    - name: Reset the fixture tree
+      ansible.builtin.file:
+        path: "{{ flag_root }}"
+        state: absent
+
+    - name: Create both releases with a var directory
+      ansible.builtin.file:
+        path: "{{ releases.path }}{{ item }}/var"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ old_release }}"
+        - "{{ new_release }}"
+
+    - name: Flag both releases, as maint:enable and a failed deploy would
+      ansible.builtin.copy:
+        dest: "{{ releases.path }}{{ item }}/var/.maintenance.flag"
+        content: ""
+        mode: "0644"
+      loop:
+        - "{{ old_release }}"
+        - "{{ new_release }}"
+
+    - name: Point current at the old release
+      ansible.builtin.file:
+        src: "{{ releases.path }}{{ old_release }}"
+        dest: "{{ releases.current }}"
+        state: link
+
+    # Case 1: a deploy that goes live clears the release it replaced.
+    - name: Record the live release, as the deploy does before the flip
+      ansible.builtin.stat:
+        path: "{{ releases.current }}"
+        follow: false
+      register: outgoing_link
+
+    - name: Cut over to the new release
+      ansible.builtin.file:
+        src: "{{ releases.path }}{{ new_release }}"
+        dest: "{{ releases.current }}"
+        state: link
+        force: true
+
+    - name: Clear the outgoing flag
+      ansible.builtin.include_tasks: tasks/release-outgoing-maintenance.yml
+      vars:
+        outgoing_release: "{{ outgoing_link.stat.lnk_source }}"
+        release_id: "{{ new_release }}"
+
+    - name: Read the flags after the cutover
+      ansible.builtin.stat:
+        path: "{{ releases.path }}{{ item }}/var/.maintenance.flag"
+      loop:
+        - "{{ old_release }}"
+        - "{{ new_release }}"
+      register: after_cutover
+
+    - name: The replaced release is clear and the live one is untouched
+      ansible.builtin.assert:
+        that:
+          - not after_cutover.results[0].stat.exists
+          - after_cutover.results[1].stat.exists
+        fail_msg: >-
+          Expected only {{ old_release }} cleared. Old flag present:
+          {{ after_cutover.results[0].stat.exists }}, new flag present:
+          {{ after_cutover.results[1].stat.exists }}. The new release's flag
+          belongs to maint:disable, not to this task.
+
+    # Case 2: redeploying the release already live must leave its flag alone,
+    # or maintenance lifts before setup:upgrade has run.
+    - name: Redeploy the live release
+      ansible.builtin.include_tasks: tasks/release-outgoing-maintenance.yml
+      vars:
+        outgoing_release: "{{ releases.path }}{{ new_release }}"
+        release_id: "{{ new_release }}"
+
+    # Case 3: a deploy that does not go live never flips, so `current` is still
+    # the site being served.
+    - name: Run a deploy that does not go live
+      ansible.builtin.include_tasks: tasks/release-outgoing-maintenance.yml
+      vars:
+        outgoing_release: "{{ releases.path }}{{ new_release }}"
+        release_id: "{{ old_release }}"
+        releases:
+          path: "{{ flag_root }}/releases/"
+          current: "{{ flag_root }}/current"
+          complete: false
+
+    # Case 4: the first deploy to a host has nothing to clear.
+    - name: Run the first deploy to a host
+      ansible.builtin.include_tasks: tasks/release-outgoing-maintenance.yml
+      vars:
+        outgoing_release: ""
+        release_id: "{{ new_release }}"
+
+    # With no outgoing release the path would be /var/.maintenance.flag on the
+    # host itself, so the task must not run at all.
+    - name: The first deploy removed nothing
+      ansible.builtin.assert:
+        that:
+          - outgoing_flag_removal is skipped
+        fail_msg: >-
+          The flag removal ran with no outgoing release, against
+          {{ outgoing_flag_removal.path | default('an unknown path') }}.
+
+    - name: Read the live flag after the three quiet cases
+      ansible.builtin.stat:
+        path: "{{ releases.path }}{{ new_release }}/var/.maintenance.flag"
+      register: after_quiet
+
+    - name: The live release kept its flag through every quiet case
+      ansible.builtin.assert:
+        that:
+          - after_quiet.stat.exists
+        fail_msg: >-
+          {{ new_release }} lost its maintenance flag in a case that must not
+          touch it: a redeploy of the live release, a deploy that does not go
+          live, or a first deploy.
+
+    - name: Clean up
+      ansible.builtin.file:
+        path: "{{ flag_root }}"
+        state: absent

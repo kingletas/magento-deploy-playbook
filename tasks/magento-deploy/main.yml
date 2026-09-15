@@ -9,6 +9,13 @@
 # five-host fleet fires the same command five times at one admin.
 ###
 
+# Read before the flip: afterwards `current` resolves to the new release.
+- name: Record which release is live before the cutover
+  ansible.builtin.stat:
+    path: '{{ releases.current }}'
+    follow: false
+  register: outgoing_link
+
 - name: Reset the current symlink
   ansible.builtin.file:
     src: '{{ releases.path }}{{ release_id }}'
@@ -30,6 +37,14 @@
   loop:
     - '{{ php_service }}'
     - nginx
+
+# After the restart, so no worker is still serving the outgoing release, and
+# before setup:upgrade, so a deploy that fails from here on leaves a release to
+# roll back to that is not in maintenance.
+- name: Take the replaced release out of maintenance mode
+  ansible.builtin.include_tasks: tasks/release-outgoing-maintenance.yml
+  vars:
+    outgoing_release: "{{ outgoing_link.stat.lnk_source | default('') if outgoing_link.stat.islnk | default(false) else '' }}"
 
 # `var` is not in the archive, so Magento creates var/log on this call, owned by
 # whoever runs it. Every later step runs as system.user and must be able to write.

@@ -1,0 +1,20 @@
+---
+###
+# Takes the maintenance flag off the release the cutover replaced, so rolling
+# back to it by repointing the symlink does not land in maintenance mode.
+#
+#   outgoing_release   required. The path `current` resolved to BEFORE the
+#                      flip, or '' when there was no current release.
+#   release_id         the release that is now live. Skipped when they match,
+#                      because that flag is the live site's own.
+###
+- name: Remove the maintenance flag from the release this deploy replaced
+  ansible.builtin.file:
+    path: "{{ outgoing_release }}/var/.maintenance.flag"
+    state: absent
+  become: true
+  register: outgoing_flag_removal
+  when:
+    - releases.complete | bool
+    - outgoing_release | default('', true) | length > 0
+    - outgoing_release | basename != release_id

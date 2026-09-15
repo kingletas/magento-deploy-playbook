@@ -155,19 +155,26 @@ cmd_reset() {
     for c in "${CONTAINERS[@]}"; do
         docker exec "${c}" sh -c '
             rm -f /tmp/*.lock
-            # TRUNCATE, do not remove. The fakes append as several different
-            # users across a deploy (ubuntu on the builder, www-data on the web
-            # hosts) and their logging is deliberately failure-proof, so if the
-            # file is recreated 0644 by whoever writes first, everyone else
-            # loses their entries SILENTLY. Truncating keeps the 0666 the image
-            # created it with.
-            : > /tmp/build-log 2>/dev/null || true
-            chmod 666 /tmp/build-log 2>/dev/null || true
             rm -rf /var/www/html/releases/* /var/www/html/archives/*
             rm -f /var/www/html/magento_current
         ' 2>/dev/null
     done
+    truncate_logs
     echo "Cleared locks, releases, archives and the fake-tool log on all six."
+}
+
+# TRUNCATE, do not remove. The fakes append as several different users across a
+# deploy (ubuntu on the builder, www-data on the web hosts) and their logging is
+# deliberately failure-proof, so if the file is recreated 0644 by whoever writes
+# first, everyone else loses their entries SILENTLY. Truncating keeps the 0666
+# the image created it with.
+truncate_logs() {
+    for c in "${CONTAINERS[@]}"; do
+        docker exec "${c}" sh -c '
+            : > /tmp/build-log 2>/dev/null || true
+            chmod 666 /tmp/build-log 2>/dev/null || true
+        ' 2>/dev/null
+    done
 }
 
 cmd_down() { ( cd "${DOCKER_DIR}" && docker compose down -v --remove-orphans ); }
@@ -182,6 +189,12 @@ cmd_test() {
     echo ""
     echo "########## deploy ##########"
     cmd_deploy || die "the deploy failed. bin/docker-suite logs shows what the fakes were asked to do."
+    # A second deploy, so there is a superseded release for verify to check is
+    # safe to roll back to. The log is truncated because verify counts one run.
+    echo ""
+    echo "########## deploy again, over the first release ##########"
+    truncate_logs
+    cmd_deploy || die "the second deploy failed. bin/docker-suite logs shows what the fakes were asked to do."
     echo ""
     echo "########## verify ##########"
     cmd_verify || die "the deploy completed but verification failed."

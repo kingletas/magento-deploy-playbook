@@ -82,6 +82,7 @@ and what isn't.
 - [Setup](#setup)
 - [Environments](#environments)
 - [Bundling the JavaScript](#bundling-the-javascript)
+- [Running it from a console](#running-it-from-a-console)
 - [The one rule: inventory vars vs playbook vars](#the-one-rule-inventory-vars-vs-playbook-vars)
 - [Running a deploy](#running-a-deploy)
 - [Layout](#layout)
@@ -209,6 +210,56 @@ bundling step with a message naming the fix rather than at whatever the missing
 command breaks. Nothing has left the builder at that point.
 `extra_build_steps` runs anything else your release needs afterwards -- a
 theme's grunt task, a sourcemap upload.
+
+## Running it from a console
+
+`.ordane.yml` configures [Ordane](https://github.com/kingletas/ordane), a console
+for an Ansible control plane. It reads `make help` for the targets and
+environments; the file carries what that output cannot say.
+
+```bash
+ordane doctor --repo .      # what it found, and anything worth fixing
+ordane catalog --repo .     # the parsed targets, grouped and graded
+ordane app --repo .         # the desktop console
+```
+
+**Only `docker` is launchable out of the box**, because that is six throwaway
+containers on your own machine. `example` is the template, `test` is the offline
+suites, and neither belongs on the allow list. Add your own environment to
+`environments.allow` when you have one.
+
+`deploy` is graded `high` and asks you to type the environment's name, because
+it takes the site into maintenance and flips the symlink. `unlock` is `medium`:
+dropping the lock while a build is genuinely running lets a second one start.
+
+### What the delivery numbers can and cannot source
+
+| Measure | Source | State |
+|---|---|---|
+| Change failure rate | Runs launched through the console, once `deploy: true` | Fills in as you use it |
+| Time to restore | The gap between a failed deploy and the next that worked | Fills in as you use it |
+| Release frequency | A release log in the repository | **Dormant** |
+| Lead time for changes | The same release log | **Dormant** |
+
+The first two need nothing from you: `deploy` is already marked `deploy: true`
+and `cutover: true`.
+
+The last two need a release log at `docs/dora/backfill.jsonl`, and **this
+playbook does not write one.** What it writes is a deployment event per phase to
+`dora.local.path`, which defaults to a file under your own `$HOME` rather than
+into the repository, so it is per-operator state and not a shared history.
+Those events carry what a release log needs -- the release name, the
+environment, the commit and the commit count at build time, and the cutover -- so
+a reporter that folds them into the repository would light both cards. Writing
+one is a real piece of work and is not shipped.
+
+Until then those two cards stay dormant and say so, which is the point: a zero
+would look like a measurement, and *nothing has shipped* and *nothing has been
+recorded* are very different sentences.
+
+**`metrics.environments` is set to `production`, which nothing here is.** A
+release to a throwaway fleet must never move a delivery number, so the default
+is deliberately a name this repository does not define. Put your own there.
 
 ## The one rule: inventory vars vs playbook vars
 

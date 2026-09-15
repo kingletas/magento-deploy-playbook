@@ -1,39 +1,94 @@
-# .ordane.yml: a starting point, written by `ordane init`.
+---
+###
+# Console configuration for https://github.com/kingletas/ordane.
 #
 # `make help` supplies the targets, their descriptions and the environments.
-# This file carries what they cannot say: which environments this console
-# may reach, what a parameter means, and which runs count as a release.
-#
-# Nothing outside this file is ever written. The playbooks are read.
-#
-# The console read 18 target(s) from the `Targets:` block that `make help` prints.
+# This file carries what they cannot say: which environments may be reached,
+# what a parameter means, which targets are dangerous, and which runs count as
+# a release.
+###
 
+# NOTHING SHIPS LAUNCHABLE EXCEPT THE THROWAWAY FLEET. `docker` is six
+# containers on your own machine. Add your own environment here when you have
+# one and mean it; `example` is the template and `test` is the offline suites,
+# so neither belongs on this list.
 environments:
-  # Nothing runs until a name is here, and an empty list is where this
-  # starts on purpose. Uncomment one when you mean it.
-  allow: [docker, local-kapelos]
-  # Found in the environment block that `make help` prints:
-  #   - docker
-  #   - example
-  #   - local-kapelos
-  #   - test
+  allow: [docker]
 
-# The variable a target reads to know where it runs. The console assigns this one
-# and nothing else, so a Makefile reading a different name would be handed a value
-# nobody looks at.
+# The make variable that carries the environment. A Makefile reading a
+# different name would be handed a value nothing looks at.
 environment_var: environment
 
-# The order these are declared in is the order the console shows them.
-# groups:
-#   Release: [deploy]
+# Declaration order is display order, which says how the work is done.
+groups:
+  Release: [deploy, verify, unlock]
+  Local fleet: [docker-test, docker-demo, docker-up, docker-deploy,
+                docker-verify, docker-logs, docker-reset, docker-down]
+  Checks: [check, test, lint]
+  Setup: [venv, collections, magepack-image]
 
-# What the repository cannot say about one target.
-# targets:
-#   deploy:
-#     danger: high            # low | medium | high
-#     confirm: type-environment-name
-#     deploy: true            # counts towards the delivery measures
-#     params:
-#       branch_name:
-#         help: the branch to build
-#         allow_other: true
+# `help` lists itself.
+hidden: [help]
+
+targets:
+  # Builds, uploads, takes the site into maintenance, flips the symlink and
+  # prunes. There is no undo target: rolling back is repointing the symlink by
+  # hand at one of the releases still on disk.
+  deploy:
+    danger: high
+    confirm: type-environment-name
+    deploy: true
+    cutover: true
+    dry_run: true
+    params:
+      branch_name:
+        help: build a branch other than the environment's default
+        allow_other: true
+      release_name:
+        help: reuse an existing release instead of building a new one
+        allow_other: true
+
+  # Reads the filesystem and asserts. Changes nothing.
+  verify:
+    danger: low
+
+  # Removes the build lock a hard-failed run left behind. Medium, because
+  # dropping it while a build is genuinely running lets a second one start.
+  unlock:
+    danger: medium
+    confirm: type-environment-name
+
+  # The whole deploy against six throwaway containers. Destroys and rebuilds
+  # its own fleet, and reaches nothing else.
+  docker-test:
+    dry_run: true
+  docker-demo:
+    dry_run: true
+
+  check:
+    dry_run: false
+
+# WHICH RUNS MOVE A DELIVERY NUMBER. Nothing here does: `docker` is a
+# throwaway fleet, and a release to one must never count. Put your own
+# environment's name here when you add it.
+metrics:
+  environments: [production]
+
+slos:
+  - label: Cutover succeeds without a rollback
+    kind: cutover_success
+    target: "95%"
+    window: 90d
+  - label: Storefront availability, planned windows excluded
+    target: "99.9%"
+    window: 28d
+    blocked: >-
+      needs a synthetic probe against the storefront. This playbook has no
+      source for it, and a figure computed from deploy runs would describe the
+      deploys rather than the service.
+
+# Run a playbook directly, without going through make.
+playbooks:
+  - deployment.yml
+  - verify-deploy.yml
+  - unlock.yml

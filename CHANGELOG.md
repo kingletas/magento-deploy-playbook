@@ -48,6 +48,11 @@ changed, because there's nothing before it.
 - Five structural checks over the repository itself: no roles, every `notify`
   resolves, every include resolves, no path above the playbook directory, no
   stray environment lookups.
+- `.ordane.yml`, so the playbook works with the Ordane console out of the box.
+  Only the throwaway `docker` fleet is launchable, `deploy` is graded dangerous
+  and asks for the environment's name, and the targets are grouped. Which
+  delivery measures it can source, and which stay dormant for want of a release
+  log, are set out in the README.
 - `REQUIRE_LINT=1` turns a missing linter into a failure rather than a skip.
   CI sets it, because there a missing linter means the install broke and a
   green run would be a lie.

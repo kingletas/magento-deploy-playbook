@@ -1,0 +1,10 @@
+#!/bin/bash
+# sysv init shim for nginx. Ansible's service module shells out to
+# /etc/init.d/<name>, so this is what makes "Restart the web services" and the
+# varnish play work without an init system.
+echo "[fake-service] nginx $1" >> /tmp/build-log 2>/dev/null || true
+case "$1" in
+  status) exit 0 ;;
+  start|stop|restart|reload|force-reload) exit 0 ;;
+  *) exit 0 ;;
+esac

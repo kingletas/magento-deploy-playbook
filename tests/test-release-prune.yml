@@ -1,0 +1,140 @@
+---
+###
+# tasks/release-prune.yml, run for real against a temporary filesystem: builds
+# actual directories and asserts on what survived.
+#
+#   ansible-playbook -i inventory/test tests/test-release-prune.yml
+###
+- name: Release prune safety
+  hosts: builder
+  connection: local
+  gather_facts: false
+  vars:
+    # A throwaway tree under /tmp. Override with
+    # `-e prune_root=...` to run the suite somewhere else.
+    prune_root: "/tmp/magento-deploy-playbook-prune-test"
+    # Override the real paths at play scope so nothing outside prune_root is
+    # touched. The prune deletes directories, so a suite that reads the real
+    # release paths would delete real releases.
+    releases:
+      path: "{{ prune_root }}/releases/"
+      archive: "{{ prune_root }}/archives/"
+      current: "{{ prune_root }}/current"
+    teardown_releases_to_keep: 2
+    teardown_archives_to_keep: 2
+    prune_env: testenv
+    # Newest last. The live release is deliberately the OLDEST: the shape a
+    # rollback leaves behind.
+    fixture_releases:
+      - 20260101_1700000001_testenv
+      - 20260102_1700000002_testenv
+      - 20260103_1700000003_testenv
+      - 20260104_1700000004_testenv
+    live_fixture: 20260101_1700000001_testenv
+    # Must survive: different environment, and a name that does not match the
+    # anchored regex.
+    foreign_releases:
+      - 20260105_1700000005_otherenv
+      - not-a-release
+  tasks:
+    - name: Reset the fixture tree
+      ansible.builtin.file:
+        path: "{{ prune_root }}"
+        state: absent
+
+    - name: Create the release and archive directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ releases.path }}"
+        - "{{ releases.archive }}"
+
+    - name: Create the release directories
+      ansible.builtin.file:
+        path: "{{ releases.path }}{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ fixture_releases + foreign_releases }}"
+
+    - name: Create the archives
+      ansible.builtin.copy:
+        dest: "{{ releases.archive }}{{ item }}.tgz"
+        content: "fixture"
+        mode: "0644"
+      loop: "{{ fixture_releases + foreign_releases }}"
+
+    - name: Point current at the OLDEST release, as a rollback would
+      ansible.builtin.file:
+        src: "{{ releases.path }}{{ live_fixture }}"
+        dest: "{{ releases.current }}"
+        state: link
+
+    - name: Prune
+      ansible.builtin.include_tasks: tasks/release-prune.yml
+
+    - name: Read back what survived
+      ansible.builtin.find:
+        paths: "{{ item }}"
+        recurse: false
+        file_type: any
+      loop:
+        - "{{ releases.path }}"
+        - "{{ releases.archive }}"
+      register: survivors
+
+    - name: Collect the surviving names
+      ansible.builtin.set_fact:
+        surviving_releases: "{{ survivors.results[0].files | map(attribute='path') | map('basename') | sort }}"
+        surviving_archives: "{{ survivors.results[1].files | map(attribute='path') | map('basename') | sort }}"
+
+    - name: Report
+      ansible.builtin.debug:
+        msg:
+          releases: "{{ surviving_releases }}"
+          archives: "{{ surviving_archives }}"
+
+    # The live release is the oldest, so a sort without the symlink exclusion
+    # deletes it.
+    - name: The live release survived even though it is the oldest
+      ansible.builtin.assert:
+        that:
+          - live_fixture in surviving_releases
+        fail_msg: >-
+          The prune deleted the release that `current` points at. This is the
+          exact rollback bug an mtime-sorted prune has.
+
+    - name: Retention kept the newest N plus the live release
+      ansible.builtin.assert:
+        that:
+          # 2 newest (…04, …03) + the live oldest (…01) = 3
+          - surviving_releases | select('search', 'testenv') | list | length == 3
+          - "'20260104_1700000004_testenv' in surviving_releases"
+          - "'20260103_1700000003_testenv' in surviving_releases"
+          - "'20260102_1700000002_testenv' not in surviving_releases"
+        fail_msg: >-
+          Expected the 2 newest plus the live release to survive.
+          Got: {{ surviving_releases }}
+
+    - name: Another environment's releases were never in scope
+      ansible.builtin.assert:
+        that:
+          - "'20260105_1700000005_otherenv' in surviving_releases"
+          - "'not-a-release' in surviving_releases"
+        fail_msg: >-
+          The regex reached outside {{ prune_env }}. Surviving:
+          {{ surviving_releases }}
+
+    - name: Archives followed the same rules
+      ansible.builtin.assert:
+        that:
+          - (live_fixture ~ '.tgz') in surviving_archives
+          - "'20260105_1700000005_otherenv.tgz' in surviving_archives"
+          - "'20260102_1700000002_testenv.tgz' not in surviving_archives"
+        fail_msg: "Archive pruning diverged from release pruning: {{ surviving_archives }}"
+
+    - name: Clean up
+      ansible.builtin.file:
+        path: "{{ prune_root }}"
+        state: absent

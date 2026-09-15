@@ -1,0 +1,139 @@
+#!/bin/bash
+#
+# Everything that can be verified without contacting a host.
+#
+#   bin/check            (or: make check)
+#
+# Four layers, cheapest first:
+#
+#   1. --syntax-check on the two real playbooks. Catches a bad include path, a
+#      malformed task, an undefined play-level key.
+#   2. bin/check-structure. Catches what --syntax-check cannot: a reintroduced
+#      `roles:`, a notify with no handler, a parent-path reference, a stray
+#      lookup('env', ...).
+#   3. test.yml -- the four offline suites, run for real against
+#      inventory/test. No host is contacted; every play is connection: local.
+#   4. yamllint, if it is available.
+#
+# Every check runs FROM this directory, because ansible.cfg is resolved from the
+# working directory. That is why this script cd's rather than taking a path.
+
+set -uo pipefail
+
+PLAYBOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${PLAYBOOK_DIR}" || exit 1
+
+# Prefer a virtualenv in this directory; otherwise use whatever is on PATH. No
+# reference to a venv outside this directory -- see bin/check-structure.
+if [ -d "venv/bin" ]; then
+    PATH="${PLAYBOOK_DIR}/venv/bin:${PATH}"
+    export PATH
+fi
+
+command -v ansible-playbook >/dev/null \
+    || { echo "ERROR: ansible-playbook is not on PATH. Run: make venv" >&2; exit 1; }
+
+fail=0
+
+echo "Syntax:"
+for playbook in deployment.yml verify-deploy.yml test.yml; do
+    if output=$(ansible-playbook --syntax-check -i inventory/test "${playbook}" 2>&1); then
+        printf '  ok    %s\n' "${playbook}"
+    else
+        printf '  FAIL  %s\n' "${playbook}"
+        printf '%s\n' "${output}" | sed 's/^/          /'
+        fail=$((fail + 1))
+    fi
+done
+
+# Each environment's inventory must parse and produce the groups the playbook's
+# `hosts:` patterns target. A typo in a hosts file is otherwise found by a
+# deploy that reports "skipping: no hosts matched" and exits 0 -- green, and
+# nothing deployed.
+echo ""
+echo "Inventories:"
+for inv in inventory/*/; do
+    env_name="$(basename "${inv}")"
+    [ -f "${inv}hosts" ] || {
+        printf '  SKIP  %-10s no hosts file (generated? run bin/docker-suite up)\n' "${env_name}"
+        continue
+    }
+    missing=""
+    for group in builder apps admin cron varnish web; do
+        ansible-inventory -i "${inv}" --graph "${group}" >/dev/null 2>&1 \
+            || missing="${missing} ${group}"
+    done
+    if [ -z "${missing}" ]; then
+        printf '  ok    %-10s builder/apps/admin/cron/varnish/web all resolve\n' "${env_name}"
+    else
+        printf '  FAIL  %-10s missing groups:%s\n' "${env_name}" "${missing}"
+        fail=$((fail + 1))
+    fi
+done
+
+echo ""
+echo "Structure:"
+python="$(command -v python3)"
+if [ -n "${python}" ]; then
+    "${python}" bin/check-structure || fail=$((fail + 1))
+else
+    echo "  SKIP  no python3 found, cannot run bin/check-structure"
+fi
+
+echo ""
+echo "Offline suites:"
+if output=$(ansible-playbook -i inventory/test test.yml 2>&1); then
+    # One line per suite, from the play names, so a green run still says what ran.
+    printf '%s\n' "${output}" | grep -oE '^PLAY \[.*\]' | sed 's/^PLAY \[/  ok    /; s/\]$//'
+    printf '  ok    test.yml: %s assertions/tasks\n' "$(printf '%s\n' "${output}" | grep -c 'ok: ')"
+else
+    echo "  FAIL  test.yml"
+    printf '%s\n' "${output}" | tail -30 | sed 's/^/          /'
+    fail=$((fail + 1))
+fi
+
+echo ""
+echo "Lint:"
+# `--version` rather than `command -v`: a stub whose package is missing exists on
+# PATH and traces back immediately, and a broken tool must read as SKIP rather
+# than as a failing check.
+#
+# REQUIRE_LINT=1 turns that SKIP into a failure. CI sets it, because there a
+# missing linter means the install broke and a green run would be a lie.
+if yamllint --version >/dev/null 2>&1; then
+    if output=$(yamllint -c .yamllint . 2>&1); then
+        echo "  ok    yamllint"
+    else
+        echo "  FAIL  yamllint"
+        printf '%s\n' "${output}" | sed 's/^/          /'
+        fail=$((fail + 1))
+    fi
+elif [ "${REQUIRE_LINT:-0}" = "1" ]; then
+    echo "  FAIL  yamllint not installed or not working, and REQUIRE_LINT=1"
+    fail=$((fail + 1))
+else
+    echo "  SKIP  yamllint not installed or not working (make venv)"
+fi
+# Same reasoning: confusing "tool missing" with "tool found problems" is a
+# mistake this repo's lint target already made once.
+if ansible-lint --version >/dev/null 2>&1; then
+    if output=$(ansible-lint 2>&1); then
+        echo "  ok    ansible-lint"
+    else
+        echo "  FAIL  ansible-lint"
+        printf '%s\n' "${output}" | tail -30 | sed 's/^/          /'
+        fail=$((fail + 1))
+    fi
+elif [ "${REQUIRE_LINT:-0}" = "1" ]; then
+    echo "  FAIL  ansible-lint not installed or not working, and REQUIRE_LINT=1"
+    fail=$((fail + 1))
+else
+    echo "  SKIP  ansible-lint not installed or not working (pip install -r requirements.txt)"
+fi
+
+echo ""
+if [ "${fail}" -gt 0 ]; then
+    echo "FAILED (${fail})"
+    exit 1
+fi
+echo "All checks passed."

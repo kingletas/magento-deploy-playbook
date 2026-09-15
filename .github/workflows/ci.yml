@@ -1,0 +1,67 @@
+---
+# What a commit has to pass, run somewhere other than the machine that wrote it.
+# The first job is `make check`; the second exercises the deploy end to end.
+# Actions are pinned to a commit SHA, because a tag can be moved.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only. Nothing here writes to the repository or needs a token with more
+# than the checkout.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: syntax, structure, offline suites and lint
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Install Ansible and the collections
+        run: |
+          make venv
+          make collections
+
+      - name: Run the gate
+        env:
+          REQUIRE_LINT: "1"   # a missing linter here means the install broke
+        run: make check
+
+  docker:
+    name: end-to-end against six containers
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Install Ansible and the collections
+        run: |
+          make venv
+          make collections
+
+      - name: Build the fleet, deploy to it, and assert on the result
+        run: make docker-test
+
+      - name: Tear the fleet down
+        if: always()
+        run: make docker-down

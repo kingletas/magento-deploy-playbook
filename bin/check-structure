@@ -1,0 +1,393 @@
+#!/usr/bin/env python3
+"""Structural checks for this playbook directory.
+
+Everything here catches a failure mode that `ansible-playbook --syntax-check`
+does NOT catch, and that this playbook has either already shipped or came close
+to shipping:
+
+  1. roles: reintroduced      This playbook's steps live under tasks/. A role
+                              of the same name installed on the machine running
+                              the deploy would work silently, running a second
+                              copy of logic that is already here.
+
+  2. unresolvable notify      Ansible fails on a missing handler at RUNTIME, not
+                              at syntax-check. This repo has shipped that twice:
+                              the stat/notify maintenance-mode miss, and seven
+                              dead handlers removed on 2026-08-19.
+
+  3. bad include/import path  Task-file paths resolve at runtime for
+                              include_tasks. `deploy/upload.yml` looks plausible
+                              and does NOT resolve -- only sibling
+                              (`upload.yml`) or playbook-relative
+                              (`tasks/deploy/upload.yml`) do. Caught during the
+                              restructure by testing, not by any tool.
+
+  4. parent-path escape       THE self-containment invariant. This directory is
+                              lifted wholesale into another repository, so a
+                              single `../` in a functional file makes the lift
+                              fail somewhere else, later, with a confusing
+                              error. Comments may say `../`; code may not.
+
+  5. tests/ symlinks          tests/ contains four symlinks -- group_vars, tasks,
+                              handlers, inventory -- that make the directory
+                              resolve exactly like the playbook root, so the
+                              suites exercise the same paths the deploy does
+                              rather than rewritten copies. Deleting one degrades
+                              a suite: without tests/group_vars the suites stop
+                              testing playbook-adjacent group_vars, which is half
+                              of what they are for. Each failure IS loud, but it
+                              is loud four plays in; this fails first and says
+                              which link is missing.
+
+  6. silently ignored file    A file that git ignores but that this playbook
+                              needs is invisible: it works on the machine that
+                              wrote it and is simply absent from every clone.
+                              This has now happened TWICE here, both times from
+                              UNANCHORED rules in the operator's global
+                              gitignore -- `docker` swallowed the whole Docker
+                              suite, and `*.docker` swallowed Makefile.docker,
+                              which a fresh clone reported as
+                              "No rule to make target 'Makefile.docker'". Rules
+                              from a global excludesFile are invisible in the
+                              repository, so nothing in code review can catch
+                              this. Asking git directly can.
+
+  7. stray environment lookup The environment migration replaced every
+                              lookup('env', X) with an inventory variable.
+                              Reintroducing one rebuilds the exact coupling that
+                              was removed: a value that resolves to '' unless
+                              something outside this directory exported it, and
+                              resolves to '' SILENTLY. Two are allowed, both
+                              about the operator rather than the environment.
+
+Exit non-zero on any finding.
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import yaml
+
+PB = Path(__file__).resolve().parent.parent
+
+# lookup('env', X) is allowed only for these. Both describe the OPERATOR, not the
+# environment being deployed, so there is no inventory variable that could carry
+# them and an environment lookup is the correct tool.
+ALLOWED_ENV_LOOKUPS = {"USER", "HOME"}
+
+# Files whose content is executed or interpreted. Documentation is exempt from
+# check 4 -- a README that cannot mention `../` would be a worse README.
+FUNCTIONAL_SUFFIXES = {".yml", ".yaml", ".cfg", ".json"}
+FUNCTIONAL_NAMES = {"Makefile"}
+
+SKIP_DIRS = {"docker", "venv", "__pycache__", ".git"}
+
+# tests/ holds four symlinks to directories at the playbook root. pathlib's
+# rglob follows them, so every file under tests/tasks/ is the same file already
+# scanned as tasks/ -- which would double every finding and report each one
+# against a path that is really an alias. The symlinks are validated as symlinks
+# by check_tests_symlinks() instead.
+TESTS_SYMLINKS = {"group_vars", "tasks", "handlers", "inventory"}
+
+# Paths this playbook ignores ON PURPOSE. Anything else that git ignores is a
+# file that will be missing from every clone, so it is an error.
+#
+# Matched as PATH PREFIXES, not substrings. A substring match would quietly
+# excuse real findings -- "venv/" appears inside "my-venv/thing", so a genuinely
+# missing file could be waved through by an entry meant for something else.
+EXPECTED_IGNORED_PREFIXES = (
+    "venv/",
+    "docker/keys/",
+    "docker/fixtures/magento-repo.git/",
+    "docker/fixtures/.repo-build/",
+    "inventory/docker/hosts",   # generated by bin/docker-suite up
+    "inventory/local-",         # an operator's own environment; see .gitignore
+)
+
+# These appear at arbitrary depth, so a prefix cannot express them. Matched as a
+# whole path COMPONENT -- again not a substring.
+EXPECTED_IGNORED_NAMES = ("__pycache__",)
+
+errors: list[str] = []
+
+
+def _through_symlinked_dir(path: Path) -> bool:
+    """True if any directory component of path is a symlink.
+
+    Cheaper and more general than special-casing tests/: it also covers a symlink
+    someone adds elsewhere for the same reason.
+    """
+    current = PB
+    for part in path.relative_to(PB).parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def functional_files():
+    """Every file whose text is interpreted, excluding the Docker suite.
+
+    docker/ is excluded from the parent-path check on purpose: it is a
+    self-contained fixture tree whose compose file and Dockerfile use paths
+    relative to docker/ itself, and bin/docker-suite is checked separately
+    because it is the one script that legitimately walks up to the playbook root.
+    """
+    for p in sorted(PB.rglob("*")):
+        if not p.is_file():
+            continue
+        if any(part in SKIP_DIRS for part in p.relative_to(PB).parts):
+            continue
+        if _through_symlinked_dir(p):
+            continue
+        if p.suffix in FUNCTIONAL_SUFFIXES or p.name in FUNCTIONAL_NAMES:
+            yield p
+
+
+def playbook_yaml_files():
+    for p in sorted(PB.rglob("*.yml")):
+        rel = p.relative_to(PB).parts
+        if any(part in SKIP_DIRS for part in rel):
+            continue
+        if rel[0] == "inventory":       # group_vars, not tasks
+            continue
+        if _through_symlinked_dir(p):
+            continue
+        yield p
+
+
+def _load(path: Path):
+    try:
+        return yaml.safe_load(path.read_text())
+    except yaml.YAMLError as exc:
+        errors.append(f"{path.relative_to(PB)}: will not parse as YAML: {exc}")
+        return None
+    except UnicodeDecodeError:
+        return None
+
+
+def _walk_tasks(node):
+    """Yield every task-like mapping in a parsed playbook or task file.
+
+    Recurses into plays (tasks/pre_tasks/post_tasks/handlers), block/rescue/always
+    and bare lists, so nothing is missed regardless of nesting.
+    """
+    if isinstance(node, list):
+        for item in node:
+            yield from _walk_tasks(item)
+    elif isinstance(node, dict):
+        yield node
+        for key in ("tasks", "pre_tasks", "post_tasks", "handlers",
+                    "block", "rescue", "always"):
+            if key in node:
+                yield from _walk_tasks(node[key])
+
+
+def check_no_roles() -> None:
+    for yml in playbook_yaml_files():
+        for i, line in enumerate(yml.read_text().splitlines(), 1):
+            if re.match(r"^\s*roles:\s*$", line):
+                errors.append(
+                    f"{yml.relative_to(PB)}:{i}: `roles:` key. This playbook is "
+                    f"role-free by design -- the logic is inlined under tasks/. "
+                    f"See docs/design.md."
+                )
+
+
+def check_notifies() -> None:
+    """Every notify: name must resolve to a handler defined here.
+
+    Parsed rather than grepped: a `notify:` list followed by comments and blank
+    lines is indistinguishable from the next task by regex, which produced
+    confident false positives on exactly this playbook.
+    """
+    handler_dir = PB / "handlers"
+    handler_names = set()
+    if handler_dir.is_dir():
+        for hf in sorted(handler_dir.glob("*.yml")):
+            for task in _walk_tasks(_load(hf) or []):
+                if "name" in task:
+                    handler_names.add(str(task["name"]).strip())
+
+    for yml in playbook_yaml_files():
+        if handler_dir in yml.parents:
+            continue
+        for task in _walk_tasks(_load(yml) or []):
+            notify = task.get("notify")
+            if notify is None:
+                continue
+            for name in ([notify] if isinstance(notify, str) else notify):
+                if not isinstance(name, str) or "{{" in name:
+                    continue
+                if name.strip() not in handler_names:
+                    errors.append(
+                        f"{yml.relative_to(PB)}: notify '{name}' matches no handler "
+                        f"in handlers/. Ansible only fails on a missing handler at "
+                        f"RUNTIME, never at syntax-check."
+                    )
+
+
+def check_include_paths() -> None:
+    """include_tasks / import_tasks paths must resolve.
+
+    Sibling ('upload.yml') and playbook-relative ('tasks/deploy/upload.yml')
+    both work; a subdirectory-prefixed path ('deploy/upload.yml') looks
+    plausible and does NOT.
+    """
+    keys = ("include_tasks", "import_tasks",
+            "ansible.builtin.include_tasks", "ansible.builtin.import_tasks")
+    for yml in playbook_yaml_files():
+        for task in _walk_tasks(_load(yml) or []):
+            for key in keys:
+                ref = task.get(key)
+                if not isinstance(ref, str):
+                    continue
+                ref = ref.strip()
+                if "{{" in ref:
+                    continue
+                # yml.parent covers both the playbook root and tests/, which
+                # resolves the same way through its symlinks -- that is the whole
+                # reason they exist.
+                if (yml.parent / ref).exists() or (PB / ref).exists():
+                    continue
+                errors.append(
+                    f"{yml.relative_to(PB)}: {key} path '{ref}' does not resolve "
+                    f"relative to {yml.parent.relative_to(PB)}/ or the playbook root."
+                )
+
+
+def _uncommented(line: str) -> str:
+    """The part of a line before its first comment marker.
+
+    Crude -- a '#' inside a quoted string truncates the line early -- but the
+    failure mode is a MISSED finding at worst and never a false alarm, and every
+    config format in this directory comments with '#'.
+    """
+    return line.split("#", 1)[0]
+
+
+def check_no_parent_paths() -> None:
+    for path in functional_files():
+        for i, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+            code = _uncommented(line)
+            if re.search(r"(^|[\s'\"=:(\[/])\.\./", code):
+                errors.append(
+                    f"{path.relative_to(PB)}:{i}: references a parent path "
+                    f"({code.strip()[:70]!r}). This directory is lifted whole into "
+                    f"another repository, so nothing in it may reach outside itself. "
+                    f"Vendor what you need, or read it from a variable."
+                )
+
+
+def check_no_env_lookups() -> None:
+    pattern = re.compile(r"""lookup\(\s*['"]env['"]\s*,\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]""")
+    for path in functional_files():
+        if path.suffix not in {".yml", ".yaml"}:
+            continue
+        for i, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+            for name in pattern.findall(_uncommented(line)):
+                if name in ALLOWED_ENV_LOOKUPS:
+                    continue
+                errors.append(
+                    f"{path.relative_to(PB)}:{i}: lookup('env', '{name}'). "
+                    f"Environment configuration comes from "
+                    f"inventory/<env>/group_vars/all.yml, not from the process "
+                    f"environment. An env lookup resolves to an empty string when "
+                    f"nothing exported the name -- silently -- which is the exact "
+                    f"coupling the migration removed. Allowed: "
+                    f"{', '.join(sorted(ALLOWED_ENV_LOOKUPS))}."
+                )
+
+
+def check_tests_symlinks() -> None:
+    tests = PB / "tests"
+    if not tests.is_dir():
+        return
+    for name in sorted(TESTS_SYMLINKS):
+        link = tests / name
+        if not link.is_symlink():
+            errors.append(
+                f"tests/{name} is missing or is not a symlink. The suites in "
+                f"tests/ resolve their paths as if they were at the playbook "
+                f"root, which is what makes them test the real thing; without "
+                f"this link they test something else or fail four plays in. "
+                f"Recreate it: ln -s ../{name} tests/{name}"
+            )
+            continue
+        target = link.resolve()
+        expected = (PB / name).resolve()
+        if target != expected:
+            errors.append(
+                f"tests/{name} points at {target}, not {expected}. It must "
+                f"alias the playbook's own {name}/ -- pointing it elsewhere "
+                f"means the suites verify a different tree than the deploy uses."
+            )
+        elif not str(target).startswith(str(PB)):
+            errors.append(
+                f"tests/{name} resolves outside this playbook ({target}). "
+                f"Nothing here may reach above the playbook directory."
+            )
+
+
+def check_nothing_needed_is_ignored() -> None:
+    """Fail on any ignored path that is not deliberately ignored.
+
+    `git status --ignored=matching` reports what git will leave out, INCLUDING
+    matches from the user's global excludesFile -- which is the case that matters,
+    because those rules are invisible in the repository and unreviewable.
+    """
+    if not (PB / ".git").exists():
+        return  # not a repository yet; nothing to check
+    try:
+        out = subprocess.run(
+            ["git", "status", "--porcelain", "--ignored=matching", "."],
+            cwd=str(PB), capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+    if out.returncode != 0:
+        return
+    for line in out.stdout.splitlines():
+        if not line.startswith("!! "):
+            continue
+        path = line[3:].strip().strip('"')
+        if any(path.startswith(x) for x in EXPECTED_IGNORED_PREFIXES):
+            continue
+        if any(part in EXPECTED_IGNORED_NAMES
+               for part in path.rstrip("/").split("/")):
+            continue
+        errors.append(
+            f"{path} is IGNORED by git but is not in this playbook's expected-"
+            f"ignored list. It works here and will be absent from every clone. "
+            f"Run `git check-ignore -v {path}` -- if the rule comes from a global "
+            f"excludesFile it is invisible in this repository, which is how "
+            f"Makefile.docker went missing (matched `*.docker`). Either rename the "
+            f"file, negate the rule in .gitignore, or add it to EXPECTED_IGNORED "
+            f"in this script with a reason."
+        )
+
+
+def main() -> int:
+    check_no_roles()
+    check_notifies()
+    check_include_paths()
+    check_no_parent_paths()
+    check_no_env_lookups()
+    check_tests_symlinks()
+    check_nothing_needed_is_ignored()
+
+    for e in errors:
+        print(f"  FAIL  {e}")
+    if not errors:
+        print("  ok    structure: no roles, every notify resolves, every include "
+              "resolves, no parent paths, no stray env lookups, tests/ symlinks "
+              "intact, nothing needed is gitignored")
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,227 @@
+---
+###
+# The variable contract this playbook depends on, including which side of the
+# group_vars precedence rule each key lives on.
+#
+#   ansible-playbook -i inventory/test tests/test-vars-contract.yml
+###
+- name: Variable contract
+  hosts: builder
+  connection: local
+  gather_facts: false
+  tasks:
+    # FIRST, always. group_vars/all/build.yml embeds {{ wdir }} in the bundler
+    # commands, so bundler_steps cannot be touched -- not even with `is defined`
+    # -- until preflight has set it. See the ordering note in build.yml.
+    - name: Resolve the release facts
+      ansible.builtin.import_tasks: tasks/release-preflight.yml
+
+    - name: Playbook-side group_vars loaded by adjacency
+      ansible.builtin.assert:
+        that:
+          - releases is defined
+          - system is defined
+          - git is defined
+          - dora is defined
+          - bundler_steps is defined
+          - yotta is defined            # from the vaulted notifications.yml
+          - pagerduty_token is defined  # ditto
+          - slack_token is defined      # ditto
+        fail_msg: >-
+          group_vars/all/ did not load. This suite must run FROM the playbook
+          directory -- Ansible resolves playbook-adjacent group_vars relative to
+          the playbook file, not the inventory.
+
+    ###
+    # THE PRECEDENCE GUARD. Playbook group_vars outrank inventory group_vars/all,
+    # so a key on both sides silently discards the inventory's value.
+    #
+    # It compares the FILES, because resolved variables cannot show a collision:
+    # by then one side has simply won.
+    ###
+    - name: Load the playbook-side group_vars as a namespaced dict
+      ansible.builtin.include_vars:
+        dir: group_vars/all
+        name: playbook_side_vars
+        # group_vars/all/.keep has no extension and include_vars refuses the
+        # whole directory over it.
+        ignore_unknown_extensions: true
+        extensions: [yml, yaml, json]
+
+    # `find` rather than fileglob, which only expands the last path component.
+    - name: Find every environment's inventory group_vars
+      ansible.builtin.find:
+        paths: "{{ playbook_dir }}/inventory"
+        patterns: all.yml
+        recurse: true
+      register: env_var_files_found
+
+    - name: Sort them so the comparison below has a stable reference
+      ansible.builtin.set_fact:
+        env_var_files: "{{ env_var_files_found.files | map(attribute='path') | sort }}"
+
+    - name: The glob actually matched something
+      ansible.builtin.assert:
+        that:
+          - env_var_files | length >= 3
+        fail_msg: >-
+          Expected at least three inventory/<env>/group_vars/all.yml files and
+          found {{ env_var_files | length }}. A guard that silently matches
+          nothing is worse than no guard, so this fails rather than passing
+          vacuously. Found: {{ env_var_files }}
+
+    - name: Collect the keys every inventory declares
+      ansible.builtin.set_fact:
+        inventory_declared_keys: >-
+          {{ (inventory_declared_keys | default([]))
+             + (lookup('file', item) | from_yaml | list) }}
+      loop: "{{ env_var_files }}"
+
+    - name: No key is declared on both sides of the precedence boundary
+      ansible.builtin.assert:
+        that:
+          - (playbook_side_vars | list) | intersect(inventory_declared_keys | unique) | length == 0
+        fail_msg: >-
+          These keys are declared BOTH in group_vars/all/ and in an
+          inventory/<env>/group_vars/all.yml:
+          {{ (playbook_side_vars | list) | intersect(inventory_declared_keys | unique) | sort | join(', ') }}.
+          The playbook side wins, so every environment is resolving the playbook
+          value and its own is being ignored. Remove the playbook-side
+          declaration -- do not "fix" it by editing the inventory. If the value
+          genuinely does not vary, delete it from all the inventories instead.
+
+    - name: Every environment declares the same keys
+      ansible.builtin.assert:
+        that:
+          - (lookup('file', item) | from_yaml | list | sort)
+            == (lookup('file', env_var_files | first) | from_yaml | list | sort)
+        fail_msg: >-
+          {{ item }} does not declare the same key set as
+          {{ env_var_files | first }}. An environment that omits a key falls
+          back to whatever the playbook side happens to provide, or fails at
+          run time -- which is exactly what the shell profiles used to do. Add
+          the key with an explicit value, even if that value is a default.
+          Missing here:
+          {{ (lookup('file', env_var_files | first) | from_yaml | list)
+             | difference(lookup('file', item) | from_yaml | list) | join(', ') }}
+          / extra here:
+          {{ (lookup('file', item) | from_yaml | list)
+             | difference(lookup('file', env_var_files | first) | from_yaml | list) | join(', ') }}
+      loop: "{{ env_var_files }}"
+
+    # These exist ONLY in inventory/test/group_vars/all.yml, so they all vanish
+    # at once if the suite is pointed at a bare inventory file.
+    - name: Inventory-side group_vars loaded by adjacency
+      ansible.builtin.assert:
+        that:
+          - env_name == 'test'
+          - suffix == 'test_suffix'
+          - branch_name == 'develop'
+          - php_version == '8.4'
+          - deployment_complete is defined
+          - git_repo is defined
+          - base_url is defined
+          - ping_url is defined
+          - kill_php is defined
+          - archive_min_bytes is defined
+          - release_disk_min_bytes is defined
+          - profile is defined
+          - notify_via_slack is defined
+        fail_msg: >-
+          The inventory-side group_vars did not load, or a value is wrong.
+          Ansible finds group_vars/ next to the inventory source, so both
+          `-i inventory/test` and `-i inventory/test/hosts` work -- what does NOT
+          work is an inventory outside inventory/test/. If the precedence guard
+          above passed and this failed, the value in
+          inventory/test/group_vars/all.yml was changed and this suite's
+          expectations were not.
+          env_name={{ env_name | default('<UNSET>') }}
+          suffix={{ suffix | default('<UNSET>') }}
+          php_version={{ php_version | default('<UNSET>') }}
+
+    - name: The types the notification bodies rely on
+      ansible.builtin.assert:
+        that:
+          - release_name is string
+          - version is string
+          - system.user is string
+          - releases is mapping
+          - bundler_steps is mapping
+        fail_msg: >-
+          A variable the New Relic and Noibu payloads interpolate is not the
+          type they expect.
+
+    - name: The release name survives preflight as a string
+      ansible.builtin.assert:
+        that:
+          - release_name is string
+          - "'stdout' not in release_name"
+          - release_id is string
+          - release_id != release_name
+          - release_id is search('^[0-9]{8}_[0-9]{10}_test_suffix$')
+        fail_msg: >-
+          release_name was clobbered by release-preflight, or release_id is not
+          the generated identifier. release_name={{ release_name }},
+          release_id={{ release_id }}
+
+    - name: The webhook bodies render without facts gathered
+      ansible.builtin.assert:
+        that:
+          # 'stdout' appearing anywhere means a registered dict got rendered
+          # into the payload instead of the string it expects.
+          - "'stdout' not in (deployment_request_body.deployment.changelog | string)"
+          - "'stdout' not in (noibu_request_body.title | string)"
+          # A rendered ISO timestamp proves notification_timestamp resolved --
+          # an unrendered template would not match.
+          - deployment_request_body.deployment.timestamp is search('^[0-9]{4}-[0-9]{2}-[0-9]{2}T')
+          - noibu_request_body.release_time is search('^[0-9]{4}-[0-9]{2}-[0-9]{2}T')
+        fail_msg: >-
+          A notification body did not render. These are templated when the task
+          ARGUMENTS are built, so a failure here is not suppressed by
+          failed_when: false -- it fails the deploy. This play gathers no facts
+          on purpose: notification_timestamp must fall back to the control node.
+
+    - name: Every notify_via_* gate exists and is boolean
+      ansible.builtin.assert:
+        that:
+          - notify_via_slack is boolean
+          - notify_via_pagerduty is boolean
+          - notify_via_newrelic is boolean
+          - notify_via_noibu is boolean
+        fail_msg: "A notifier gate is missing or not a bool."
+
+    - name: The three production-targeted notifiers are OFF by default
+      ansible.builtin.assert:
+        that:
+          - not notify_via_pagerduty
+          - not notify_via_newrelic
+          - not notify_via_noibu
+        fail_msg: >-
+          A notifier that points at PRODUCTION is enabled in the committed
+          defaults. PagerDuty would open a real maintenance window and New
+          Relic/Noibu would mark a release that did not happen. Enable these per
+          environment, never in group_vars/all/.
+
+    # The disk pre-flight is guarded by a `when:` on group membership, and a
+    # skipped check reports no failure, which reads exactly like a passing one.
+    - name: The disk pre-flight actually measured this host
+      ansible.builtin.assert:
+        that:
+          - release_disk_free is defined
+          - release_disk_free | int > 0
+          - release_disk_mount is defined
+          - release_disk_free | int >= release_disk_min_bytes | int
+        fail_msg: >-
+          tasks/disk-space.yml did not measure test-builder, or measured 0 bytes.
+          release_disk_free={{ release_disk_free | default('<UNSET>') }},
+          mount={{ release_disk_mount | default('<UNSET>') }}. If it is unset the
+          `when:` guard matched nothing -- test-builder is in the `builder` group,
+          so that would mean group membership stopped resolving.
+
+    - name: Retention values are sane
+      ansible.builtin.assert:
+        that:
+          - teardown_releases_to_keep | int >= 1
+          - teardown_archives_to_keep | int >= 1
+        fail_msg: >-
+          Retention below 1 would let the prune delete every release.

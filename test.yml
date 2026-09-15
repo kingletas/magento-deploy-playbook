@@ -1,0 +1,22 @@
+---
+###
+# The whole offline suite, in one file.
+#
+#   ansible-playbook -i inventory/test test.yml
+#   make check                                   # plus syntax and structure
+#
+# tests/ holds four symlinks that make Ansible treat it as the playbook root.
+# Removing one silently stops the suites testing group_vars/all/.
+###
+- name: The variable contract
+  ansible.builtin.import_playbook: tests/test-vars-contract.yml
+
+- name: The bundler table
+  ansible.builtin.import_playbook: tests/test-bundler.yml
+
+# The build mutex. Creates and removes /tmp/test_lock_env.lock.
+- name: The build lock
+  ansible.builtin.import_playbook: tests/test-release-lock.yml
+
+- name: The prune, against a real filesystem
+  ansible.builtin.import_playbook: tests/test-release-prune.yml

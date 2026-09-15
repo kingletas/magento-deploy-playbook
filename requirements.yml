@@ -1,0 +1,10 @@
+---
+# Collections only. This playbook has no role dependencies, by design: every
+# step is written out under tasks/. See docs/design.md.
+#
+#   make collections
+collections:
+  # slack and pagerduty, in handlers/main.yml.
+  - name: community.general
+  # synchronize, in tasks/deploy/upload.yml -- the builder-to-web rsync push.
+  - name: ansible.posix

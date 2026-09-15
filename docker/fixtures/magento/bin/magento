@@ -1,0 +1,4 @@
+#!/bin/bash
+# In a real release this is Magento's CLI. tasks/deploy/unarchive.yml asserts
+# this file exists before anything is repointed, and the deploy play runs it.
+exec /usr/local/bin/magento-fake "$@"

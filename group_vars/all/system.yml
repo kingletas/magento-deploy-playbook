@@ -1,0 +1,15 @@
+---
+# Who the release belongs to on the fleet, and what the web server runs as.
+system:
+    user: www-data
+    group: www-data
+    permissions: 'u=rwX,g=rX,o=rX'
+
+# php_service - the FPM service the handlers restart. php_version is
+# per-environment and belongs in the inventory; a default here would outrank
+# every inventory value and silently pin them all to it.
+php_service: "php{{ php_version }}-fpm"
+
+# use_existing_release - true when release_name= was passed, which reuses a
+# release instead of building one. Per-invocation, not per-environment.
+use_existing_release: "{{ (release_name_override | default('', true) | length) > 0 }}"

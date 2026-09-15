@@ -1,0 +1,91 @@
+---
+###
+# Build the release in {{ wdir }} on the builder. Everything here runs as the
+# connecting user, because the play sets no `become` -- and `become_user`
+# without it is a no-op.
+###
+
+- name: 'Run composer install under {{ wdir }}'
+  community.general.composer:
+    command: install
+    no_dev: true
+    # Off: installs a tree whose PHP extensions the host does not have, which
+    # then fails at runtime on whichever page first needs one.
+    # ignore_platform_reqs: true
+    working_dir: '{{ wdir }}'
+
+- name: Create the static _cache directory
+  ansible.builtin.file:
+    state: directory
+    path: '{{ wdir }}/pub/static/_cache'
+    group: '{{ system.group }}'
+    owner: '{{ system.user }}'
+    mode: '{{ system.permissions }}'
+  become: true
+
+# Both commands below boot Magento far enough to resolve a store on some stores,
+# and with no config the build dies on "The default website isn't defined".
+- name: Link app/etc/env.php at the shared copy, before any bin/magento call
+  ansible.builtin.file:
+    src: '{{ releases.shared }}env.php'    # dangles where there is none, which
+    path: '{{ wdir }}/app/etc/env.php'     # Magento reads as absent
+    state: link
+    mode: '{{ system.permissions }}'
+    force: true
+
+- name: Compile Magento's code
+  ansible.builtin.command: "php bin/magento s:d:c"
+  args:
+    chdir: '{{ wdir }}'
+
+- name: Deploy Magento's static code
+  ansible.builtin.command: "php bin/magento s:static-content:d -j 5 -f"
+  args:
+    chdir: '{{ wdir }}'
+
+- name: Copy any generated min css files
+  ansible.posix.synchronize:
+    src: "{{ wdir }}/pub/static/_cache/"
+    dest: "{{ wdir }}/generated/_cache"
+    dirs: true
+    archive: true
+    compress: true
+    owner: true
+  become: true
+  delegate_to: "{{ inventory_hostname }}"
+
+- name: Move the var view processed files under the generated folder
+  ansible.builtin.copy:
+    src: "{{ wdir }}/var/view_preprocessed"
+    dest: "{{ wdir }}/generated/"
+    remote_src: true
+    mode: '{{ system.permissions }}'
+  become: true
+
+- name: Remove var and media, to link them at the shared copy next
+  ansible.builtin.file:
+    state: absent
+    path: "{{ wdir }}/{{ item }}"
+  with_items:
+    - var
+    - pub/media
+
+- name: Create shared symlinks
+  ansible.builtin.file:
+    src: '{{ site.symlink_base }}{{ item.src }}'
+    path: '{{ wdir }}/{{ item.path }}'
+    state: link
+    mode: '{{ system.permissions }}'
+    force: true
+  with_items: '{{ releases.links }}'    # var is deliberately not among them
+  become: true
+
+- name: Upload the custom files the build does not produce
+  ansible.builtin.copy:
+    src: '{{ item }}'
+    dest: '{{ wdir }}/pub/'
+    group: '{{ system.group }}'
+    owner: '{{ system.user }}'
+    mode: '{{ system.permissions }}'
+  loop: '{{ releases.custom_files }}'
+  become: true

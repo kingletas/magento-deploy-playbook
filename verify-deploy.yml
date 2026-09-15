@@ -1,0 +1,221 @@
+---
+###
+# Assert on what a deploy left behind, by reading the filesystem rather than the
+# deploy's own output. Run after bin/docker-suite deploy; `bin/docker-suite
+# test` runs both.
+###
+- name: Verify the builder produced a release
+  hosts: builder
+  gather_facts: false
+  # `suffix` comes from inventory/docker/group_vars/all.yml, exactly as it does
+  # for the deploy this verifies.
+  tasks:
+    - name: Find the archives that exist
+      ansible.builtin.find:
+        paths: "{{ releases.archive }}"
+        patterns: "*.tgz"
+      register: builder_archives
+
+    - name: An archive was built for this environment
+      ansible.builtin.assert:
+        that:
+          - builder_archives.files | length > 0
+          - builder_archives.files | map(attribute='path') | select('search', suffix) | list | length > 0
+        fail_msg: >-
+          No archive matching '{{ suffix }}' in {{ releases.archive }}.
+          The build stage did not produce one.
+
+    - name: The archive is not empty
+      ansible.builtin.assert:
+        that:
+          - (builder_archives.files | map(attribute='size') | max) > 1024
+        fail_msg: "The largest archive is under 1 KB, so the tarball is effectively empty."
+
+    - name: Read the fake-tool call log
+      ansible.builtin.slurp:
+        src: /tmp/build-log
+      register: build_log_raw
+
+    - name: Record the log for the assertions below
+      ansible.builtin.set_fact:
+        build_log: "{{ build_log_raw.content | b64decode }}"
+
+    - name: The build ran its stages in order
+      ansible.builtin.assert:
+        that:
+          # Not `fake-composer] install`: the module puts --working-dir before
+          # the subcommand. No \b anywhere in these patterns -- inside a Jinja
+          # string literal that is a backspace, and matches nothing.
+          - build_log is search('fake-composer\].*install.*--no-dev')
+          - build_log is search('s:d:c')
+          - build_log is search('s:static-content:d')
+        fail_msg: >-
+          A build stage did not run. Log was:
+          {{ build_log }}
+
+    # The suite runs the default bundler, so this is what an operator who
+    # changes nothing gets. A magepack run would log `fake-docker] run`.
+    - name: The bundler ran, and it was the configured one
+      ansible.builtin.assert:
+        that:
+          - build_log is search('fake-manipulus\] build')
+          - build_log is search('manipulus:integrity:refresh')
+          - not (build_log is search('fake-docker\] run'))
+        fail_msg: >-
+          bundler_steps resolved to the wrong commands for
+          `bundler: {{ bundler }}`. Log was: {{ build_log }}
+
+- name: Verify the release is live on the fleet
+  hosts: web
+  gather_facts: false
+  tasks:
+    - name: Stat the current symlink
+      ansible.builtin.stat:
+        path: "{{ releases.current }}"
+        follow: false
+      register: current_link
+
+    - name: The current symlink points into this environment's releases
+      ansible.builtin.assert:
+        that:
+          - current_link.stat.exists
+          - current_link.stat.islnk
+          - current_link.stat.lnk_source is search(suffix)
+        fail_msg: >-
+          {{ releases.current }} on {{ inventory_hostname }} is not a symlink
+          into a '{{ suffix }}' release. islnk={{ current_link.stat.islnk | default('n/a') }}
+          target={{ current_link.stat.lnk_source | default('n/a') }}
+
+    - name: The live release has a usable Magento CLI
+      ansible.builtin.stat:
+        path: "{{ releases.current }}/bin/magento"
+      register: live_bin
+
+    - name: Magento's CLI is present and executable
+      ansible.builtin.assert:
+        that:
+          - live_bin.stat.exists
+          - live_bin.stat.xusr
+        fail_msg: >-
+          {{ releases.current }}/bin/magento is missing or not executable on
+          {{ inventory_hostname }}, so the release is not usable.
+
+    # A release that extracted without its shared links loses media and
+    # sitemaps, and says nothing about it.
+    - name: The shared symlinks resolve
+      ansible.builtin.stat:
+        path: "{{ releases.current }}/{{ item.path }}"
+      loop: "{{ releases.links }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: shared_links
+
+    - name: Every shared link exists and points somewhere real
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+        fail_msg: >-
+          {{ item.item.path }} is missing from the live release on
+          {{ inventory_hostname }}. releases.links did not apply.
+      loop: "{{ shared_links.results }}"
+      loop_control:
+        label: "{{ item.item.path }}"
+
+    - name: The env.php link points at the shared copy, not a baked-in file
+      ansible.builtin.stat:
+        path: "{{ releases.current }}/app/etc/env.php"
+        follow: false
+      register: env_php
+
+    - name: The env.php path is a symlink
+      ansible.builtin.assert:
+        that:
+          - env_php.stat.exists
+          - env_php.stat.islnk
+        fail_msg: >-
+          app/etc/env.php on {{ inventory_hostname }} is not a symlink. Each
+          node needs its own shared env.php; a baked-in copy means a deploy
+          overwrites per-node configuration.
+
+    - name: Every custom payload was uploaded
+      ansible.builtin.stat:
+        path: "{{ releases.current }}/pub/{{ item }}"
+      loop: "{{ releases.custom_files }}"
+      loop_control:
+        label: "{{ item }}"
+      register: payloads
+
+    - name: Every custom payload landed in pub/
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+        fail_msg: >-
+          {{ item.item }} is missing from pub/ on {{ inventory_hostname }}.
+          These come from the playbook's own files/ directory.
+      loop: "{{ payloads.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+- name: Verify the admin-only steps ran once, not once per web host
+  hosts: admin
+  gather_facts: false
+  tasks:
+    - name: Read the fake-tool call log
+      ansible.builtin.slurp:
+        src: /tmp/build-log
+      register: admin_log_raw
+
+    - name: Count the cache flushes
+      ansible.builtin.set_fact:
+        admin_log: "{{ admin_log_raw.content | b64decode }}"
+
+    # Two tasks legitimately flush the cache here, so more than 2 means a
+    # run_once has regressed and one is fanning out per web host.
+    - name: Cache flush ran twice, from its two legitimate callers
+      ansible.builtin.assert:
+        that:
+          - (admin_log.split('\n') | select('search', '\[fake-magento\] cache:flush') | list | length) == 2
+        fail_msg: >-
+          cache:flush ran
+          {{ admin_log.split('\n') | select('search', '\[fake-magento\] cache:flush') | list | length }}
+          times on {{ inventory_hostname }}, expected 2. More than that means the
+          run_once on "Flush magento cache" has regressed and it is fanning out
+          once per web host.
+
+    - name: The upgrade gate read the status commands
+      ansible.builtin.assert:
+        that:
+          - admin_log is search('setup:db:status')
+          - admin_log is search('app:config:status')
+        fail_msg: >-
+          The setup:upgrade gate did not run its status checks, so it cannot
+          have decided correctly whether an upgrade was needed.
+
+    # The fakes report "up to date", so the gate must NOT have run an upgrade.
+    # Set MAGENTO_FAKE_NEEDS_UPGRADE=1 in the containers to test the other side.
+    - name: Setup upgrade was correctly skipped
+      ansible.builtin.assert:
+        that:
+          - not (admin_log is search('setup:upgrade'))
+        fail_msg: >-
+          setup:upgrade ran even though both status commands reported up to
+          date. That is the block/rescue firing when it should not, or the gate
+          misreading the looped register.
+
+- name: Verify the lock was released
+  hosts: builder
+  gather_facts: false
+  tasks:
+    - name: Stat the build lock
+      ansible.builtin.stat:
+        path: "/tmp/{{ suffix | lower }}.lock"
+      register: lock
+
+    - name: No lock is left behind
+      ansible.builtin.assert:
+        that:
+          - not lock.stat.exists
+        fail_msg: >-
+          /tmp/{{ suffix | lower }}.lock survived the run. Every later deploy
+          for this environment would refuse to start until `make unlock`.
+        success_msg: "Lock released. Deploy verified end to end."

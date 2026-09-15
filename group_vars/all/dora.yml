@@ -1,0 +1,62 @@
+---
+# DORA / SLO instrumentation. Paths, sinks and the change-failure policy. No
+# secrets, so a fresh clone emits events without configuring anything.
+dora:
+  # enabled - emit events at all. Nothing here fails a deploy.
+  enabled: true
+
+  # sinks - where events go. The local log is always the source of truth; the
+  # others are dashboards and must never be used to compute the numbers.
+  sinks:
+    - local
+    # - newrelic
+    # - prometheus
+
+  local:
+    # host - where the log is written. The control node by default; point it at
+    # a shared host once more than one person cuts releases, or the log
+    # fragments across laptops and the numbers come from a partial history.
+    host: localhost
+    path: "{{ lookup('env', 'HOME') }}/.local/state/dora/deployments.jsonl"
+    # s3_bucket - optional off-host copy. Empty means local only.
+    s3_bucket: ""
+
+  change_failure:
+    # qualifying_services - a deploy counts as failed if one of these opens
+    # within attribution_window_h of it. Replace with your own service ids.
+    qualifying_services:
+      - PEXAMPL1   # Checkout emergencies
+      - PEXAMPL2   # Order flow stopped -- fires when orders stop leaving
+                   # Magento, so a release can plausibly cause it.
+      - PEXAMPL3   # Payment gateway emergencies
+      - PEXAMPL4   # Storefront origin connectivity
+
+    # excluded_services - named with the reason, so the next person does not
+    # "fix" the omission. An incident a release cannot plausibly cause inflates
+    # the change-failure rate without carrying any signal.
+    excluded_services:
+      - PEXAMPL5   # Warehouse interface errors -- high volume, and not
+                   # plausibly caused by a Magento release. Including a service
+                   # like this can roughly double the false-positive rate.
+      - PEXAMPL6   # The debug service
+      - PEXAMPL7   # Synthetic monitoring -- also the service the maintenance
+                   # window is opened against, so it would self-trigger.
+      - PEXAMPL8   # Marketing notifications
+
+    # attribution_window_h - how long after a deploy an incident still counts.
+    attribution_window_h: 24
+
+    # noise_floor_pct - the share of RANDOM 24h windows already containing a
+    # qualifying incident. A change-failure rate at or below it is noise.
+    # Measure it against your own incident history.
+    noise_floor_pct: 0.0
+
+  prometheus:
+    pushgateway: "http://pushgateway.example.com:9091"
+
+  newrelic:
+    event_type: MagentoDeployment
+
+# Services rather than severities, because `GET /priorities` 404s on any account
+# without incident priorities enabled, and every incident there carries priority
+# null and urgency "high". Check that before designing around severity.

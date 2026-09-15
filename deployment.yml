@@ -1,0 +1,152 @@
+---
+# Runs on the control node, because it has to decide before anything connects.
+- name: Check this is not the shipped template
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Refuse the example inventory
+      ansible.builtin.import_tasks: tasks/template-guard.yml
+
+- name: Start the build process
+  hosts: all
+  become: true
+  gather_facts: true
+  pre_tasks:
+    - name: Resolve and validate the release facts, before anything is created
+      ansible.builtin.include_tasks: tasks/release-preflight.yml
+
+    - name: Take the build lock
+      ansible.builtin.import_tasks: tasks/release-lock/acquire.yml
+
+- name: "Building the release"
+  hosts: builder
+  vars:
+    deployment_status: started
+  handlers:
+    - name: Playbook handlers
+      ansible.builtin.import_tasks: handlers/main.yml
+  pre_tasks:
+    - name: Sync the repository checkout
+      ansible.builtin.import_tasks: tasks/packaging/git.yml
+
+    - name: Build the release
+      ansible.builtin.import_tasks: tasks/packaging/deploy.yml
+
+    - name: Bundle the JavaScript, using the static content the build deployed
+      ansible.builtin.import_tasks: tasks/packaging/bundle.yml
+
+    - name: Archive the release
+      ansible.builtin.import_tasks: tasks/packaging/archive.yml
+
+  tasks:
+    - name: Read the built commit
+      ansible.builtin.command: "git rev-parse HEAD"
+      args:
+        chdir: "{{ wdir }}"
+      register: built_commit
+      changed_when: false
+      failed_when: false
+      run_once: true
+
+    - name: Read the commit count since the base branch
+      ansible.builtin.command: "git rev-list --count {{ regular_base_branch }}..HEAD"
+      args:
+        chdir: "{{ wdir }}"
+      register: built_commit_count
+      changed_when: false
+      failed_when: false
+      run_once: true
+
+    - name: "DORA: record the build"
+      ansible.builtin.include_tasks: tasks/dora-event.yml
+      vars:
+        dora_phase: build.succeeded
+        dora_extra:
+          commit_to: "{{ built_commit.stdout | default('') | trim }}"
+          commit_count: "{{ built_commit_count.stdout | default('') | trim }}"
+          builder: "{{ inventory_hostname }}"
+
+- name: Upload the archive and take the site down
+  hosts: web
+  become: true
+  gather_facts: false
+  vars:
+    deployment_status: uploaded
+  handlers:
+    - name: Playbook handlers
+      ansible.builtin.import_tasks: handlers/main.yml
+  tasks:
+    - name: Upload the release archive to the host
+      ansible.builtin.import_tasks: tasks/deploy/upload.yml
+      when: releases.upload
+
+    - name: Unarchive the release on the host
+      ansible.builtin.import_tasks: tasks/deploy/unarchive.yml
+      when: releases.unarchive
+
+    - name: Ensure there is a magento bin directory
+      ansible.builtin.stat:
+        path: "{{ releases.current }}/bin/magento"
+      register: magento_bin_path_validation
+
+    - name: Enable Magento's maintenance mode
+      ansible.builtin.command: "php bin/magento maint:enable"
+      args:
+        chdir: "{{ releases.current }}"
+      become: true
+      become_user: "{{ system.user }}"
+      changed_when: true
+      when: magento_bin_path_validation.stat.exists
+      notify: Open the PagerDuty maintenance window
+
+- name: Clear Varnish, so it stops serving the release being replaced
+  hosts: "varnish"
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Restart Varnish
+      ansible.builtin.service:
+        name: varnish
+        state: restarted
+
+- name: Deploy Magento to the web hosts (includes admin & cron)
+  hosts: "web"
+  become: true
+  gather_facts: false
+  vars:
+    deployment_status: completed
+  handlers:
+    - name: Playbook handlers
+      ansible.builtin.import_tasks: handlers/main.yml
+  tasks:
+    - name: Deploy Magento onto the release
+      ansible.builtin.import_tasks: tasks/magento-deploy/main.yml
+
+    - name: "DORA: record the deploy"
+      ansible.builtin.include_tasks: tasks/dora-event.yml
+      vars:
+        dora_phase: cutover.succeeded
+        dora_extra:
+          outcome: success
+
+- name: Clean old releases on the web hosts and the builder
+  hosts: "web builder"
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Prune this environment's releases and archives
+      ansible.builtin.include_tasks: tasks/release-prune.yml
+      vars:
+        # No fallback: an empty scope matches another environment's releases.
+        prune_env: "{{ suffix | string }}"
+        # False for the builder, which serves no traffic and has no `current`.
+        prune_require_live_release: "{{ inventory_hostname not in (groups['builder'] | default([])) }}"
+
+    - name: Drop the build lock
+      ansible.builtin.import_tasks: tasks/release-lock/release.yml
+
+  handlers:
+    - name: Playbook handlers
+      ansible.builtin.import_tasks: handlers/main.yml

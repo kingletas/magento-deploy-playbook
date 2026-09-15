@@ -1,0 +1,60 @@
+#!/bin/bash
+# Fake composer.
+#
+# The community.general.composer module does not just run `composer install` --
+# it first runs `composer help <command> --format=json` and parses the result to
+# discover which options the local composer supports, then only passes the ones
+# it finds. A fake that prints nothing makes the module die inside from_json
+# with "No start of json char found", which is what happened the first time this
+# suite ran.
+#
+# So: answer the option-discovery probe with real JSON, and treat everything
+# else as a successful install that leaves behind the directories a real
+# `composer install` would.
+echo "[fake-composer] $* (cwd=$PWD)" >> /tmp/build-log 2>/dev/null || true
+
+for arg in "$@"; do
+  if [ "$arg" = "--format=json" ]; then
+    # Only the option NAMES matter to the module; it checks membership.
+    cat <<'JSON'
+{
+  "definition": {
+    "options": {
+      "no-dev": {"name": "--no-dev"},
+      "no-interaction": {"name": "--no-interaction"},
+      "no-scripts": {"name": "--no-scripts"},
+      "no-plugins": {"name": "--no-plugins"},
+      "no-progress": {"name": "--no-progress"},
+      "optimize-autoloader": {"name": "--optimize-autoloader"},
+      "classmap-authoritative": {"name": "--classmap-authoritative"},
+      "apcu-autoloader": {"name": "--apcu-autoloader"},
+      "ignore-platform-reqs": {"name": "--ignore-platform-reqs"},
+      "working-dir": {"name": "--working-dir"},
+      "prefer-dist": {"name": "--prefer-dist"},
+      "prefer-source": {"name": "--prefer-source"}
+    }
+  }
+}
+JSON
+    exit 0
+  fi
+done
+
+# Create what a real install leaves behind, so the tasks after this find their
+# paths: deploy.yml syncs pub/static/_cache and moves var/view_preprocessed.
+# The module passes `--working-dir <path>` SPACE-separated, not `--working-dir=`.
+# Parsing only the `=` form silently created these directories in $HOME, and the
+# next task failed with "Source .../var/view_preprocessed not found".
+target="$PWD"
+prev=""
+for arg in "$@"; do
+  case "$arg" in
+    --working-dir=*) target="${arg#--working-dir=}" ;;
+  esac
+  [ "$prev" = "--working-dir" ] && target="$arg"
+  prev="$arg"
+done
+mkdir -p "$target/vendor" "$target/generated/code" "$target/generated/_cache" \
+         "$target/var/view_preprocessed" "$target/pub/static/_cache"
+echo "Nothing to install, generating autoload files"
+exit 0

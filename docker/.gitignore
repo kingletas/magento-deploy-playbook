@@ -1,0 +1,5 @@
+# Generated per run, never committed: a throwaway SSH keypair and the bare
+# fixture repo built from fixtures/magento/.
+keys/
+fixtures/magento-repo.git/
+fixtures/.repo-build/

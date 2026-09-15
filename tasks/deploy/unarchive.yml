@@ -1,0 +1,66 @@
+---
+###
+# Extract the uploaded archive into the releases directory on this host, and
+# confirm the result is a usable release before anything points at it.
+###
+
+# `state: file` on a path that does not exist is a hard failure with an opaque
+# message. That happens for real: `releases.upload: false` skips the upload, and
+# on a host that has never had this release there is then nothing to chmod.
+- name: Check the uploaded archive is present
+  ansible.builtin.stat:
+    path: "{{ releases.archive }}{{ release_id }}.tgz"
+  register: local_archive
+
+- name: Assert the archive arrived on this host
+  ansible.builtin.assert:
+    that:
+      - local_archive.stat.exists
+    fail_msg: >-
+      {{ releases.archive }}{{ release_id }}.tgz is missing on
+      {{ inventory_hostname }}. Either the upload stage was skipped
+      (releases.upload is {{ releases.upload }}) or it did not reach this host.
+
+# So {{ system.user }} owns the archive before it is extracted.
+- name: Update the package permissions
+  ansible.builtin.file:
+    path: "{{ releases.archive }}{{ release_id }}.tgz"
+    mode: "{{ system.permissions }}"
+    owner: "{{ system.user }}"
+    group: "{{ system.group }}"
+    state: file
+  become: true
+
+- name: Ensure there is not an unarchive release already
+  ansible.builtin.stat:
+    path: "{{ releases.path }}{{ release_id }}"
+  register: unarchive_release_path_validation
+
+- name: Unarchive the current release
+  ansible.builtin.unarchive:
+    src: "{{ releases.archive }}{{ release_id }}.tgz"
+    dest: "{{ releases.path }}"
+    mode: "{{ system.permissions }}"
+    owner: "{{ system.user }}"
+    group: "{{ system.group }}"
+    remote_src: true
+  become: true
+  become_user: "{{ system.user }}"
+  when: not unarchive_release_path_validation.stat.exists
+  notify: Notify Slack
+
+# The calling play stats the CURRENT symlink; this is the NEW release.
+- name: Confirm the extracted release is usable
+  ansible.builtin.stat:
+    path: "{{ releases.path }}{{ release_id }}/bin/magento"
+  register: extracted_magento_bin
+
+- name: Assert the extracted release has a Magento CLI
+  ansible.builtin.assert:
+    that:
+      - extracted_magento_bin.stat.exists
+    fail_msg: >-
+      {{ releases.path }}{{ release_id }}/bin/magento is missing on
+      {{ inventory_hostname }} after extraction. The archive is present but does
+      not contain a usable release -- repointing the symlink at it would take the
+      site down. Rebuild rather than retrying the cutover.

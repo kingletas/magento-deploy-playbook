@@ -1,0 +1,57 @@
+---
+###
+# Emits one DORA event, one per phase transition. Callers set `dora_phase` and
+# may add fields with `dora_extra`. Never fails a deploy.
+###
+- name: "DORA: skip when disabled"
+  ansible.builtin.debug:
+    msg: "DORA instrumentation disabled (dora.enabled=false)"
+  when: not (dora.enabled | default(false) | bool)
+
+- name: "DORA: emit"
+  when: dora.enabled | default(false) | bool
+  delegate_to: "{{ dora.local.host }}"
+  run_once: true
+  become: false
+  block:
+    # A `#` inside the Jinja expression below is not a comment, so any note
+    # about these fields has to live out here.
+    - name: "DORA: build the event"
+      ansible.builtin.set_fact:
+        dora_event: >-
+          {{
+            {
+              'schema': 1,
+              'ts': lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ'),
+              'event': dora_phase,
+              'env_name': env_name,
+              'release': releases.name | default('', true),
+              'previous_release': dora_previous_release | default('', true),
+              'is_rollback': dora_is_rollback | default(false),
+              'actor': lookup('env', 'USER'),
+              'branch': branch_name | default('', true),
+              'playbook': ansible_play_name | default(''),
+            } | combine(dora_extra | default({}, true))
+          }}
+
+    - name: "DORA: ensure the log directory exists"
+      ansible.builtin.file:
+        path: "{{ dora.local.path | dirname }}"
+        state: directory
+        mode: "0755"
+
+    - name: "DORA: append to the local event log"
+      ansible.builtin.shell:
+        cmd: "printf '%s\n' {{ dora_event | to_json | quote }} >> {{ dora.local.path | quote }}"
+      changed_when: true
+
+    - name: "DORA: confirm"
+      ansible.builtin.debug:
+        msg: "DORA {{ dora_phase }} -> {{ dora.local.path }}"
+
+  rescue:
+    - name: "DORA: instrumentation failed, continuing anyway"
+      ansible.builtin.debug:
+        msg: >-
+          DORA event '{{ dora_phase }}' could not be recorded. The deploy is
+          unaffected; the reporter will show this release as incomplete.

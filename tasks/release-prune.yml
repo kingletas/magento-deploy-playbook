@@ -1,0 +1,139 @@
+---
+###
+# Prunes ONE environment's old releases and archives. Sorts by name, which is
+# chronological because names lead with date and epoch.
+#
+#   prune_env                   required. The environment suffix, which scopes
+#                               the regex to it.
+#   prune_require_live_release  default true. Excludes whatever `current`
+#                               resolves to. False only for hosts that serve no
+#                               traffic.
+###
+- name: Validate the teardown scope is set
+  ansible.builtin.assert:
+    that:
+      - prune_env | default('', true) | length > 0
+    fail_msg: >-
+      Refusing to run teardown: prune_env is empty (no suffix / SUFFIX).
+      Without a scope the regex would match other environments' releases.
+
+- name: Validate the retention values
+  ansible.builtin.assert:
+    that:
+      - teardown_releases_to_keep | int >= 1
+      - teardown_archives_to_keep | int >= 1
+    fail_msg: "Retention values (teardown_*_to_keep) must be >= 1."
+
+# Matches <date>_<epoch>_<suffix>, with or without extra segments between.
+- name: Build the environment-specific regex
+  ansible.builtin.set_fact:
+    teardown_regex: >-
+      ^[0-9]{8}_[0-9]{10}_(?:.+_)?{{ prune_env }}(?:\.tgz)?$
+
+- name: Check the release, archive and current paths
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - "{{ releases.path }}"
+    - "{{ releases.archive }}"
+    - "{{ releases.current }}"
+  register: path_checks
+
+- name: Set the path facts
+  ansible.builtin.set_fact:
+    releases_dir_exists: "{{ path_checks.results[0].stat.exists | default(false) }}"
+    archives_dir_exists: "{{ path_checks.results[1].stat.exists | default(false) }}"
+    current_is_link: "{{ path_checks.results[2].stat.islnk | default(false) }}"
+
+# A basename, not a path: what the symlink points AT, which is what the names
+# below compare against.
+- name: Resolve the live release from the symlink
+  ansible.builtin.set_fact:
+    live_release_name: >-
+      {{ path_checks.results[2].stat.lnk_source | basename if current_is_link else '' }}
+
+- name: Refuse to prune when the current symlink cannot be resolved
+  ansible.builtin.assert:
+    that:
+      - live_release_name | length > 0
+    fail_msg: >-
+      {{ releases.current }} is not a symlink on {{ inventory_hostname }},
+      so the live release cannot be identified. Skipping the prune is safer
+      than guessing.
+  when: prune_require_live_release | default(true) | bool
+
+- name: Show the active cleanup configuration
+  ansible.builtin.debug:
+    msg:
+      environment: "{{ prune_env }}"
+      regex: "{{ teardown_regex }}"
+      live_release: "{{ live_release_name | default('(none - host serves no traffic)', true) }}"
+      keep_releases: "{{ teardown_releases_to_keep }}"
+      keep_archives: "{{ teardown_archives_to_keep }}"
+
+- name: Find this environment's releases
+  ansible.builtin.find:
+    paths: "{{ releases.path }}"
+    recurse: false
+    file_type: directory
+    use_regex: true
+    patterns: "{{ teardown_regex }}"
+  register: releases_found
+  when: releases_dir_exists
+
+- name: Determine which releases to remove
+  ansible.builtin.set_fact:
+    releases_to_remove: >-
+      {{
+        (
+          releases_found.files
+          | map(attribute='path') | map('basename')
+          | sort(reverse=true)
+          | reject('equalto', live_release_name)
+          | list
+        )[teardown_releases_to_keep | int:]
+      }}
+  when: releases_dir_exists
+
+- name: Remove old releases
+  ansible.builtin.file:
+    path: "{{ releases.path }}/{{ item }}"
+    state: absent
+  loop: "{{ releases_to_remove | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  when: releases_dir_exists
+
+- name: Find this environment's archives
+  ansible.builtin.find:
+    paths: "{{ releases.archive }}"
+    recurse: false
+    file_type: file
+    use_regex: true
+    patterns: "{{ teardown_regex }}"
+  register: archives_found
+  when: archives_dir_exists
+
+- name: Determine which archives to remove
+  ansible.builtin.set_fact:
+    archives_to_remove: >-
+      {{
+        (
+          archives_found.files
+          | map(attribute='path') | map('basename')
+          | sort(reverse=true)
+          | reject('equalto', live_release_name ~ '.tgz')
+          | list
+        )[teardown_archives_to_keep | int:]
+      }}
+  when: archives_dir_exists
+
+- name: Remove old archives
+  ansible.builtin.file:
+    path: "{{ releases.archive }}/{{ item }}"
+    state: absent
+  loop: "{{ archives_to_remove | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  when: archives_dir_exists

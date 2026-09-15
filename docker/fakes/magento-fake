@@ -1,0 +1,27 @@
+#!/bin/bash
+# Stands in for `php bin/magento`. Logs the subcommand and succeeds.
+#
+# `setup:db:status` and `app:config:status` are the two whose OUTPUT the
+# playbook branches on: tasks/magento-deploy/main.yml only runs setup:upgrade if
+# one of them reports work to do. Both report "up to date" here, so the default
+# path is the no-upgrade path. Set MAGENTO_FAKE_NEEDS_UPGRADE=1 in the
+# container to exercise the other branch.
+echo "[fake-magento] $*" >> /tmp/build-log 2>/dev/null || true
+case "$1" in
+  setup:db:status)
+    if [ "${MAGENTO_FAKE_NEEDS_UPGRADE:-0}" = "1" ]; then
+      echo "Declarative Schema is not up to date"
+    else
+      echo "All modules are up to date."
+    fi
+    ;;
+  app:config:status)
+    if [ "${MAGENTO_FAKE_NEEDS_UPGRADE:-0}" = "1" ]; then
+      echo "Config files have changed"
+    else
+      echo "Config files are up to date."
+    fi
+    ;;
+  *) echo "ok: $*" ;;
+esac
+exit 0

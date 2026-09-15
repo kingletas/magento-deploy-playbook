@@ -1,0 +1,54 @@
+---
+# Fake fleet for local end-to-end testing: one builder, two app nodes, an admin,
+# a cron and a varnish, so the playbook's `hosts:` patterns resolve as they do
+# against a real environment. All six run sshd.
+services:
+  builder:
+    build: { context: ., dockerfile: Dockerfile }
+    image: magento-deploy-suite
+    container_name: mdp-builder
+    hostname: builder
+    networks: [fleet]
+    # The fixture repo is mounted read-only; git.yml clones from it by file://
+    # path, so no network egress and no credentials are involved.
+    volumes:
+      - ./fixtures/magento-repo.git:/srv/magento-repo.git:ro
+
+  web1:
+    image: magento-deploy-suite
+    container_name: mdp-web1
+    hostname: web1
+    networks: [fleet]
+    depends_on: [builder]
+
+  web2:
+    image: magento-deploy-suite
+    container_name: mdp-web2
+    hostname: web2
+    networks: [fleet]
+    depends_on: [builder]
+
+  admin:
+    image: magento-deploy-suite
+    container_name: mdp-admin
+    hostname: admin
+    networks: [fleet]
+    depends_on: [builder]
+
+  cron:
+    image: magento-deploy-suite
+    container_name: mdp-cron
+    hostname: cron
+    networks: [fleet]
+    depends_on: [builder]
+
+  varnish:
+    image: magento-deploy-suite
+    container_name: mdp-varnish
+    hostname: varnish
+    networks: [fleet]
+    depends_on: [builder]
+
+networks:
+  fleet:
+    name: mdp-fleet

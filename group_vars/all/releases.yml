@@ -1,0 +1,98 @@
+---
+###
+# Where a release lives and what a release is. The same on every environment.
+#
+# The values that do vary are referenced here and declared only in
+# inventory/<env>/group_vars/all.yml. Never give one of those a default here:
+# playbook group_vars outrank inventory group_vars/all.
+###
+site:
+  # base - the web root every release path hangs off.
+  base: /var/www/html/
+  # symlink_base - where the shared directories live. An NFS or EFS mount on a
+  # real fleet, a bind mount locally.
+  symlink_base: /mnt/efs/magento.example.com/
+  # link - the name of the symlink the web server serves from.
+  link: magento_current
+
+# release_name_override - reuse an existing release instead of minting one.
+# Empty builds a new one. The name, the path and whether to build at all all
+# derive from it, so a deploy cannot reuse one release and point at another.
+#
+#   make deploy environment=<env> release_name=20260819_1755600000_staging
+release_name_override: ""
+
+releases:
+  # upload / unarchive - push the archive to the fleet, and extract it there.
+  # Off is for rehearsing a build that goes no further than the builder.
+  upload: true
+  unarchive: true
+  # complete - flip the `current` symlink. False deploys without going live.
+  complete: "{{ deployment_complete }}"
+  # name - the release identifier, and the directory named after it.
+  name: "{{ release_name_override | default(env_name ~ '_latest', true) }}"
+  path: "{{ site.base }}releases/"
+  shared: "{{ site.base }}shared/"
+  archive: "{{ site.base }}archives/"
+  current: "{{ site.base }}{{ site.link }}"
+  # local / download_locally - fetch the archive to the control node as well.
+  # Off; the guarded fetch in tasks/packaging/archive.yml is what reads them.
+  local: "releases/"
+  download_locally: false
+  kill_php: "{{ kill_php }}"
+  # removable - deleted from the checkout before it is archived. A deployment
+  # config and the directories the fleet supplies or the build regenerates.
+  removable:
+    - var
+    - pub/media
+    - patches.lock.json
+    - app/etc/env.php
+    - pub/sitemap-products.xml
+    - vendor
+    - generated
+  # links - symlinked out of the release into site.symlink_base, so media and
+  # sitemaps survive a cutover and are shared across the fleet.
+  links:
+    - path: pub/media
+      src: "media"
+    - path: pub/sitemaps
+      src: "sitemaps"
+    - path: pub/sitemap-products.xml
+      src: "sitemap-products.xml"
+    - path: pub/static/_cache
+      src: magento_static_files/_cache
+  # custom_files - copied out of files/ into the release's pub/, for anything
+  # the build does not produce. A named file that is missing fails the deploy.
+  custom_files:
+    - deploy-info.html
+
+# regular_base_branch - the base the changelog commit range is measured from.
+regular_base_branch: "develop"
+
+# Which notifiers fire. Outside the vault, so they can be flipped without the
+# vault password. Each is off by default and needs live credentials in
+# notifications.yml; with a flag on and no credential the module is still called
+# and the failure swallowed, so nothing is delivered and the run looks clean.
+#
+# notify_via_slack is per environment and belongs in the inventory.
+
+# notify_via_pagerduty - open a maintenance window for the deploy. Requires
+# pagerduty_token, pagerduty_service and pagerduty_requester_id.
+notify_via_pagerduty: false
+
+# notify_via_newrelic - post a deployment marker. Requires
+# newrelic_deployment_token and newrelic_deployment_apps.
+notify_via_newrelic: false
+
+# notify_via_noibu - post to the release feed. Requires noibu_base_url.
+notify_via_noibu: false
+
+# How many of each to keep on every host. The prune never touches the release
+# `current` points at, whatever these say.
+teardown_archives_to_keep: 4
+teardown_releases_to_keep: 2
+
+# ping_urls - requested once the deploy finishes, to warm the caches. ping_url
+# gates it and base_url builds it, both from the inventory.
+ping_urls:
+  - "{{ base_url }}filters.php"

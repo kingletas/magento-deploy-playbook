@@ -1,0 +1,35 @@
+---
+###
+# Remove a stale build lock from the builder, left by a run that died hard.
+#
+#   make unlock environment=example
+###
+- name: Drop a stale build lock
+  hosts: builder
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Refuse to run without a suffix
+      ansible.builtin.assert:
+        that:
+          - suffix | default('', true) | length > 0
+        fail_msg: >-
+          `suffix` is not set, so the lock path cannot be computed. It comes from
+          inventory/<env>/group_vars/all.yml -- check that the environment has
+          one.
+      run_once: true
+
+    # Same expression as tasks/release-lock/acquire.yml. Lowercased because a
+    # profile could spell the suffix in upper case and the lock path must not
+    # depend on that; test-release-lock.yml asserts it.
+    - name: Remove the lock file
+      ansible.builtin.file:
+        path: "/tmp/{{ suffix | lower }}.lock"
+        state: absent
+      register: unlock_result
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Removed' if unlock_result.changed else 'No lock to remove at' }}
+          /tmp/{{ suffix | lower }}.lock on {{ inventory_hostname }}

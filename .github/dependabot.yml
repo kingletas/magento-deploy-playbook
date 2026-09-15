@@ -1,0 +1,27 @@
+---
+version: 2
+
+updates:
+  # Dependabot reads the `# vX.Y.Z` comment beside each SHA pin and moves both
+  # together, so a pin nothing bumps does not become a stale dependency.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci
+    groups:
+      all:
+        patterns: ["*"]
+    open-pull-requests-limit: 2
+
+  # The pinned Ansible and lint versions in requirements.txt. Grouped for the
+  # same reason: one pull request per package is one full CI run per package.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      all:
+        patterns: ["*"]
+    open-pull-requests-limit: 2

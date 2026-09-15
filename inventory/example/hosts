@@ -1,0 +1,46 @@
+# A TEMPLATE, not a working environment. Every host is under example.com, which
+# RFC 2606 reserves so it can never resolve, and the playbook refuses to run
+# while these names are in place.
+#
+#   cp -r inventory/example inventory/staging
+#
+# Names can be DNS, an IP, or a ~/.ssh/config alias. An alias is usually best:
+# your SSH config then supplies the address, the key and any jump host.
+#
+# The group names are not free-form. handlers/main.yml loops over
+# `groups.apps + groups.admin` and `groups.cron + groups.admin`, so renaming or
+# omitting one breaks at handler time rather than at parse time. `make check`
+# parses every inventory and asserts they resolve.
+#
+# `web` is the parent of apps + admin + cron. `builder` and `varnish` sit
+# outside it: the builder serves no traffic and has no `current` symlink, and
+# varnish gets a play of its own.
+[builder]
+builder.example.com
+
+[apps]
+web1.example.com
+web2.example.com
+web3.example.com
+
+[admin]
+admin.example.com
+
+[cron]
+cron.example.com
+
+[varnish]
+varnish.example.com
+
+[web:children]
+apps
+admin
+cron
+
+[all:vars]
+# `ansible_user` is not a valid ansible.cfg key, so this line is what wins.
+ansible_user=ubuntu
+
+# Pinned rather than discovered: discovery can pick a different interpreter than
+# the one your modules' dependencies are installed against.
+ansible_python_interpreter=/usr/bin/python3

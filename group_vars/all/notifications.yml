@@ -1,0 +1,56 @@
+---
+###
+# Credentials and payloads for the notifiers in handlers/main.yml. EVERY VALUE
+# HERE IS A PLACEHOLDER. Once it holds real tokens:
+#
+#   ansible-vault encrypt group_vars/all/notifications.yml
+#
+# The on/off switches are in releases.yml, outside the vault.
+###
+# Slack -- a deploy announcement. Switched on per environment with
+# notify_via_slack.
+slack_token: ""          # a bot token with chat:write on the channel below
+slack_channel: "#deployments"
+
+# PagerDuty -- a maintenance window for the deploy, so the fleet going quiet
+# does not page anyone. Switched on with notify_via_pagerduty.
+pagerduty_company: "example"            # your PagerDuty subdomain
+pagerduty_token: ""                     # an API token that can create windows
+pagerduty_service: "PEXAMPL7"           # the service to silence
+pagerduty_requester_id: "PEXAMPLU"      # a USER id, not a service id: the
+                                        # window is audited under this name
+pagerduty_maintenance_window: 1         # hours
+
+# New Relic -- one deployment marker per application, so a change in the charts
+# lines up against the release that caused it. Switched on with
+# notify_via_newrelic.
+newrelic_base_url: "https://api.newrelic.com/v2/applications"
+newrelic_deployment_token: ""   # an API key with deployment-marker permission
+newrelic_deployment_apps: []    # application ids; one marker is posted per id
+
+# The marker body. notification_timestamp, never ansible_date_time: a body is
+# templated when the task's arguments are built, so a fact the host never
+# gathered raises where `failed_when: false` cannot suppress it.
+deployment_request_body:
+  deployment:
+    revision: "{{ version }}"
+    changelog: "{{ git_log | default('', true) }}"
+    description: "{{ release_name }}"
+    user: "{{ system.user }}"
+    timestamp: "{{ notification_timestamp }}"
+
+# Noibu -- a release feed, so front-end errors can be attributed to a release.
+# Switched on with notify_via_noibu.
+noibu_base_url: "https://api.example.com/releases"
+noibu_request_body:
+  title: "{{ release_name }}"
+  version: "{{ version }}"
+  release_time: "{{ notification_timestamp }}"
+
+# Yottaa -- edge cache flush. Nothing notifies this: a lower environment is not
+# behind the edge cache. Uncomment the notify in tasks/magento-deploy/main.yml
+# to wire it up.
+yotta:
+  user_id: ""
+  api_key: ""
+  sites: []    # site ids; the cache is flushed once per id

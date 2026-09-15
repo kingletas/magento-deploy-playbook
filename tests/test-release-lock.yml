@@ -1,0 +1,88 @@
+---
+###
+# tasks/release-lock/{acquire,release}.yml -- the build mutex.
+#
+#   ansible-playbook -i inventory/test tests/test-release-lock.yml
+###
+- name: Release lock
+  hosts: builder
+  connection: local
+  gather_facts: false
+  vars:
+    suffix: TEST_LOCK_ENV      # upper case on purpose: acquire lowercases it
+    builder: test-builder
+    expected_lock: /tmp/test_lock_env.lock
+  tasks:
+    - name: Start from no lock
+      ansible.builtin.file:
+        path: "{{ expected_lock }}"
+        state: absent
+
+    - name: Acquire the lock
+      ansible.builtin.import_tasks: tasks/release-lock/acquire.yml
+
+    - name: The lock landed at the lowercased path
+      ansible.builtin.stat:
+        path: "{{ expected_lock }}"
+      register: after_acquire
+
+    - name: Assert the lock exists and the fact matches
+      ansible.builtin.assert:
+        that:
+          - after_acquire.stat.exists
+          - release_lock_file == expected_lock
+        fail_msg: >-
+          Expected a lock at {{ expected_lock }}; release_lock_file is
+          '{{ release_lock_file | default("(unset)") }}'. acquire.yml lowercases
+          the suffix, so a case change in a profile must not change the path.
+
+    # THE assertion that matters: a second acquire must refuse.
+    - name: A second acquire refuses
+      block:
+        - name: Try to acquire again
+          ansible.builtin.import_tasks: tasks/release-lock/acquire.yml
+        - name: Should not reach here
+          ansible.builtin.fail:
+            msg: >-
+              acquire.yml took the lock twice. Two concurrent builds of the same
+              environment would interleave on the builder.
+      rescue:
+        - name: Confirm it refused for the right reason
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search('lock file')
+              - ansible_failed_result.msg is search('make unlock')
+            fail_msg: >-
+              The second acquire failed, but not with the documented recovery
+              message. Got: {{ ansible_failed_result.msg | default('(none)') }}
+            success_msg: "Second acquire refused and pointed at `make unlock`."
+
+    - name: Release the lock
+      ansible.builtin.import_tasks: tasks/release-lock/release.yml
+
+    - name: The lock is gone
+      ansible.builtin.stat:
+        path: "{{ expected_lock }}"
+      register: after_release
+
+    - name: Assert the lock was removed
+      ansible.builtin.assert:
+        that:
+          - not after_release.stat.exists
+        fail_msg: >-
+          release.yml left {{ expected_lock }} behind. Every later deploy for
+          this environment would refuse to start.
+
+    # release.yml notifies "Ping Filters URL". If that handler is ever renamed
+    # or dropped from handlers/main.yml, Ansible fails at RUNTIME, not at
+    # syntax-check -- so prove the name still resolves.
+    - name: The notify target still exists
+      ansible.builtin.assert:
+        that:
+          - lookup('file', 'handlers/main.yml') is search('name: Ping Filters URL')
+        fail_msg: >-
+          release.yml notifies 'Ping Filters URL' but no such handler is defined
+          in handlers/main.yml.
+  handlers:
+    - name: Playbook handlers
+      ansible.builtin.import_tasks: handlers/main.yml

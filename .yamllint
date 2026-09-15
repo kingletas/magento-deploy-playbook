@@ -1,0 +1,36 @@
+---
+# Permissive in three places, strict everywhere else, so a finding is a new
+# problem rather than one of hundreds nobody will read.
+extends: default
+
+rules:
+  # Assertion messages are long on purpose: they name the fix.
+  line-length: disable
+  comments-indentation: disable
+  comments:
+    min-spaces-from-content: 1
+  truthy:
+    allowed-values: ['true', 'false']
+    check-keys: false
+  braces:
+    max-spaces-inside: 1
+  # Magento file modes are quoted strings ('0644'), never octal literals.
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true
+  indentation:
+    spaces: consistent
+    # `whatever` rather than `consistent`: system.yml indents by 4 and
+    # releases.yml by 2, and normalising that rewrites files that drive a deploy
+    # for a cosmetic gain.
+    indent-sequences: whatever
+
+ignore: |
+  venv/
+  # Once encrypted, yamllint sees ciphertext and reports a missing document
+  # start every run. Check the plaintext: `ansible-vault view` pipes to yamllint.
+  group_vars/all/notifications.yml
+  # Payloads uploaded to the fleet, not YAML.
+  files/
+  # Fixtures for the local fleet, not playbook source.
+  docker/fixtures/

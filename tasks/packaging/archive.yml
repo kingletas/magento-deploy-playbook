@@ -1,0 +1,61 @@
+---
+###
+# Tar the built checkout into the archive the fleet pulls from, and check it
+# against archive_min_bytes.
+###
+
+# The archive directory is not guaranteed to exist on a fresh builder, and
+# `archive` does not create the parent of its dest.
+- name: Ensure the archive directory exists
+  ansible.builtin.file:
+    path: "{{ releases.archive }}"
+    state: directory
+    mode: "0755"
+  become: true
+
+- name: Archive the release
+  community.general.archive:
+    dest: '{{ releases.archive }}{{ release_id }}.tgz'
+    mode: "0644"
+    force_archive: true
+    group: '{{ ansible_user }}'
+    owner: '{{ ansible_user }}'
+    path: "{{ wdir }}"
+  become: true
+  become_user: '{{ ansible_user }}'
+  notify: Notify Slack
+
+# An empty tarball uploads and extracts perfectly, so nothing downstream would
+# notice.
+- name: Check the archive that was produced
+  ansible.builtin.stat:
+    path: "{{ releases.archive }}{{ release_id }}.tgz"
+  register: built_archive
+
+- name: Assert the archive is a plausible size
+  ansible.builtin.assert:
+    that:
+      - built_archive.stat.exists
+      - built_archive.stat.size | int > (archive_min_bytes | int)
+    fail_msg: >-
+      {{ releases.archive }}{{ release_id }}.tgz is
+      {{ built_archive.stat.size | default(0) }} bytes, under the
+      {{ archive_min_bytes }} byte floor. That is too small to be a Magento
+      release -- the checkout in {{ wdir }} was probably empty or the build
+      failed without failing the play. Raise or lower archive_min_bytes in
+      inventory/{{ env_name }}/group_vars/all.yml if this floor is wrong -- it
+      is per environment, which is how the Docker suite's few-KB fixture release
+      gets a 1 KB floor instead of the real 10 MB one.
+    success_msg: >-
+      Archive: {{ (built_archive.stat.size | int / 1048576) | round(1) }} MB
+
+- name: Copy release locally
+  ansible.builtin.fetch:
+    src: '{{ releases.archive }}/{{ release_id }}.tgz'
+    dest: '{{ releases.local }}'
+    flat: true
+  when: releases.download_locally
+
+- name: Report the release path
+  ansible.builtin.debug:
+    msg: 'Release path {{ releases.path }}{{ release_id }}'

@@ -1,0 +1,74 @@
+---
+###
+# Refuse the deploy unless every host that will hold a release has room for one.
+# Imported by tasks/release-preflight.yml, so it runs before anything is
+# created. Measures the filesystem holding the nearest existing ancestor of
+# site.base.
+###
+- name: Check there is room for a release
+  # Only hosts that receive a release. Nothing is ever written to `varnish`.
+  when: >-
+    inventory_hostname in (groups['builder'] | default([]))
+    or inventory_hostname in (groups['web'] | default([]))
+  block:
+    - name: Measure free space on the filesystem that will hold the release
+      ansible.builtin.shell:
+        cmd: |
+          set -u
+          path='{{ site.base }}'
+          while [ ! -d "${path}" ] && [ "${path}" != "/" ]; do
+              path="$(dirname "${path}")"
+          done
+          df -PB1 "${path}"
+      register: release_disk_df
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: The filesystem could be measured at all
+      ansible.builtin.assert:
+        that:
+          - release_disk_df.rc == 0
+          - release_disk_df.stdout | length > 0
+        fail_msg: >-
+          Could not measure free space for {{ site.base }} on
+          {{ inventory_hostname }} (rc={{ release_disk_df.rc }}).
+          stderr: {{ release_disk_df.stderr | default('') | trim }}.
+          This runs `df` on the nearest existing ancestor of {{ site.base }},
+          so reaching here with a working shell means something is wrong with
+          the host rather than with the threshold.
+
+    # `-P` guarantees one unwrapped line per filesystem: Filesystem, 1B-blocks,
+    # Used, Available, Capacity, Mounted on.
+    - name: Record the free space and the filesystem it is on
+      ansible.builtin.set_fact:
+        release_disk_free: "{{ release_disk_df.stdout_lines[-1].split()[3] | int }}"
+        release_disk_mount: "{{ release_disk_df.stdout_lines[-1].split()[5] }}"
+
+    - name: There is room for a release
+      ansible.builtin.assert:
+        that:
+          - release_disk_free | int >= release_disk_min_bytes | int
+        fail_msg: >-
+          Not enough disk space on {{ inventory_hostname }}.
+          {{ release_disk_mount }} has
+          {{ (release_disk_free | int / 1073741824) | round(1) }} GB free and
+          this deploy needs
+          {{ (release_disk_min_bytes | int / 1073741824) | round(1) }} GB
+          ({{ release_disk_min_bytes }} bytes, release_disk_min_bytes in
+          inventory/{{ env_name }}/group_vars/all.yml).
+          NOTHING HAS BEEN CREATED -- no lock, no checkout, no release -- so this
+          is safe to retry once there is room.
+          To free some: old releases and archives are pruned by the LAST play
+          of a successful deploy, which never runs if the deploy cannot start,
+          so a host that filled up stays full. Check
+          {{ site.base }}releases/ and {{ site.base }}archives/ by hand --
+          teardown_releases_to_keep is {{ teardown_releases_to_keep }} and
+          teardown_archives_to_keep is {{ teardown_archives_to_keep }}, so a
+          host holding many more than that has not been pruned in a while.
+          If the threshold itself is wrong, the success message on a passing host
+          reports real numbers to set it from.
+        success_msg: >-
+          {{ inventory_hostname }}: {{ release_disk_mount }} has
+          {{ (release_disk_free | int / 1073741824) | round(1) }} GB free,
+          needs {{ (release_disk_min_bytes | int / 1073741824) | round(1) }} GB

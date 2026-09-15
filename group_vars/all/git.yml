@@ -1,0 +1,13 @@
+---
+# git.repo / git.branch_name - what the builder clones and checks out. Both come
+# from the inventory; the branch below is only the fallback release-preflight
+# uses when an inventory sets none at all.
+git:
+    branch_name: develop
+    repo: "{{ git_repo }}"
+
+# version / release_name - what this release is called, read by the New Relic
+# and Noibu bodies. Not per-environment: one release is cut, and it is the same
+# release wherever it lands. Override per run with --extra-var.
+version: "1.0.0"
+release_name: Unnamed release

@@ -1,0 +1,63 @@
+---
+# Sync repository state
+- name: Sync repository
+  block:
+    # Off by default: a shallow clone leaves `git log base...branch` with no
+    # merge base, and can only reach the branch it cloned, so `branch_name` then
+    # has to be the repository's default. Set it with -e git_depth=1.
+    - name: Clone/update repository
+      ansible.builtin.git:
+        repo: "{{ git.repo }}"
+        dest: "{{ wdir }}"
+        force: true
+        update: true
+        depth: "{{ git_depth | default(omit) }}"
+
+    - name: Remove unwanted paths
+      ansible.builtin.file:
+        path: "{{ wdir }}{{ item }}"
+        state: absent
+      loop: "{{ releases.removable }}"
+
+    - name: Reset repository state
+      ansible.builtin.command: "{{ item }}"
+      args:
+        chdir: "{{ wdir }}"
+      loop:
+        - git clean -fd app
+        - git reset --hard
+        - git fetch --prune
+        - git checkout -f {{ branch_name }}
+
+- name: Build changelog
+  ansible.builtin.command:
+    cmd: >
+      git log --oneline --decorate
+      --pretty='- (%h) %s'
+      {{ regular_base_branch | default('develop') }}...{{ branch_name }}
+  args:
+    chdir: "{{ wdir }}"
+  register: git_change_log
+  changed_when: false
+  # `git log a...b` fails outright when the base branch is not local, so this
+  # falls through to the default below.
+  failed_when: false
+
+- name: Store changelog fact
+  ansible.builtin.set_fact:
+    git_log: >-
+      {{ git_change_log.stdout
+         | default('(changelog unavailable: git log ' ~ (regular_base_branch | default('develop'))
+                   ~ '...' ~ branch_name ~ ' failed)', true) }}
+    cacheable: true
+
+- name: Create summary file
+  ansible.builtin.copy:
+    dest: "{{ wdir }}/pub/summary.txt"
+    content: "{{ git_log }}\n"
+    mode: "0644"
+
+- name: Remove patches lock file
+  ansible.builtin.file:
+    path: "{{ wdir }}/patches.lock.json"
+    state: absent

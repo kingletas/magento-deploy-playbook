@@ -1,0 +1,92 @@
+---
+###
+# Resolves and validates what every later play needs: the builder, the branch,
+# the release identifier and the working directory. Runs first in
+# deployment.yml and first in every offline suite.
+###
+
+# Everything downstream is delegated to the builder or scoped by the suffix.
+- name: Validate the inventory and run parameters
+  ansible.builtin.assert:
+    that:
+      - groups.builder | default([]) | length > 0
+      - groups.admin | default([]) | length > 0
+      - groups.web | default([]) | length > 0
+      - suffix | default('', true) | length > 0
+      - env_name | default('', true) | length > 0
+      - deployment_complete is defined
+    fail_msg: >-
+      Inventory or run parameters are incomplete.
+      builder={{ groups.builder | default([]) | length }},
+      admin={{ groups.admin | default([]) | length }},
+      web={{ groups.web | default([]) | length }},
+      suffix='{{ suffix | default('') }}',
+      env_name='{{ env_name | default('') }}',
+      deployment_complete={{ deployment_complete | default('<UNSET>') }}.
+      The build delegates to the builder, the Magento steps delegate to admin,
+      and the suffix scopes both the release name and the teardown -- an empty
+      suffix would let the prune match another environment's releases.
+      env_name names the release and the DORA event.
+      deployment_complete MUST be declared explicitly in
+      inventory/<env>/group_vars/all.yml: when it is false the deploy runs green
+      and never repoints the `current` symlink, so nothing goes live. It used to
+      come from a COMPLETE_DEPLOYMENT shell variable, where forgetting to export
+      it produced exactly that silent no-op. `is defined` rather than a truth
+      test on purpose -- false is a legitimate value (build without cutover),
+      absent is not.
+    success_msg: >-
+      builder={{ groups.builder | default([]) | join(',') }}
+      admin={{ groups.admin | default([]) | length }}
+      web={{ groups.web | default([]) | length }}
+      env={{ env_name }} suffix={{ suffix }}
+      complete={{ deployment_complete }}
+  run_once: true
+
+# After the inventory is known (it needs groups.builder / groups.web) and
+# before anything is created.
+- name: Check every host has room for a release
+  ansible.builtin.import_tasks: disk-space.yml
+
+- name: Set the builder
+  ansible.builtin.set_fact:
+    builder: "{{ groups.builder[0] }}"
+  run_once: true
+
+- name: "Set the branch name, defaulting to {{ git.branch_name }}"
+  ansible.builtin.set_fact:
+    branch_name: "{{ branch_name | default(git.branch_name) }}"
+  run_once: true
+
+# release_name_cmd, never release_name: that name already holds a string the
+# notification bodies interpolate.
+- name: Name the release
+  ansible.builtin.shell: >-
+    if {{ use_existing_release | bool | lower }} ;
+    then echo "{{ releases.name }}";
+    else date +%Y%m%d_%s_{{ suffix }}; fi
+  register: release_name_cmd
+  changed_when: false
+  run_once: true
+  delegate_to: "{{ builder }}"
+
+# release_id is the generated identifier downstream paths are built from;
+# release_name stays the human codename.
+- name: Register the release identifier and path
+  ansible.builtin.set_fact:
+    release_id: "{{ release_name_cmd.stdout | trim }}"
+    wdir: "{{ releases.path }}{{ release_name_cmd.stdout | trim }}"
+  run_once: true
+
+- name: Validate the release identifier looks sane
+  ansible.builtin.assert:
+    that:
+      - release_id | length > 0
+      - "' ' not in release_id"
+    fail_msg: >-
+      Release identifier is empty or contains whitespace: '{{ release_id }}'.
+      Every downstream path is built from this, so a bad value would create a
+      release directory nothing can find. Check `suffix` in
+      inventory/<env>/group_vars/all.yml and, if release_name= was passed,
+      releases.name.
+    success_msg: "Release: {{ release_id }}"
+  run_once: true

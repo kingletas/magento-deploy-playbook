@@ -1,0 +1,61 @@
+---
+###
+# THIS FILE IS THE ONLY PLACE THIS ENVIRONMENT'S VALUES MAY BE DECLARED.
+#
+# Playbook group_vars outrank inventory group_vars/all, so a key declared in
+# both silently resolves to ../../group_vars/ and this file is ignored.
+# tests/test-vars-contract.yml fails on any key in both. See "The one rule" in
+# ../../README.md.
+###
+
+# env_name - names this environment in the DORA event log, and derives
+# releases.name.
+env_name: example
+
+# suffix - names the release directory and scopes the prune. A literal, not
+# derived from branch_name, so everything landing in this slot prunes against
+# one scope whichever branch was deployed.
+suffix: example_staging
+
+# branch_name - the branch the build checks out. Override for one run with
+# `branch_name=`, which does not change suffix.
+branch_name: develop
+
+# php_version - sets the FPM service name. Must be at or above
+# php_minimum_version, which the build asserts.
+php_version: '8.4'
+
+# profile - the wording in the Slack message and the PagerDuty description.
+profile: "Deploying develop to the example staging environment."
+
+# deployment_complete - gates the `current` symlink flip. False builds and
+# deploys without going live, for rehearsing a build.
+deployment_complete: true
+
+# git_repo - where the release is cloned from. The builder needs read access.
+git_repo: git@github.com:example-org/magento2-store.git
+
+# base_url - the storefront root, used to build the warm-up ping URL. The
+# trailing slash matters: a path is appended to it directly.
+base_url: https://stage.example.com/
+
+# ping_url - request the warm-up URL after the deploy. Requires base_url.
+ping_url: false
+
+# kill_php - kill lingering PHP workers on cron and admin before the cutover.
+kill_php: false
+
+# archive_min_bytes - the floor the built tarball must exceed. 10 MB catches an
+# empty archive; it is not a size expectation.
+archive_min_bytes: 10485760
+
+# release_disk_min_bytes - free space each host must have before the deploy
+# starts. 8 GB is an estimate; the check reports real free space on every
+# passing host, so one green deploy gives you the number to set it from.
+release_disk_min_bytes: 8589934592
+
+# notify_via_slack - announce the deploy in Slack. Off by default. Requires a
+# live slack_token in ../../group_vars/all/notifications.yml: with this on and
+# no token the module is still called and the failure swallowed, so nothing is
+# delivered and the run looks clean.
+notify_via_slack: false

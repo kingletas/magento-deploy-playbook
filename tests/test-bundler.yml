@@ -1,0 +1,111 @@
+---
+###
+# tasks/packaging/bundle.yml and the bundler_steps table.
+#
+#   ansible-playbook -i inventory/test tests/test-bundler.yml
+###
+- name: The bundler table
+  hosts: builder
+  connection: local
+  gather_facts: false
+  # suffix, branch_name and php_version come from
+  # inventory/test/group_vars/all.yml, the same mechanism a real environment
+  # uses.
+  tasks:
+    # Sets wdir, which the bundler commands embed. Must precede anything that
+    # touches bundler_steps.
+    - name: Resolve the release facts
+      ansible.builtin.import_tasks: tasks/release-preflight.yml
+
+    - name: Every configured bundler maps to a list
+      ansible.builtin.assert:
+        that:
+          - bundler_steps[item] is sequence
+          - bundler_steps[item] is not string
+        fail_msg: "bundler_steps['{{ item }}'] is not a list."
+      loop: "{{ bundler_steps.keys() | list }}"
+
+    - name: Both bundlers and the opt-out are offered
+      ansible.builtin.assert:
+        that:
+          - "'manipulus' in bundler_steps"
+          - "'magepack' in bundler_steps"
+          - "'none' in bundler_steps"
+        fail_msg: >-
+          The operator is meant to be able to choose either bundler or neither.
+          Configured: {{ bundler_steps.keys() | list | sort | join(', ') }}.
+
+    - name: The opt-out is configured-but-empty
+      ansible.builtin.assert:
+        that:
+          - bundler_steps['none'] | length == 0
+        fail_msg: "`none` should run no commands."
+
+    - name: The manipulus command carries the release, the theme and the module
+      ansible.builtin.assert:
+        that:
+          - bundler_steps['manipulus'][0] is search('manipulus build')
+          - bundler_steps['manipulus'][0] is search(wdir)
+          - bundler_steps['manipulus'][0] is search(bundler_theme)
+          - bundler_steps['manipulus'][0] is search(manipulus_module_path)
+        fail_msg: >-
+          The manipulus command did not expand.
+          Got: {{ bundler_steps['manipulus'][0] }}
+
+    # Without this the merged requirejs-config's recorded hash stops matching,
+    # the browser refuses the script, and checkout spins for ever.
+    - name: Manipulus refreshes the integrity hashes after bundling
+      ansible.builtin.assert:
+        that:
+          - bundler_steps['manipulus'] | select('search', 'integrity:refresh') | list | length == 1
+        fail_msg: "manipulus must run manipulus:integrity:refresh after build."
+
+    - name: The magepack command runs in a container over the release
+      ansible.builtin.assert:
+        that:
+          - bundler_steps['magepack'][0] is search('docker run')
+          - bundler_steps['magepack'][0] is search(wdir)
+          - bundler_steps['magepack'][0] is search(magepack_image)
+        fail_msg: >-
+          The magepack command did not expand magepack_command with wdir.
+          Got: {{ bundler_steps['magepack'][0] }}
+
+    - name: An unknown bundler fails with a message that names the choices
+      block:
+        - name: Bundle with a bundler nobody configured
+          ansible.builtin.import_tasks: tasks/packaging/bundle.yml
+          vars:
+            bundler: "webpack"
+        - name: Should not reach here
+          ansible.builtin.fail:
+            msg: "`webpack` is unconfigured but the assert did not fire."
+      rescue:
+        - name: Confirm the failure explains itself
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search("Unknown bundler 'webpack'")
+              - ansible_failed_result.msg is search('magepack, manipulus, none')
+            fail_msg: >-
+              webpack failed, but not with the intended message. Got:
+              {{ ansible_failed_result.msg | default('(none)') }}
+            success_msg: "An unknown bundler fails with a self-explaining message."
+
+    - name: A PHP below the floor fails with a message that names it
+      block:
+        - name: Bundle on an unsupported PHP
+          ansible.builtin.import_tasks: tasks/packaging/bundle.yml
+          vars:
+            php_version: "7.4"
+        - name: Should not reach here
+          ansible.builtin.fail:
+            msg: "PHP 7.4 is below the floor but the assert did not fire."
+      rescue:
+        - name: Confirm the failure names the version and the floor
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search('PHP 7.4 is below')
+              - ansible_failed_result.msg is search(php_minimum_version)
+            fail_msg: >-
+              7.4 failed, but not with the intended message. Got:
+              {{ ansible_failed_result.msg | default('(none)') }}
+            success_msg: "An unsupported PHP fails with a self-explaining message."

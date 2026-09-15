@@ -1,0 +1,54 @@
+---
+###
+# Push the built archive from the builder to this host. Confirms the source
+# exists first, and retries the push.
+###
+
+# The archive is built on the builder, so that is where its existence has to be
+# checked. Without this the rsync below fails with an rsync exit code instead of
+# saying the build never produced an archive.
+- name: Confirm the archive exists on the builder
+  ansible.builtin.stat:
+    path: "{{ releases.archive }}{{ release_id }}.tgz"
+  register: builder_archive
+  delegate_to: "{{ builder }}"
+  run_once: true
+
+- name: Assert the builder produced an archive
+  ansible.builtin.assert:
+    that:
+      - builder_archive.stat.exists
+    fail_msg: >-
+      No archive at {{ releases.archive }}{{ release_id }}.tgz on
+      {{ builder }}. The build stage did not produce one, so there is nothing
+      to upload -- look at the packaging tasks above rather than here.
+  run_once: true
+
+- name: Ensure there is not a release already
+  ansible.builtin.stat:
+    path: "{{ releases.archive }}{{ release_id }}.tgz"
+  register: release_path_validation
+
+# `delegate_to: builder` with `mode: push` inverts synchronize's usual sense:
+# src is read on the builder, dest written on inventory_hostname.
+- name: Upload the release package to every web host
+  ansible.posix.synchronize:
+    mode: push
+    src: "{{ releases.archive }}{{ release_id }}.tgz"
+    dest: "{{ releases.archive }}"
+    checksum: true
+    links: true
+    archive: true
+    compress: true
+    # private_key: "{{ ssh.key_path }}"
+    verify_host: false
+    set_remote_user: true
+    rsync_timeout: 600
+  delegate_to: "{{ builder }}"
+  become_user: "{{ ansible_user }}"
+  become: true
+  when: not release_path_validation.stat.exists
+  register: upload_result
+  retries: 2
+  delay: 10
+  until: upload_result is succeeded

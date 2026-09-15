@@ -1,0 +1,15 @@
+<!doctype html>
+<!--
+  Example release payload.
+
+  Files named in releases.custom_files are copied out of this directory into
+  the release's pub/ after it is extracted. Use it for anything the build does
+  not produce: a maintenance-page fragment, a one-off migration script, a
+  vendor bundle the composer install does not carry.
+
+  This file exists so the mechanism is exercised end to end by the Docker
+  suite and asserted by verify-deploy.yml. Replace it with your own payloads.
+-->
+<meta charset="utf-8">
+<title>Release information</title>
+<p>This release was deployed by the Magento deploy playbook.</p>

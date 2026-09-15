@@ -1,0 +1,19 @@
+# Rebuild the venv with `make venv && make collections`.
+#
+# KNOWN DEBT: ansible-core 2.13 and the Python 3.8.9 in .python-version are both
+# end of life and need a coordinated upgrade. Flip
+# `deprecation_warnings = True` in ansible.cfg before attempting it.
+ansible==6.7.0
+ansible-core==2.13.13
+cffi==1.17.1
+cryptography==44.0.0
+jinja2==3.1.5
+MarkupSafe==2.1.5
+packaging==24.2
+pycparser==2.22
+PyYAML==6.0.2
+resolvelib==0.8.1
+
+# make lint / make check
+yamllint==1.32.0
+ansible-lint==6.8.7

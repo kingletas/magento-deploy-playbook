@@ -1,0 +1,22 @@
+#!/bin/bash
+# Stands in for the PHP CLI, and it has to DISPATCH rather than blindly forward.
+#
+# Two callers invoke php with different scripts:
+#   php bin/magento <subcommand>          the deploy tasks
+#   php /usr/local/bin/composer help ...  the community.general.composer module,
+#                                         which shells out as `php composer ...`
+#
+# An earlier version dropped $1 and sent everything to the Magento fake, so the
+# module's `composer help install --format=json` probe returned "ok: help
+# install" and the module died in from_json with "Expecting value: line 1".
+script="${1:-}"; shift 2>/dev/null || true
+echo "[fake-php] ${script} $*" >> /tmp/build-log 2>/dev/null || true
+
+case "${script}" in
+    *composer*) exec /usr/local/bin/composer "$@" ;;
+    *magento*)  exec /usr/local/bin/magento-fake "$@" ;;
+    *)
+        echo "[fake-php] unrecognised script: ${script}" >> /tmp/build-log 2>/dev/null || true
+        exit 0
+        ;;
+esac

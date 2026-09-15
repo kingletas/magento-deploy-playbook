@@ -1,0 +1,33 @@
+# Fake fleet for the offline suites. Nothing is contacted, but preflight and the
+# handlers assert on group membership, so the shape has to match a real
+# inventory.
+#
+# A directory rather than a bare file, so the suites pick up inventory-side
+# group_vars the way a real environment does.
+[builder]
+test-builder ansible_connection=local
+
+[apps]
+test-web1 ansible_connection=local
+test-web2 ansible_connection=local
+
+[admin]
+test-admin ansible_connection=local
+
+[cron]
+test-cron ansible_connection=local
+
+[varnish]
+test-varnish ansible_connection=local
+
+[web:children]
+apps
+admin
+cron
+
+[all:vars]
+# The interpreter running ansible-playbook, not a discovered one. These hosts
+# are the control node, so that is correct by definition -- and discovery picks
+# a bare name that a pyenv shim can refuse to resolve, killing a suite that
+# contacts nothing.
+ansible_python_interpreter={{ ansible_playbook_python }}

@@ -1,0 +1,6 @@
+#!/bin/bash
+# `bundler: magepack` shells out to `docker run ... magepack`. Nesting a real
+# Docker daemon inside these containers is not worth it, so this records the
+# invocation and succeeds.
+echo "[fake-docker] $*" >> /tmp/build-log 2>/dev/null || true
+exit 0

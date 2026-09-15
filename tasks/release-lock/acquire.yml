@@ -1,0 +1,35 @@
+---
+###
+# Take the build lock on the builder, so two people cannot build the same
+# environment at once. `make unlock environment=<env>` clears a stale one.
+#
+# release_lock_file is a set_fact because release.yml needs the same value in a
+# later play. `suffix` has no default: a lock at /tmp/.lock would be shared.
+###
+- name: Set the lock file name
+  ansible.builtin.set_fact:
+    release_lock_file: "/tmp/{{ suffix | lower }}.lock"
+  run_once: true
+  delegate_to: "{{ builder }}"
+
+- name: Check if there is a lock file
+  ansible.builtin.stat:
+    path: "{{ release_lock_file }}"
+  delegate_to: "{{ builder }}"
+  run_once: true
+  register: lock_path_validation
+
+- name: Exit current play if a lock file exists
+  ansible.builtin.fail:
+    msg: "The lock file {{ release_lock_file }} exists on the {{ builder }} builder. Recover with: make unlock environment=<env>"
+  when: lock_path_validation.stat.exists
+  run_once: true
+  delegate_to: "{{ builder }}"
+
+- name: Add the current play lock file
+  ansible.builtin.file:
+    path: "{{ release_lock_file }}"
+    state: touch
+    mode: "0644"
+  delegate_to: "{{ builder }}"
+  run_once: true

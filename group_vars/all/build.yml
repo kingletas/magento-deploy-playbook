@@ -1,0 +1,70 @@
+---
+###
+# How the release is built and finished off.
+###
+
+# Asserted by tasks/packaging/bundle.yml before anything runs.
+php_minimum_version: '8.0'
+
+###
+# JavaScript bundling: `manipulus`, `magepack` or `none`. Both bundlers read the
+# DEPLOYED static content, so this runs after setup:static-content:deploy.
+#
+# What each one needs from your store is in README.md, under Bundling.
+###
+bundler: manipulus
+
+bundler_theme: frontend/Magento/luma
+bundler_locale: en_US
+
+# Override when manipulus is not on PATH, e.g. a `docker run` invocation.
+manipulus_command: manipulus
+manipulus_module_path: app/code/Manipulus/Bundles
+
+magepack_image: magepack:local
+magepack_command: "docker run --rm -w /app -v {{ wdir }}:/app {{ magepack_image }}"
+
+###
+# The commands each bundler runs. An empty list is a real answer, which is what
+# distinguishes `none` from a bundler nobody configured.
+#
+# These embed {{ wdir }}, so the table cannot be TOUCHED before
+# release-preflight has run -- even `bundler_steps is defined` raises, because
+# evaluating it templates the values.
+###
+bundler_steps:
+  # Without integrity:refresh the recorded hash stops matching the rewritten
+  # requirejs-config, and checkout spins for ever with nothing in the console.
+  manipulus:
+    - >-
+      {{ manipulus_command }} build
+      --root {{ wdir }}
+      --theme {{ bundler_theme }}
+      --locale {{ bundler_locale }}
+      --module {{ manipulus_module_path }}
+    - "php bin/magento manipulus:integrity:refresh"
+  magepack:
+    - "{{ magepack_command }} bundle -m"
+  none: []
+
+# Run on the build host after the bundler: a theme's grunt task, a sourcemap
+# upload, anything this playbook does not know about.
+extra_build_steps: []
+
+# Timestamp for the New Relic and Noibu payloads. Not ansible_date_time: a body
+# is templated when the task's arguments are BUILT, so a fact the host never
+# gathered raises where `failed_when: false` cannot suppress it.
+notification_timestamp: >-
+  {{ ansible_date_time.iso8601
+     | default(lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ'), true) }}
+
+# archive_min_bytes is per environment and must NOT get a default here: playbook
+# group_vars outrank inventory group_vars/all, so a default would pin the Docker
+# suite to the production floor and fail its few-KB fixture release.
+
+
+# Read by the `Reset the indexers` handler. Un-sticks cron jobs left marked
+# `running` when PHP was killed.
+indexers_reset_sql:
+  - update mview_state set status='idle' where 1;
+  - update cron_schedule set status = "missed" where status = 'running' and job_code rlike 'indexer';

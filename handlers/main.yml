@@ -1,0 +1,158 @@
+---
+###
+# Every handler, in one file, imported by every play.
+#
+# Each notifier is gated by a notify_via_* switch in releases.yml and carries
+# `failed_when: false`. Slack defaults to on; everything else to off.
+###
+
+- name: Notify Slack
+  community.general.slack:
+    token: '{{ slack_token }}'
+    msg: '<!here> {{ profile }} deployment {{ deployment_status }}'
+    channel: '{{ slack_channel }}'
+    username: 'Ansible on {{ inventory_hostname }}'
+    link_names: 0
+    parse: 'none'
+  delegate_to: localhost
+  run_once: true
+  become: false
+  failed_when: false
+  when: notify_via_slack | default(true) | bool
+
+- name: Open the PagerDuty maintenance window
+  community.general.pagerduty:
+    name: "{{ pagerduty_company }}"
+    token: "{{ pagerduty_token }}"
+    state: running
+    service: "{{ pagerduty_service }}"
+    requester_id: "{{ pagerduty_requester_id }}"
+    hours: "{{ pagerduty_maintenance_window }}"
+    desc: "{{ profile | default('Latest release deployment', true) }}"
+  delegate_to: localhost
+  run_once: true
+  become: false
+  register: pagerduty_result
+  failed_when: false
+  when: notify_via_pagerduty | default(false) | bool
+
+- name: Create the New Relic deployment marker
+  ansible.builtin.uri:
+    url: "{{ newrelic_base_url }}/{{ item }}/deployments.json"
+    method: POST
+    headers:
+      Accept: application/json
+      Content-Type: application/json
+      Api-Key: "{{ newrelic_deployment_token }}"
+    body: "{{ deployment_request_body }}"
+    body_format: json
+    status_code: 201
+    timeout: 30
+  loop: "{{ newrelic_deployment_apps }}"
+  delegate_to: localhost
+  run_once: true
+  become: false
+  register: newrelic_result
+  failed_when: false
+  when: notify_via_newrelic | default(false) | bool
+
+- name: Post the Noibu release webhook
+  ansible.builtin.uri:
+    url: "{{ noibu_base_url }}"
+    method: POST
+    headers:
+      Accept: application/json
+      Content-Type: application/json
+    body: "{{ noibu_request_body }}"
+    body_format: json
+    status_code: 200
+    timeout: 30
+  delegate_to: localhost
+  run_once: true
+  become: false
+  register: noibu_result
+  failed_when: false
+  when: notify_via_noibu | default(false) | bool
+
+- name: Report which notifications landed
+  ansible.builtin.debug:
+    msg:
+      pagerduty: >-
+        {{ 'off' if not (notify_via_pagerduty | default(false) | bool)
+           else ('ok' if not (pagerduty_result.failed | default(false))
+                 else 'FAILED - ' ~ (pagerduty_result.msg | default('unknown'))) }}
+      newrelic: >-
+        {{ 'off' if not (notify_via_newrelic | default(false) | bool)
+           else ((newrelic_result.results | default([])
+                  | rejectattr('status', 'equalto', 201) | list | length)
+                 ~ ' of ' ~ (newrelic_deployment_apps | length) ~ ' apps FAILED') }}
+      noibu: >-
+        {{ 'off' if not (notify_via_noibu | default(false) | bool)
+           else ('ok' if (noibu_result.status | default(0)) == 200
+                 else 'FAILED - status ' ~ (noibu_result.status | default('none'))) }}
+  delegate_to: localhost
+  run_once: true
+  become: false
+
+- name: Ping Filters URL
+  ansible.builtin.uri:
+    url: "{{ item }}"
+    method: GET
+    status_code: 200
+    return_content: false
+    timeout: 60
+  delegate_to: localhost
+  run_once: true
+  loop: "{{ ping_urls }}"
+  when: ping_url
+  become: false
+  failed_when: false
+
+# Nothing notifies this. Uncomment the notify in tasks/magento-deploy/main.yml.
+- name: Flush the Yottaa edge cache
+  ansible.builtin.uri:
+    url: "https://api.yottaa.com/sites/{{ item.id }}/flush_cache"
+    method: PUT
+    body_format: form-urlencoded
+    body: 'user_id={{ yotta.user_id }}'
+    headers:
+      YOTTAA-API-KEY: "{{ yotta.api_key }}"
+      Accept: application/json
+  with_items: '{{ yotta.sites }}'
+  delegate_to: "{{ builder }}"
+  run_once: true
+
+# These loop over `groups.apps + groups.admin`, so every inventory must define
+# them. `make check` parses each one and asserts they resolve.
+
+- name: Restart PHP
+  ansible.builtin.service:
+    name: '{{ php_service }}'
+    state: restarted
+  become: true
+  delegate_to: "{{ item }}"
+  run_once: true
+  loop: "{{ groups.apps + groups.admin }}"
+
+- name: Restart nginx
+  ansible.builtin.service:
+    name: nginx
+    state: restarted
+  become: true
+  run_once: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups.apps + groups.admin }}"
+
+# pkill exits 1 when it matched nothing, which is the ordinary case.
+- name: Stop lingering PHP processes
+  ansible.builtin.shell: "pkill -9 -c php{{ php_version }} || true"
+  changed_when: false
+  become: true
+  when: releases.kill_php | bool
+  delegate_to: "{{ item }}"
+  loop: "{{ groups.cron + groups.admin }}"
+
+# indexers_reset_sql comes from group_vars/all/build.yml.
+- name: Reset the indexers
+  ansible.builtin.raw: mysql -e "use {{ magento_database | default('magento') }}; {{ item }}"
+  loop: '{{ indexers_reset_sql }}'

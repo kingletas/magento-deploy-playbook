@@ -1,0 +1,62 @@
+---
+###
+# THIS FILE IS THE ONLY PLACE THIS ENVIRONMENT'S VALUES MAY BE DECLARED.
+#
+# Playbook group_vars outrank inventory group_vars/all, so a key declared in
+# both silently resolves to ../../group_vars/ and this file is ignored.
+# tests/test-vars-contract.yml fails on any key in both. See "The one rule" in
+# ../../README.md.
+###
+
+###
+# The local Docker fleet. Every value is a fixture: nothing reaches a real host,
+# repository or account. `hosts` beside this file is generated and gitignored;
+# this file is not, because without it a fresh clone cannot run the suite.
+###
+
+# env_name - names this environment in the DORA event log.
+env_name: docker
+
+# suffix - names the release directory and scopes the prune.
+suffix: docker
+
+# branch_name - the branch of the fixture repository the build checks out.
+branch_name: develop
+
+# php_version - sets the FPM service name the fake init scripts answer to.
+php_version: '8.4'
+
+# profile - the wording a notifier would use, if any were on.
+profile: "Docker suite"
+
+# deployment_complete - gates the `current` symlink flip. Must be true here, or
+# the tasks that chdir into releases.current have nowhere to go.
+deployment_complete: true
+
+# git_repo - the bare fixture repo, bind-mounted read-only into the builder. No
+# network egress, no credentials. Rebuild with docker/fixtures/build-repo.sh.
+git_repo: /srv/magento-repo.git
+
+# base_url - unused here, because ping_url is off.
+base_url: ""
+
+# ping_url - request the warm-up URL after the deploy. Off: there is no
+# storefront to warm.
+ping_url: false
+
+# kill_php - kill lingering PHP workers before the cutover. Off: the fake fleet
+# runs none.
+kill_php: false
+
+# archive_min_bytes - the floor the built tarball must exceed. 1 KB, because the
+# fixture release is a few KB; it still catches an empty archive.
+archive_min_bytes: 1024
+
+# release_disk_min_bytes - free space each host must have. 100 MB, because the
+# containers share the host's filesystem and a production figure would measure
+# the wrong thing.
+release_disk_min_bytes: 104857600
+
+# notify_via_slack - announce the deploy in Slack. Off: a suite run must not
+# post anywhere. Requires a live slack_token.
+notify_via_slack: false

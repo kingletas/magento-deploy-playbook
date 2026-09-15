@@ -1,0 +1,65 @@
+---
+###
+# Bundle the release's JavaScript, then run any extra build steps. Reads the
+# static content tasks/packaging/deploy.yml has already deployed.
+###
+
+- name: Assert the PHP version is supported
+  ansible.builtin.assert:
+    that:
+      - php_version is version(php_minimum_version, '>=')
+    fail_msg: >-
+      PHP {{ php_version }} is below the supported floor of
+      {{ php_minimum_version }}. Set php_version in
+      inventory/{{ env_name }}/group_vars/all.yml to 8.0 or above.
+    success_msg: "PHP {{ php_version }}."
+  run_once: true
+
+- name: Assert the bundler is one this playbook knows
+  ansible.builtin.assert:
+    that:
+      - bundler in bundler_steps
+    fail_msg: >-
+      Unknown bundler '{{ bundler }}'. Set `bundler` in
+      group_vars/all/build.yml to one of:
+      {{ bundler_steps.keys() | list | sort | join(', ') }}.
+    # Keys only. Ansible templates success_msg even when the assertion fails,
+    # and indexing the values would raise before fail_msg is printed.
+    success_msg: "Bundling with {{ bundler }}."
+  run_once: true
+
+# The first word, which is `docker` when the command is a container run.
+- name: Check the bundler is installed on the build host
+  ansible.builtin.shell: "command -v {{ bundler_steps[bundler][0].split() | first }} >/dev/null 2>&1"
+  register: bundler_which
+  changed_when: false
+  failed_when: false
+  run_once: true
+  when: bundler_steps[bundler] | length > 0
+
+- name: Assert the bundler is runnable
+  ansible.builtin.assert:
+    that:
+      - bundler_which.rc == 0
+    fail_msg: >-
+      '{{ bundler_steps[bundler][0].split() | first }}' is not on the build
+      host's PATH, so bundling with {{ bundler }} cannot run.
+      Install it, point {{ bundler }}_command at a `docker run` invocation, or
+      set `bundler: none`.
+    success_msg: "{{ bundler }} is runnable."
+  run_once: true
+  when: bundler_steps[bundler] | length > 0
+
+- name: "Bundle the JavaScript with {{ bundler }}"
+  ansible.builtin.command: "{{ item }}"
+  args:
+    chdir: "{{ wdir }}"
+  loop: "{{ bundler_steps[bundler] }}"
+  changed_when: true
+
+- name: Run the extra build steps
+  ansible.builtin.command: "{{ item }}"
+  args:
+    chdir: "{{ wdir }}"
+  loop: "{{ extra_build_steps }}"
+  changed_when: true

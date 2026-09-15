@@ -1,0 +1,62 @@
+---
+###
+# THIS FILE IS THE ONLY PLACE THIS ENVIRONMENT'S VALUES MAY BE DECLARED.
+#
+# Playbook group_vars outrank inventory group_vars/all, so a key declared in
+# both silently resolves to ../../group_vars/ and this file is ignored.
+# tests/test-vars-contract.yml fails on any key in both. See "The one rule" in
+# ../../README.md.
+###
+
+###
+# The offline suites. Nothing is contacted and nothing is built; these exist so
+# release-preflight resolves and the suites assert against a realistic contract.
+###
+
+# env_name - names this environment in the DORA event log.
+env_name: test
+
+# suffix - names the release directory and scopes the prune. Load-bearing:
+# test-vars-contract.yml asserts release_id matches
+# ^[0-9]{8}_[0-9]{10}_test_suffix$.
+suffix: test_suffix
+
+# branch_name - never checked out; the suites do not run the git tasks.
+branch_name: develop
+
+# php_version - what the lower environments run. test-bundler.yml also asserts
+# on a version below the floor, using a play var.
+php_version: '8.4'
+
+# profile - the wording a notifier would use, if any were on.
+profile: "Offline test suite"
+
+# deployment_complete - gates the `current` symlink flip. Nothing is deployed
+# here; present because release-preflight asserts it is defined.
+deployment_complete: true
+
+# git_repo - never cloned. Present because git.repo must resolve.
+git_repo: /nonexistent/offline-suite.git
+
+# base_url - unused here, because ping_url is off. Left empty rather than given
+# a plausible URL nothing would request.
+base_url: ""
+
+# ping_url - request the warm-up URL after the deploy. Off: nothing to warm.
+ping_url: false
+
+# kill_php - kill lingering PHP workers before the cutover. Off: no fleet.
+kill_php: false
+
+# archive_min_bytes - the floor the built tarball must exceed. Never reached;
+# present so the variable contract is realistic.
+archive_min_bytes: 10485760
+
+# release_disk_min_bytes - free space each host must have. 100 MB, measured
+# against the CONTROL NODE: the suites run connection: local. Small enough to
+# pass anywhere, large enough that the assertion is not trivially true.
+release_disk_min_bytes: 104857600
+
+# notify_via_slack - announce the deploy in Slack. Off: a suite run must not
+# post anywhere. Requires a live slack_token.
+notify_via_slack: false

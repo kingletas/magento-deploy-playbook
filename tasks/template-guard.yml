@@ -1,0 +1,46 @@
+---
+###
+# Refuse to run against something that is not a real environment.
+#
+# INCLUDE FROM A `connection: local` PLAY, BEFORE ANY PLAY THAT TOUCHES A REAL
+# HOST. A play with `gather_facts: true` connects before its pre_tasks run, so
+# a guard inside one never gets to fire.
+###
+
+# An inventory with no hosts is not an error to Ansible: every play matches
+# nothing, every play is skipped, and the run reports success having done
+# nothing at all. Checked first, or the assert below passes vacuously.
+- name: Refuse an inventory with no hosts in it
+  ansible.builtin.assert:
+    that:
+      - groups['all'] | default([]) | length > 0
+    fail_msg: >-
+      This inventory has no hosts in it, so every play would be skipped and the
+      run would report success having deployed nothing. Check that -i names a
+      directory under inventory/ with a `hosts` file in it:
+      `ansible-playbook -i inventory/<name> deployment.yml`.
+      For the docker environment the hosts file is generated -- run
+      `make docker-up` first.
+    success_msg: "{{ groups['all'] | length }} host(s) in this inventory."
+
+# example.com is reserved by RFC 2606 and can never name a real machine, so a
+# run against the template is always a mistake. Keying on host NAMES stops this
+# applying by itself the moment real hosts are put in.
+- name: Refuse to deploy against the example template
+  ansible.builtin.assert:
+    that:
+      - placeholder_hosts | length == 0
+    fail_msg: >-
+      This inventory still has the template's placeholder hosts in it
+      ({{ placeholder_hosts | join(', ') }}). example.com is reserved by
+      RFC 2606 and never resolves, so there is nothing there to deploy to.
+      Copy the template and put your own hosts in it:
+      `cp -r inventory/example inventory/<name>`, edit
+      inventory/<name>/hosts and inventory/<name>/group_vars/all.yml, then
+      `make check` and
+      `ansible-playbook -i inventory/<name> deployment.yml`.
+      To watch a real deploy end to end with no servers at all, run
+      `make docker-test`.
+    success_msg: "No placeholder hosts; {{ groups['all'] | length }} host(s) to deploy to."
+  vars:
+    placeholder_hosts: "{{ groups['all'] | default([]) | select('search', '\\.example\\.com$') | list }}"

@@ -1,0 +1,6 @@
+#!/bin/bash
+# The default bundler. The real one parses the store's deployed static content;
+# the fixture release has none, so this records the invocation and succeeds.
+# What the suite is testing is that bundle.yml resolved the right command.
+echo "[fake-manipulus] $*" >> /tmp/build-log 2>/dev/null || true
+exit 0

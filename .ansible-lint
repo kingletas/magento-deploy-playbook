@@ -1,0 +1,26 @@
+---
+# The exclusions below are the ones this playbook cannot satisfy. Everything
+# else is on, including fqcn and risky-file-permissions, which are the two that
+# have actually caught things here.
+exclude_paths:
+  - venv/
+  - files/
+  - docker/fixtures/
+  - inventory/docker/hosts     # generated
+
+skip_list:
+  # There is no module for the Magento CLI, so the deploy shells out to
+  # `php bin/magento ...`. Rewriting that is not a lint fix.
+  - command-instead-of-module
+  # `changed_when` is set on the tasks where it matters and left off the ones
+  # that genuinely always change -- which is what fires the handlers. A blanket
+  # rule would invert that judgement.
+  - no-changed-when
+  # The checkout has no `version:` on purpose: the git module clones the default
+  # branch and a following task checks out `branch_name`, which is what makes a
+  # per-run `branch_name=` override work.
+  - latest[git]
+  # run_once is load-bearing: the build happens on one host, the lock is taken
+  # once, the notifications fire once. The rule warns about `strategy: free`,
+  # which this playbook does not use and must not.
+  - run-once[task]

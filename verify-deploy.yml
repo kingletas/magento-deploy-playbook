@@ -1,8 +1,13 @@
 ---
 ###
 # Assert on what a deploy left behind, by reading the filesystem rather than the
-# deploy's own output. Run after bin/docker-suite deploy; `bin/docker-suite
-# test` runs both.
+# deploy's own output. Run it on any environment: `make verify environment=<env>`,
+# and `bin/docker-suite test` runs it after the fixture fleet's deploy.
+#
+# The checks that read /tmp/build-log are the fixture fleet's, where every tool
+# is a fake that logs what it was asked to do. They run only where the inventory
+# says `fake_tools: true`. Everything else reads the hosts themselves and runs
+# everywhere, which is what lets a real deploy be verified and recorded.
 ###
 - name: Verify the builder produced a release
   hosts: builder
@@ -31,39 +36,43 @@
           - (builder_archives.files | map(attribute='size') | max) > 1024
         fail_msg: "The largest archive is under 1 KB, so the tarball is effectively empty."
 
-    - name: Read the fake-tool call log
-      ansible.builtin.slurp:
-        src: /tmp/build-log
-      register: build_log_raw
+    # The fake tools log every call; a real composer and a real Magento do not.
+    - name: What the build actually called, on the fleet whose tools are fakes
+      when: fake_tools | default(false) | bool
+      block:
+      - name: Read the fake-tool call log
+        ansible.builtin.slurp:
+          src: /tmp/build-log
+        register: build_log_raw
 
-    - name: Record the log for the assertions below
-      ansible.builtin.set_fact:
-        build_log: "{{ build_log_raw.content | b64decode }}"
+      - name: Record the log for the assertions below
+        ansible.builtin.set_fact:
+          build_log: "{{ build_log_raw.content | b64decode }}"
 
-    - name: The build ran its stages in order
-      ansible.builtin.assert:
-        that:
-          # Not `fake-composer] install`: the module puts --working-dir before
-          # the subcommand. No \b anywhere in these patterns -- inside a Jinja
-          # string literal that is a backspace, and matches nothing.
-          - build_log is search('fake-composer\].*install.*--no-dev')
-          - build_log is search('s:d:c')
-          - build_log is search('s:static-content:d')
-        fail_msg: >-
-          A build stage did not run. Log was:
-          {{ build_log }}
+      - name: The build ran its stages in order
+        ansible.builtin.assert:
+          that:
+            # Not `fake-composer] install`: the module puts --working-dir before
+            # the subcommand. No \b anywhere in these patterns -- inside a Jinja
+            # string literal that is a backspace, and matches nothing.
+            - build_log is search('fake-composer\].*install.*--no-dev')
+            - build_log is search('s:d:c')
+            - build_log is search('s:static-content:d')
+          fail_msg: >-
+            A build stage did not run. Log was:
+            {{ build_log }}
 
-    # The suite runs the default bundler, so this is what an operator who
-    # changes nothing gets. A magepack run would log `fake-docker] run`.
-    - name: The bundler ran, and it was the configured one
-      ansible.builtin.assert:
-        that:
-          - build_log is search('fake-manipulus\] build')
-          - build_log is search('manipulus:integrity:refresh')
-          - not (build_log is search('fake-docker\] run'))
-        fail_msg: >-
-          bundler_steps resolved to the wrong commands for
-          `bundler: {{ bundler }}`. Log was: {{ build_log }}
+      # The suite runs the default bundler, so this is what an operator who
+      # changes nothing gets. A magepack run would log `fake-docker] run`.
+      - name: The bundler ran, and it was the configured one
+        ansible.builtin.assert:
+          that:
+            - build_log is search('fake-manipulus\] build')
+            - build_log is search('manipulus:integrity:refresh')
+            - not (build_log is search('fake-docker\] run'))
+          fail_msg: >-
+            bundler_steps resolved to the wrong commands for
+            `bundler: {{ bundler }}`. Log was: {{ build_log }}
 
 - name: Verify the release is live on the fleet
   hosts: web
@@ -186,140 +195,152 @@
           {{ maintenance_flags.results | selectattr('stat.exists')
              | map(attribute='item.path') | map('basename') | list }}
 
-    - name: Read this host's fake-tool call log
-      ansible.builtin.slurp:
-        src: /tmp/build-log
-      register: host_log_raw
+    # Reload-not-restart and the maintenance window are read from the call log.
+    - name: What this host was asked to do, on the fixture fleet
+      when: fake_tools | default(false) | bool
+      block:
+      - name: Read this host's fake-tool call log
+        ansible.builtin.slurp:
+          src: /tmp/build-log
+        register: host_log_raw
 
-    - name: Split the log into lines
-      ansible.builtin.set_fact:
-        host_log: "{{ (host_log_raw.content | b64decode).split('\n') }}"
+      - name: Split the log into lines
+        ansible.builtin.set_fact:
+          host_log: "{{ (host_log_raw.content | b64decode).split('\n') }}"
 
-    - name: The web services were reloaded, never restarted
-      ansible.builtin.assert:
-        that:
-          - host_log | select('search', '\[fake-service\] ' ~ php_service ~ ' reload$') | list | length >= 1
-          - host_log | select('search', '\[fake-service\] nginx reload$') | list | length >= 1
-          - host_log | select('search', '\[fake-service\] .* restart$') | list | length == 0
-        fail_msg: >-
-          {{ inventory_hostname }} did not reload {{ php_service }} and nginx, or
-          restarted something. A restart drops the requests in flight. Log was:
-          {{ host_log | select('search', 'fake-service') | list }}
+      - name: The web services were reloaded, never restarted
+        ansible.builtin.assert:
+          that:
+            - host_log | select('search', '\[fake-service\] ' ~ php_service ~ ' reload$') | list | length >= 1
+            - host_log | select('search', '\[fake-service\] nginx reload$') | list | length >= 1
+            - host_log | select('search', '\[fake-service\] .* restart$') | list | length == 0
+          fail_msg: >-
+            {{ inventory_hostname }} did not reload {{ php_service }} and nginx, or
+            restarted something. A restart drops the requests in flight. Log was:
+            {{ host_log | select('search', 'fake-service') | list }}
 
-    # Maintenance goes on only for a release with work to do, and in that
-    # release: a flag written in the outgoing one never covers the upgrade.
-    - name: No maintenance window for a release with nothing to do
-      ansible.builtin.assert:
-        that:
-          - host_log | select('search', '\[fake-magento\] maint:enable') | list | length == 0
-        fail_msg: >-
-          maint:enable ran on {{ inventory_hostname }} although both status
-          commands reported up to date.
-      when: not (expect_upgrade | default(false) | bool)
+      # Maintenance goes on only for a release with work to do, and in that
+      # release: a flag written in the outgoing one never covers the upgrade.
+      - name: No maintenance window for a release with nothing to do
+        ansible.builtin.assert:
+          that:
+            - host_log | select('search', '\[fake-magento\] maint:enable') | list | length == 0
+          fail_msg: >-
+            maint:enable ran on {{ inventory_hostname }} although both status
+            commands reported up to date.
+        when: not (expect_upgrade | default(false) | bool)
 
-    - name: Maintenance went on in the incoming release, before the reload
-      vars:
-        enables: "{{ host_log | select('search', '\\[fake-magento\\] maint:enable') | list }}"
-        first_enable_line: "{{ enables | first | default('') }}"
-        first_reload_line: "{{ host_log | select('search', ' reload$') | first | default('') }}"
-      ansible.builtin.assert:
-        that:
-          - enables | length == 1
-          - enables[0] is search(' in ' ~ current_link.stat.lnk_source ~ '$')
-          - first_reload_line | length > 0
-          - host_log.index(first_enable_line) < host_log.index(first_reload_line)
-        fail_msg: >-
-          On {{ inventory_hostname }} maint:enable must run once, in the release
-          now live ({{ current_link.stat.lnk_source }}), before the services reload
-          onto it.
-          It ran as {{ enables }}.
-      when: expect_upgrade | default(false) | bool
+      - name: Maintenance went on in the incoming release, before the reload
+        vars:
+          enables: "{{ host_log | select('search', '\\[fake-magento\\] maint:enable') | list }}"
+          first_enable_line: "{{ enables | first | default('') }}"
+          first_reload_line: "{{ host_log | select('search', ' reload$') | first | default('') }}"
+        ansible.builtin.assert:
+          that:
+            - enables | length == 1
+            - enables[0] is search(' in ' ~ current_link.stat.lnk_source ~ '$')
+            - first_reload_line | length > 0
+            - host_log.index(first_enable_line) < host_log.index(first_reload_line)
+          fail_msg: >-
+            On {{ inventory_hostname }} maint:enable must run once, in the release
+            now live ({{ current_link.stat.lnk_source }}), before the services reload
+            onto it.
+            It ran as {{ enables }}.
+        when: expect_upgrade | default(false) | bool
 
 - name: Verify Varnish was invalidated, not restarted
   hosts: varnish
   gather_facts: false
   tasks:
-    - name: Read the varnish host's call log
-      ansible.builtin.slurp:
-        src: /tmp/build-log
-      register: varnish_log_raw
+    # A real Varnish host answers varnishadm rather than logging to a file.
+    - name: The ban, on the fixture fleet
+      when: fake_tools | default(false) | bool
+      block:
+      - name: Read the varnish host's call log
+        ansible.builtin.slurp:
+          src: /tmp/build-log
+        register: varnish_log_raw
 
-    - name: One ban on Magento's pages, and no restart
-      vars:
-        varnish_log: "{{ (varnish_log_raw.content | b64decode).split('\n') }}"
-      ansible.builtin.assert:
-        that:
-          - varnish_log | select('search', '\[fake-varnishadm\] ban obj\.http\.X-Magento-Tags ~ \.$') | list | length == 1
-          - varnish_log | select('search', '\[fake-service\] varnish') | list | length == 0
-        fail_msg: >-
-          Expected exactly one `ban obj.http.X-Magento-Tags ~ .` and no service
-          call on {{ inventory_hostname }}. A restart empties static files and
-          media as well as pages. Log was: {{ varnish_log }}
+      - name: One ban on Magento's pages, and no restart
+        vars:
+          varnish_log: "{{ (varnish_log_raw.content | b64decode).split('\n') }}"
+        ansible.builtin.assert:
+          that:
+            - varnish_log | select('search', '\[fake-varnishadm\] ban obj\.http\.X-Magento-Tags ~ \.$') | list | length == 1
+            - varnish_log | select('search', '\[fake-service\] varnish') | list | length == 0
+          fail_msg: >-
+            Expected exactly one `ban obj.http.X-Magento-Tags ~ .` and no service
+            call on {{ inventory_hostname }}. A restart empties static files and
+            media as well as pages. Log was: {{ varnish_log }}
 
 - name: Verify the admin-only steps ran once, not once per web host
   hosts: admin
   gather_facts: false
   tasks:
-    - name: Read the fake-tool call log
-      ansible.builtin.slurp:
-        src: /tmp/build-log
-      register: admin_log_raw
+    # Counting cache flushes and the upgrade gate needs the call log.
+    - name: The admin-only steps, on the fixture fleet
+      when: fake_tools | default(false) | bool
+      block:
+      - name: Read the fake-tool call log
+        ansible.builtin.slurp:
+          src: /tmp/build-log
+        register: admin_log_raw
 
-    - name: Count the cache flushes
-      ansible.builtin.set_fact:
-        admin_log: "{{ admin_log_raw.content | b64decode }}"
+      - name: Count the cache flushes
+        ansible.builtin.set_fact:
+          admin_log: "{{ admin_log_raw.content | b64decode }}"
 
-    # Two tasks legitimately flush the cache here, so more than 2 means a
-    # run_once has regressed and one is fanning out per web host.
-    - name: Cache flush ran twice, from its two legitimate callers
-      ansible.builtin.assert:
-        that:
-          - (admin_log.split('\n') | select('search', '\[fake-magento\] cache:flush') | list | length) == 2
-        fail_msg: >-
-          cache:flush ran
-          {{ admin_log.split('\n') | select('search', '\[fake-magento\] cache:flush') | list | length }}
-          times on {{ inventory_hostname }}, expected 2. More than that means the
-          run_once on "Flush magento cache" has regressed and it is fanning out
-          once per web host.
+      # Two tasks legitimately flush the cache here, so more than 2 means a
+      # run_once has regressed and one is fanning out per web host.
+      - name: Cache flush ran twice, from its two legitimate callers
+        ansible.builtin.assert:
+          that:
+            - (admin_log.split('\n') | select('search', '\[fake-magento\] cache:flush') | list | length) == 2
+          fail_msg: >-
+            cache:flush ran
+            {{ admin_log.split('\n') | select('search', '\[fake-magento\] cache:flush') | list | length }}
+            times on {{ inventory_hostname }}, expected 2. More than that means the
+            run_once on "Flush magento cache" has regressed and it is fanning out
+            once per web host.
 
-    - name: The upgrade gate read the status commands
-      ansible.builtin.assert:
-        that:
-          - admin_log is search('setup:db:status')
-          - admin_log is search('app:config:status')
-        fail_msg: >-
-          The setup:upgrade gate did not run its status checks, so it cannot
-          have decided correctly whether an upgrade was needed.
+      - name: The upgrade gate read the status commands
+        ansible.builtin.assert:
+          that:
+            - admin_log is search('setup:db:status')
+            - admin_log is search('app:config:status')
+          fail_msg: >-
+            The setup:upgrade gate did not run its status checks, so it cannot
+            have decided correctly whether an upgrade was needed.
 
-    # The fakes report up to date unless /tmp/magento-fake-needs-upgrade exists,
-    # and `bin/docker-suite test` passes expect_upgrade=true when it does.
-    - name: Setup upgrade ran exactly when the gate said so
-      vars:
-        upgrades: "{{ admin_log.split('\n') | select('search', '\\[fake-magento\\] setup:upgrade') | list | length }}"
-      ansible.builtin.assert:
-        that:
-          - (upgrades | int) == (1 if expect_upgrade | default(false) | bool else 0)
-        fail_msg: >-
-          setup:upgrade ran {{ upgrades }} times with
-          expect_upgrade={{ expect_upgrade | default(false) }}. Once when the
-          status commands exit 2, never when they exit 0.
+      # The fakes report up to date unless /tmp/magento-fake-needs-upgrade exists,
+      # and `bin/docker-suite test` passes expect_upgrade=true when it does.
+      - name: Setup upgrade ran exactly when the gate said so
+        vars:
+          upgrades: "{{ admin_log.split('\n') | select('search', '\\[fake-magento\\] setup:upgrade') | list | length }}"
+        ansible.builtin.assert:
+          that:
+            - (upgrades | int) == (1 if expect_upgrade | default(false) | bool else 0)
+          fail_msg: >-
+            setup:upgrade ran {{ upgrades }} times with
+            expect_upgrade={{ expect_upgrade | default(false) }}. Once when the
+            status commands exit 2, never when they exit 0.
 
-    - name: The upgrade ran inside the maintenance window
-      vars:
-        lines: "{{ admin_log.split('\n') }}"
-        enable_line: "{{ lines | select('search', '\\[fake-magento\\] maint:enable') | first | default('') }}"
-        upgrade_line: "{{ lines | select('search', '\\[fake-magento\\] setup:upgrade') | first | default('') }}"
-        disable_line: "{{ lines | select('search', '\\[fake-magento\\] maint:disable') | last | default('') }}"
-      ansible.builtin.assert:
-        that:
-          - enable_line | length > 0
-          - upgrade_line | length > 0
-          - disable_line | length > 0
-          - lines.index(enable_line) < lines.index(upgrade_line) < lines.index(disable_line)
-        fail_msg: >-
-          On {{ inventory_hostname }} the order must be maint:enable, then
-          setup:upgrade, then maint:disable. Log was: {{ lines }}
-      when: expect_upgrade | default(false) | bool
+      - name: The upgrade ran inside the maintenance window
+        vars:
+          lines: "{{ admin_log.split('\n') }}"
+          enable_line: "{{ lines | select('search', '\\[fake-magento\\] maint:enable') | first | default('') }}"
+          upgrade_line: "{{ lines | select('search', '\\[fake-magento\\] setup:upgrade') | first | default('') }}"
+          disable_line: "{{ lines | select('search', '\\[fake-magento\\] maint:disable') | last | default('') }}"
+        ansible.builtin.assert:
+          that:
+            - enable_line | length > 0
+            - upgrade_line | length > 0
+            - disable_line | length > 0
+            - lines.index(enable_line) < lines.index(upgrade_line) < lines.index(disable_line)
+          fail_msg: >-
+            On {{ inventory_hostname }} the order must be maint:enable, then
+            setup:upgrade, then maint:disable. Log was: {{ lines }}
+        when: expect_upgrade | default(false) | bool
 
 - name: Verify the lock was released
   hosts: builder

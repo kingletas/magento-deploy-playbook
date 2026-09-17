@@ -80,3 +80,8 @@ release_disk_min_bytes: 104857600
 # notify_via_slack - announce the deploy in Slack. Off: a suite run must not
 # post anywhere. Requires a live slack_token.
 notify_via_slack: false
+
+# fake_tools - false everywhere real. The fixture fleet's tools log every call
+# to /tmp/build-log and verify-deploy asserts on it; there is no such log here,
+# so those checks are skipped and the ones that read the hosts still run.
+fake_tools: false

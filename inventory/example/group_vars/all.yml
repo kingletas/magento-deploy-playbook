@@ -105,3 +105,8 @@ release_disk_min_bytes: 8589934592
 # no token the module is still called and the failure swallowed, so nothing is
 # delivered and the run looks clean.
 notify_via_slack: false
+
+# fake_tools - false everywhere real. The fixture fleet's tools log every call
+# to /tmp/build-log and verify-deploy asserts on it; there is no such log here,
+# so those checks are skipped and the ones that read the hosts still run.
+fake_tools: false

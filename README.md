@@ -401,13 +401,31 @@ make deploy environment=staging branch_name=release/1.2    # another branch
 make deploy environment=staging release_name=20260819_1755600000_staging
 
 make deploy environment=staging EXTRA='--check -vv'
-make verify environment=docker          # assert on what a deploy left behind
+make verify environment=staging         # assert on what a deploy left behind
 make unlock environment=staging         # clear a stale build lock
 ```
 
 `branch_name=` and `release_name=` become `--extra-var`, which outranks
 everything in group_vars, so they work without the inventory knowing about
 them. `branch_name=` does **not** change `suffix`; see above.
+
+### Verifying a deploy, on any environment
+
+`make verify environment=<env>` reads the hosts rather than the deploy's own
+output: the symlink points into this environment's releases, the live release
+has a usable Magento CLI, every shared link resolves, `env.php` is the shared
+copy, the custom payloads landed, no release was left in maintenance mode, and
+no build lock survived. When all of it passes it records `deploy.verified`,
+which is the one record in the ledger that says somebody checked afterwards.
+
+The fixture fleet's own checks -- that the build called composer, that services
+were reloaded and never restarted, that Varnish was banned rather than
+restarted, that `setup:upgrade` ran inside the window -- read `/tmp/build-log`,
+the call log every fake tool writes. They run only where the inventory says
+`fake_tools: true`, which is `inventory/docker`. **Set it false on a real
+environment**, as the shipped examples do: there is no call log there, and
+without the flag verify would fail on a missing file and never reach the checks
+that do apply.
 
 ### Why the configuration isn't in the environment
 

@@ -84,3 +84,8 @@ release_disk_min_bytes: 104857600
 # notify_via_slack - announce the deploy in Slack. Off: a suite run must not
 # post anywhere. Requires a live slack_token.
 notify_via_slack: false
+
+# fake_tools - this fleet's composer, magento, varnishadm and service commands
+# are fakes that log every call to /tmp/build-log. verify-deploy reads that log
+# only where this is true; a real fleet's checks read the hosts instead.
+fake_tools: true

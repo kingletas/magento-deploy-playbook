@@ -241,8 +241,9 @@ the first admin host. Its last line of output is recorded as the backup's name,
 and a backup that fails or names nothing stops the deploy with the old release
 still serving.
 
-What all of this is evidence of, and what it is not, is in
-[docs/compliance.md](docs/compliance.md).
+**Every field a record carries is in [docs/ledger.md](docs/ledger.md)**: the
+envelope, the actor, and what each of the eleven events adds. What all of this is
+evidence of, and what it is not, is in [docs/compliance.md](docs/compliance.md).
 
 ## Warming the storefront
 

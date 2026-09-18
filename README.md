@@ -488,7 +488,7 @@ bin/check               make check
 bin/check-structure     the five structural checks
 bin/docker-suite        the local fleet
 docker/                 the local fleet's image, fakes and fixtures
-docs/                   from-nothing.md, design.md
+docs/                   from-nothing.md, design.md, ledger.md, compliance.md
 ```
 
 ### Why tests/ contains four symlinks

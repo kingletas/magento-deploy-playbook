@@ -51,11 +51,12 @@
   run_once: true
   when: config_warnings_failed | bool
 
-- name: Stop before the cutover on a deletion nobody accepted
+- name: Stop before the cutover on a warning nobody accepted
   ansible.builtin.fail:
     msg: >-
-      Importing this release's config.php would delete:
-      {{ config_warnings.destructive | map(attribute='message') | join('; ') }}.
+      Importing this release's config.php would do something not known to be
+      safe, a deletion or a change worded in a way this check does not
+      recognise: {{ config_warnings.destructive | map(attribute='message') | join('; ') }}.
       Nothing has gone live. If that is intended, pass config_import_accept
       with exactly these, separated by ";".
   run_once: true

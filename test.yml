@@ -32,3 +32,6 @@
 
 - name: The audit, integrity, backup and approval controls
   ansible.builtin.import_playbook: tests/test-controls.yml
+
+- name: Which file changes move which build fingerprint, against a real git repository
+  ansible.builtin.import_playbook: tests/test-build-skip.yml

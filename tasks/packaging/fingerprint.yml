@@ -1,0 +1,28 @@
+---
+###
+# Sets `build_fingerprints`: one SHA-256 per build phase, over the tracked files
+# in {{ wdir }} that phase reads (build_skip_*_paths in group_vars/all/build.yml)
+# and the settings it depends on (build_skip_*_extra). Static content also
+# depends on the shared env.php the build links in.
+###
+- name: Fingerprint what the compile and static phases read
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      { git ls-files -s -- {{ build_skip_compile_paths | map('quote') | join(' ') }};
+        printf '%s\n' {{ build_skip_compile_extra | map('quote') | join(' ') }};
+      } | sha256sum | cut -c1-64;
+      { git ls-files -s -- {{ build_skip_static_paths | map('quote') | join(' ') }};
+        printf '%s\n' {{ build_skip_static_extra | map('quote') | join(' ') }};
+        sha256sum {{ (releases.shared ~ 'env.php') | quote }} 2>/dev/null || echo no-env;
+      } | sha256sum | cut -c1-64
+    chdir: "{{ wdir }}"
+    executable: /bin/bash
+  register: build_fingerprint_cmd
+  changed_when: false
+
+- name: Keep the fingerprints
+  ansible.builtin.set_fact:
+    build_fingerprints:
+      compile: "{{ build_fingerprint_cmd.stdout_lines[0] }}"
+      static: "{{ build_fingerprint_cmd.stdout_lines[1] }}"

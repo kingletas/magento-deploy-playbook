@@ -48,6 +48,30 @@ warmup:
   timeout: 1
   fail_below: 0
 
+
+# health - the fake nginx answers 503 in maintenance and 500 for a release the
+# build marked broken. See docker/fakes/initd-nginx.
+health:
+  enabled: true
+  url: http://127.0.0.1/
+  host: ""
+  paths:
+    - /
+  timeout: 5
+  attempts: 2
+  delay: 1
+  rollback: auto
+
+
+# lock_forecast - the suite swaps the rehearsal for a fake with
+# lock_rehearsal_command; see bin/docker-suite.
+lock_forecast:
+  enabled: false
+  image: mariadb:11.4
+  stop_on_rows: 1000000
+  required: false
+  extra_tables: []
+
 # audit - see inventory/example/. Kept beside the checkout, out of git.
 audit:
   path: "{{ playbook_dir }}/local.d/audit/docker.audit.jsonl"

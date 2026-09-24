@@ -1,0 +1,147 @@
+---
+###
+# Decides whether `current` may be pointed back at an older release. Sets, on
+# every host, `rollback_allowed`, `rollback_refusals` (why not, one line each)
+# and `rollback_notes` (what goes back regardless, one line each).
+#
+#   rollback_target   required. The release path to go back to.
+#   rollback_mark     required. The database mark the target went live with,
+#                     as a dict; {} when it has none.
+#   rollback_live     the release live now, for the recurring-script warning.
+#
+# Overrides, each accepting exactly one refusal and nothing else:
+#   rollback_despite_database   true: setup:db:status in the target exited 2.
+#   rollback_accept_patches     the comma-separated patch names the refusal
+#                               listed, all of them.
+#   rollback_accept_columns     the same, for the NOT NULL columns.
+#
+# The target answers whether its code still matches the database: its own
+# `setup:db:status`, run against the live database, exits 0 when they match. Its
+# version check is the one Magento's front controller makes on every page, so
+# an exit 2 means old code here would answer every page with a 500. Only a
+# database restore undoes that. An exit 2 can also be a column the new release
+# only widened, which does old code no harm; the override exists for that, once
+# someone has looked.
+#
+# Exit 0 is necessary, not sufficient, so magento-db-guard.php then reads what
+# the status command does not check: data patches applied since the target went
+# live, and NOT NULL columns the target's INSERTs would leave out.
+#
+# Anything that cannot be read refuses, and no override passes it.
+###
+- name: Check the target release is on every web host
+  ansible.builtin.stat:
+    path: "{{ rollback_target }}/bin/magento"
+  register: rollback_target_stat
+
+- name: Collect the web hosts missing the target release
+  ansible.builtin.set_fact:
+    rollback_missing_hosts: >-
+      {{ ansible_play_hosts_all
+         | reject('in', ansible_play_hosts_all
+                        | map('extract', hostvars)
+                        | selectattr('rollback_target_stat', 'defined')
+                        | selectattr('rollback_target_stat.stat.exists')
+                        | map(attribute='inventory_hostname') | list)
+         | list }}
+  run_once: true
+
+- name: Put the deploy's PHP helpers on the admin host
+  ansible.builtin.import_tasks: tasks/helpers/install.yml
+
+# --require-isolation: on a Magento too old to keep this command out of the live
+# cache it exits 3, which refuses.
+- name: Ask the target release whether its code matches the database
+  ansible.builtin.command: >-
+    php {{ deploy_helpers }}magento-isolated.php {{ rollback_target }}
+    --require-isolation -- setup:db:status
+  become: true
+  become_user: "{{ system.user }}"
+  run_once: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups.admin }}"
+  register: rollback_db_status
+  changed_when: false
+  failed_when: false
+  when: rollback_missing_hosts | length == 0
+
+- name: Read what the database gained since the target went live
+  ansible.builtin.command:
+    argv:
+      - php
+      - "{{ deploy_helpers }}magento-db-guard.php"
+      - check
+      - "{{ rollback_target }}"
+      - "{{ rollback_mark | to_json }}"
+      - "{{ rollback_live | default('') }}"
+  become: true
+  become_user: "{{ system.user }}"
+  run_once: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups.admin }}"
+  register: rollback_db_guard
+  changed_when: false
+  failed_when: false
+  when: rollback_missing_hosts | length == 0
+
+- name: Read the answers
+  ansible.builtin.set_fact:
+    rollback_db_rc: "{{ (rollback_db_status.results | default([]) | first | default({})).rc | default('not run') | string }}"
+    rollback_guard_rc: "{{ (rollback_db_guard.results | default([]) | first | default({})).rc | default('not run') | string }}"
+    rollback_gained: >-
+      {{ ((rollback_db_guard.results | default([]) | first | default({})).stdout | default('{}', true) | from_json)
+         if (rollback_db_guard.results | default([]) | first | default({})).rc | default(1) == 0 else {} }}
+  run_once: true
+
+- name: Weigh them
+  ansible.builtin.set_fact:
+    rollback_patches: "{{ rollback_gained.patches_after | default([]) }}"
+    rollback_columns: "{{ rollback_gained.undeclared_not_null | default([]) }}"
+    rollback_accepted_patches: "{{ rollback_accept_patches | default('') | split(',') | map('trim') | reject('equalto', '') | list }}"
+    rollback_accepted_columns: "{{ rollback_accept_columns | default('') | split(',') | map('trim') | reject('equalto', '') | list }}"
+  run_once: true
+
+- name: Decide
+  ansible.builtin.set_fact:
+    rollback_refusals: >-
+      {{ ([('the target release ' ~ rollback_target ~ ' is missing on ' ~ (rollback_missing_hosts | join(', ')))]
+          if rollback_missing_hosts | length > 0 else [])
+         + ([('setup:db:status in the target exited 3: this Magento cannot run it apart from the live cache, '
+              ~ 'so it was not run and the target is unchecked')]
+            if rollback_db_rc == '3' else [])
+         + ([('setup:db:status in the target exited ' ~ rollback_db_rc
+              ~ ', so whether its code matches the database is unknown')]
+            if rollback_db_rc not in ['0', '2', '3'] and rollback_missing_hosts | length == 0 else [])
+         + ([('the database differs from what the target declares: setup:db:status in it exited 2. If the '
+              ~ 'deploy recorded a newer module version, the target would answer every page with a 500 and '
+              ~ 'only a database restore helps. If it only widened a column, the target is fine: check, then '
+              ~ 'pass rollback_despite_database=true')]
+            if rollback_db_rc == '2' and not rollback_despite_database | default(false) | bool else [])
+         + ([('magento-db-guard.php exited ' ~ rollback_guard_rc ~ ', so what the database gained is unknown')]
+            if rollback_guard_rc != '0' and rollback_missing_hosts | length == 0 else [])
+         + ([('data patches applied since the target went live, whose changes stay: '
+              ~ (rollback_patches | join(', ')) ~ '. To go back anyway, pass rollback_accept_patches with '
+              ~ 'exactly these names')]
+            if rollback_patches | length > 0 and (rollback_patches | sort) != (rollback_accepted_patches | sort) else [])
+         + ([('NOT NULL columns without a default that the target does not declare, so its INSERTs would fail: '
+              ~ (rollback_columns | join(', ')) ~ '. To go back anyway, pass rollback_accept_columns with '
+              ~ 'exactly these names')]
+            if rollback_columns | length > 0 and (rollback_columns | sort) != (rollback_accepted_columns | sort) else []) }}
+    rollback_notes: >-
+      {{ ([('recurring setup scripts the live release has and the target does not, whose changes cannot be '
+            ~ 'listed: ' ~ (rollback_gained.recurring_missing | join(', ')))]
+          if rollback_gained.recurring_missing | default([]) | length > 0 else [])
+         + ([(rollback_gained.config_changed | string) ~ ' configuration values written since the target went live stay as they are']
+            if rollback_gained.config_changed | default(0, true) | int > 0 else []) }}
+  run_once: true
+
+- name: Record the decision
+  ansible.builtin.set_fact:
+    rollback_allowed: "{{ rollback_refusals | length == 0 }}"
+  run_once: true
+
+- name: Report what a rollback leaves behind
+  ansible.builtin.debug:
+    msg: "{{ item }}"
+  loop: "{{ rollback_notes }}"
+  run_once: true

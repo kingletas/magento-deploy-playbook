@@ -1,0 +1,50 @@
+---
+###
+# Runs files/helpers/static-verify.py over the static content deploy's output
+# and the files it wrote, and stops the build when a theme did not finish, the
+# output carries a failure message, or a file in static_sentinels is missing.
+# Nothing has left the builder at this point.
+###
+- name: Put the verifier on the builder
+  ansible.builtin.tempfile:
+    state: file
+    prefix: static-verify-
+    suffix: .py
+  register: static_verify_script
+  when: not build_skip_static | bool
+
+- name: Copy it there
+  ansible.builtin.copy:
+    src: helpers/static-verify.py
+    dest: "{{ static_verify_script.path }}"
+    mode: "0700"
+  when: not build_skip_static | bool
+
+- name: Verify the static content
+  ansible.builtin.command:
+    argv: [python3, "{{ static_verify_script.path }}", --root, "{{ wdir }}", --sentinels, "{{ static_sentinels | to_json }}"]
+    stdin: "{{ static_deploy.stdout | default('') }}\n{{ static_deploy.stderr | default('') }}"
+  register: static_verify
+  changed_when: false
+  failed_when: false
+  when: not build_skip_static | bool
+
+- name: Remove the verifier
+  ansible.builtin.file:
+    path: "{{ static_verify_script.path }}"
+    state: absent
+  when: not build_skip_static | bool
+
+- name: Stop the build when the static content is incomplete
+  ansible.builtin.assert:
+    that:
+      - static_verify.rc == 0
+    fail_msg: >-
+      setup:static-content:deploy exited {{ static_deploy.rc }}, but its work is
+      incomplete: {{ (static_verify.stdout | from_json).problems | join('. ')
+                     if static_verify.stdout | default('') | length > 0 else static_verify.stderr }}.
+      Nothing has left the builder.
+    success_msg: >-
+      Static content complete for
+      {{ (static_verify.stdout | from_json).themes | join(', ') }}.
+  when: not build_skip_static | bool

@@ -1,0 +1,39 @@
+---
+###
+# Refuses malformed `health` settings before anything is built. The check runs
+# once the release is live, which is too late to find a typo.
+###
+- name: Validate the health check settings
+  ansible.builtin.assert:
+    that:
+      - health is mapping
+      - health.enabled is boolean
+      - health.url is string
+      - health.host is string
+      - health.paths is sequence and health.paths is not string
+      - health.paths | select('string') | list | length == health.paths | length
+      - health.timeout is integer and health.timeout > 0
+      - health.attempts is integer and health.attempts >= 1 and health.attempts <= 10
+      - health.delay is integer and health.delay >= 0
+      - health.rollback in ['auto', 'never']
+    fail_msg: >-
+      `health` in inventory/{{ env_name | default('<env>') }}/group_vars/all.yml
+      needs every key with the right type: enabled (true/false), url (text),
+      host (text, "" for none), paths (a list), timeout (seconds, above 0),
+      attempts (1 to 10), delay (seconds, 0 or more) and rollback (auto or
+      never). Got: {{ health | default('<UNSET>') }}
+  run_once: true
+
+- name: Validate what an enabled health check will request
+  ansible.builtin.assert:
+    that:
+      - health.url is match('^http://[^/\s]+/$')
+      - health.paths | length > 0
+      - health.paths | reject('match', '^/(?!/)') | list | length == 0
+    fail_msg: >-
+      With health.enabled on, url must be a plain http URL ending in "/" that
+      each app host can reach itself on, such as http://127.0.0.1/, and there
+      must be at least one path, each starting with a single "/".
+      url={{ health.url }} paths={{ health.paths }}
+  run_once: true
+  when: health.enabled | bool

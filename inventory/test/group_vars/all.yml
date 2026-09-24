@@ -50,6 +50,26 @@ warmup:
   timeout: 1
   fail_below: 0
 
+# health - see inventory/example/. The offline suites set their own values.
+health:
+  enabled: false
+  url: http://127.0.0.1/
+  host: ""
+  paths:
+    - /
+  timeout: 5
+  attempts: 1
+  delay: 0
+  rollback: auto
+
+# lock_forecast - see inventory/example/.
+lock_forecast:
+  enabled: false
+  image: mariadb:11.4
+  stop_on_rows: 0
+  required: false
+  extra_tables: []
+
 # audit, approval, backup - see inventory/example/. The offline suites set their
 # own values; these keep the key set whole.
 audit:

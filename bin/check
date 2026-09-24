@@ -36,7 +36,7 @@ command -v ansible-playbook >/dev/null \
 fail=0
 
 echo "Syntax:"
-for playbook in deployment.yml verify-deploy.yml audit.yml test.yml; do
+for playbook in deployment.yml verify-deploy.yml rollback.yml audit.yml test.yml; do
     if output=$(ansible-playbook --syntax-check -i inventory/test "${playbook}" 2>&1); then
         printf '  ok    %s\n' "${playbook}"
     else

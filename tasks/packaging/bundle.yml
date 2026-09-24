@@ -56,6 +56,8 @@
     chdir: "{{ wdir }}"
   loop: "{{ bundler_steps[bundler] }}"
   changed_when: true
+  # Reused static content was bundled when it was built.
+  when: not build_skip_static | default(false) | bool
 
 - name: Run the extra build steps
   ansible.builtin.command: "{{ item }}"

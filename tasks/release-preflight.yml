@@ -50,6 +50,12 @@
 - name: Check the warm-up settings
   ansible.builtin.import_tasks: warmup/validate.yml
 
+- name: Check the health check settings
+  ansible.builtin.import_tasks: health/validate.yml
+
+- name: Check the lock forecast settings
+  ansible.builtin.import_tasks: forecast/validate.yml
+
 - name: Check the audit, approval and backup settings
   ansible.builtin.import_tasks: controls/validate.yml
 

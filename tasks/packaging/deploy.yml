@@ -33,15 +33,26 @@
     mode: '{{ system.permissions }}'
     force: true
 
+- name: Reuse what the previous build made, where nothing it read has changed
+  ansible.builtin.import_tasks: tasks/packaging/build-skip.yml
+
 - name: Compile Magento's code
-  ansible.builtin.command: "php bin/magento s:d:c"
+  ansible.builtin.command: "{{ compile_command }}"
   args:
     chdir: '{{ wdir }}'
+  when: not build_skip_compile | bool
 
 - name: Deploy Magento's static code
-  ansible.builtin.command: "php bin/magento s:static-content:d -j 5 -f"
+  ansible.builtin.command: "{{ static_command }}"
   args:
     chdir: '{{ wdir }}'
+  register: static_deploy
+  when: not build_skip_static | bool
+
+# Its exit code is not enough: with parallel jobs, a theme whose LESS fails to
+# compile stops part way and the command still exits 0.
+- name: Check the static content deploy did the job
+  ansible.builtin.import_tasks: tasks/packaging/static-verify.yml
 
 - name: Copy any generated min css files
   ansible.posix.synchronize:
@@ -53,6 +64,7 @@
     owner: true
   become: true
   delegate_to: "{{ inventory_hostname }}"
+  when: not build_skip_static | bool
 
 - name: Move the var view processed files under the generated folder
   ansible.builtin.copy:
@@ -61,6 +73,7 @@
     remote_src: true
     mode: '{{ system.permissions }}'
   become: true
+  when: not build_skip_static | bool
 
 - name: Remove var and media, to link them at the shared copy next
   ansible.builtin.file:

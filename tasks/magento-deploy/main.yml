@@ -26,8 +26,13 @@
 
 # `var` is not in the archive, so Magento creates var/log on this call, owned by
 # whoever runs it. Every later step runs as system.user and must be able to write.
+- name: Put the deploy's PHP helpers on the admin host
+  ansible.builtin.import_tasks: tasks/helpers/install.yml
+
+# Through magento-isolated.php, because the incoming code would otherwise store
+# its merged configuration in the cache the live release is still reading.
 - name: Check for setup upgrade, the first bin/magento call on the release
-  ansible.builtin.command: "php bin/magento setup:db:status"
+  ansible.builtin.command: "php {{ deploy_helpers }}magento-isolated.php {{ incoming_release }} -- setup:db:status"
   args:
     chdir: '{{ incoming_release }}'
   become: true
@@ -40,7 +45,7 @@
   failed_when: false
 
 - name: "Check for app config status"
-  ansible.builtin.command: "php bin/magento app:config:status"
+  ansible.builtin.command: "php {{ deploy_helpers }}magento-isolated.php {{ incoming_release }} -- app:config:status"
   args:
     chdir: '{{ incoming_release }}'
   become_user: '{{ system.user }}'
@@ -52,8 +57,45 @@
   changed_when: false
   failed_when: false
 
+# Neither status command reads the theme table, so a release that only adds a
+# theme passes both and would never be registered.
+- name: Check for themes the database has not registered
+  ansible.builtin.command: "php {{ deploy_helpers }}magento-db-guard.php themes {{ incoming_release }}"
+  become_user: '{{ system.user }}'
+  become: true
+  run_once: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups.admin }}"
+  register: theme_config
+  changed_when: false
+  failed_when: false
+
 - name: Decide whether this release needs a maintenance window
   ansible.builtin.import_tasks: tasks/magento-deploy/upgrade-gate.yml
+
+# The database as the outgoing release left it, read before anything changes
+# so a database that cannot be read stops the deploy with nothing live. What
+# setup:upgrade applies after this is what a rollback cannot take back.
+- name: Mark the database before the cutover
+  ansible.builtin.command: "php {{ deploy_helpers }}magento-db-guard.php mark {{ incoming_release }}"
+  become_user: '{{ system.user }}'
+  become: true
+  run_once: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups.admin }}"
+  register: db_mark_before
+  changed_when: false
+
+- name: Keep the mark taken before the cutover
+  ansible.builtin.set_fact:
+    db_mark_before_upgrade: "{{ (db_mark_before.results | first).stdout | from_json }}"
+  run_once: true
+
+- name: Rehearse setup:upgrade, and stop here if it would lock too much
+  ansible.builtin.include_tasks: tasks/forecast/run.yml
+  when:
+    - lock_forecast.enabled | bool
+    - upgrade_needed | bool
 
 - name: "DORA: record the cutover start"
   ansible.builtin.include_tasks: tasks/dora-event.yml
@@ -134,8 +176,11 @@
   delegate_to: "{{ item }}"
   loop: "{{ groups.admin }}"
 
+# --no-interaction: when config.php's themes or scopes change, the config import
+# inside setup:upgrade asks for a yes, and with nobody to give one it aborts and
+# fails the deploy with the site in maintenance.
 - name: "Magento's setup upgrade"
-  ansible.builtin.command: "php bin/magento setup:upgrade --keep-generated"
+  ansible.builtin.command: "php bin/magento setup:upgrade --keep-generated --no-interaction"
   args:
     chdir: '{{ releases.current }}'
   become_user: '{{ system.user }}'
@@ -196,3 +241,36 @@
   when:
     - releases.kill_php | bool
     - releases.complete | bool
+
+- name: Check the new release, and put the old one back when it fails
+  ansible.builtin.include_tasks: tasks/magento-deploy/health.yml
+  when:
+    - health.enabled | bool
+    - releases.complete | bool
+
+# Written only once the release has passed its health check, so a rollback to
+# it later can tell what the database gained after it went live.
+- name: Mark the database the new release went live with
+  ansible.builtin.command: "php {{ deploy_helpers }}magento-db-guard.php mark {{ releases.current }}"
+  become_user: '{{ system.user }}'
+  become: true
+  run_once: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups.admin }}"
+  register: db_mark_live
+  changed_when: false
+  when:
+    - releases.complete | bool
+    - not deploy_rolled_back | default(false) | bool
+
+- name: Keep that mark in the release on every web host
+  ansible.builtin.copy:
+    content: "{{ (db_mark_live.results | first).stdout }}\n"
+    dest: "{{ incoming_release }}/.deploy-db-mark.json"
+    owner: "{{ system.user }}"
+    group: "{{ system.group }}"
+    mode: "0644"
+  become: true
+  when:
+    - releases.complete | bool
+    - not deploy_rolled_back | default(false) | bool

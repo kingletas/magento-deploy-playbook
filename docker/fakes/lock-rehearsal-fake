@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""Stands in for files/helpers/lock-rehearsal.py on the builder, which needs a
+real MariaDB. Writes the report the real one would for a release that adds a
+column instantly, and, when /tmp/magento-fake-forecast-copy exists, one that
+rebuilds sales_order with a blocking copy at five million rows."""
+import json
+import sys
+
+out = sys.argv[sys.argv.index("--out") + 1]
+statements = [{"statement": "ALTER TABLE `sales_order` ADD COLUMN `probe` smallint NULL", "table": "sales_order",
+               "class": "instant", "rows": 5000000, "bytes": 9000000000, "narrowing": [], "error": None}]
+try:
+    open("/tmp/magento-fake-forecast-copy").close()
+    statements.append({"statement": "ALTER TABLE `sales_order` MODIFY COLUMN `increment_id` varchar(64)",
+                       "table": "sales_order", "class": "copy", "rows": 5000000, "bytes": 9000000000,
+                       "narrowing": [], "error": None})
+except FileNotFoundError:
+    pass
+with open("/tmp/build-log", "a") as log:
+    log.write("[fake-lock-rehearsal] " + " ".join(sys.argv[1:]) + "\n")
+json.dump({"production_version": "11.4.10-MariaDB", "rehearsal_version": "11.4.10-MariaDB",
+           "upgrade_exit": 0, "statements": statements, "patches_applied": ["Fake\\Patch\\Data\\Next"],
+           "data_statements": 3, "data_statements_by_table": {}, "blind_spots": []}, open(out, "w"))

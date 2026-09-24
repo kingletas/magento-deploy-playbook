@@ -9,6 +9,20 @@ changed, because there's nothing before it.
 
 ### Fixed
 
+- A release whose `app/etc/config.php` changes its themes or scopes no longer
+  fails in the middle of the maintenance window. The configuration import inside
+  `setup:upgrade` asks for a yes before it registers them, and with nobody to
+  answer it aborted and failed the deploy. `setup:upgrade` now runs with
+  `--no-interaction`.
+- A release that only adds a theme now gets `setup:upgrade`. Neither
+  `setup:db:status` nor `app:config:status` reads the theme table, so both
+  passed and the theme was never registered. The upgrade gate now also compares
+  the themes the code registers with the ones the database has.
+- The status commands the deploy runs in the incoming release, before it goes
+  live, no longer write that release's configuration into the cache the live
+  release is reading. They run with a private file cache, removed afterwards.
+  On a Magento too old to allow that they run as before, with a warning.
+
 - Rolling back no longer lands the store in maintenance mode. Maintenance was
   enabled in the release being replaced and disabled only in the new one, so
   every superseded release kept `var/.maintenance.flag`, and repointing the
@@ -24,6 +38,38 @@ changed, because there's nothing before it.
   stops before the symlink flips.
 
 ### Changed
+
+- After the cutover, every app host requests the storefront paths in
+  `health.paths` from its own web server, bypassing Varnish. When any fails, the
+  release it replaced is put back automatically, provided its code still fits
+  the database. A guard decides that before anything moves: the older release's
+  own `setup:db:status` must pass against the live database, no data patch may
+  have run since it went live, and no NOT NULL column its INSERTs leave out may
+  have appeared. When the guard refuses, the live release goes into maintenance,
+  because a maintenance page tells a customer to come back and a failing page
+  does not, and the deploy stops naming the backup it took.
+  `pub/health_check.php` is not used: it never passes through the front
+  controller, so it answers 200 on a server refusing every page.
+- `make rollback environment=<env>` puts back the release before the live one,
+  or `release=<name>`, under the same guard. Each refusal can be overridden only
+  by naming exactly what it listed: `rollback_despite_database=true`,
+  `rollback_accept_patches=` or `rollback_accept_columns=`. The previous way,
+  repointing the symlink by hand, bypasses all of it.
+- A build reuses the previous build's compiled code or static content when
+  nothing that phase reads has changed. Each phase has a fingerprint over the
+  tracked files it reads, the command that runs it and the settings it depends
+  on; `build_skip` turns either phase off, and output older than
+  `build_skip.max_age_days` is always rebuilt.
+- With `lock_forecast.enabled`, a release whose `setup:upgrade` will run is
+  rehearsed first. The builder runs its real `setup:upgrade` against a
+  throwaway MariaDB of production's version, loaded with production's schema
+  and the rows `setup:upgrade` reads, then asks that server how it would run
+  each schema statement: instantly, online, or as a table copy that blocks
+  writes. Each is sized with production's row counts. A blocking copy over
+  `lock_forecast.stop_on_rows` stops the deploy before anything goes live, and so
+  does a narrowed column, until `forecast_accept_narrowing` names it. The
+  schema dump holds the configuration table, so both copies are deleted when the
+  rehearsal ends.
 
 - Every deploy is now recorded in an append-only, hash-chained audit log on the
   control node: nine events per release carrying the commit, the artefact's

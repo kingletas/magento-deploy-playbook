@@ -81,6 +81,11 @@ and what isn't.
 
 - [Setup](#setup)
 - [Environments](#environments)
+- [Controls, approvals and the audit log](#controls-approvals-and-the-audit-log)
+- [Warming the storefront](#warming-the-storefront)
+- [After the cutover: the health check and rollback](#after-the-cutover-the-health-check-and-rollback)
+- [Rehearsing setup:upgrade](#rehearsing-setupupgrade)
+- [Building only what changed](#building-only-what-changed)
 - [Bundling the JavaScript](#bundling-the-javascript)
 - [Running it from a console](#running-it-from-a-console)
 - [The one rule: inventory vars vs playbook vars](#the-one-rule-inventory-vars-vs-playbook-vars)
@@ -138,7 +143,7 @@ hosts and addresses are nobody else's business. An inventory has to live under
 copying `inventory/example/` -- the template -- and editing two files;
 `make check` then tells you if you forgot a key or invented one.
 
-All three declare **the same fifteen keys**, and `make check` fails if one of
+All three declare **the same seventeen keys**, and `make check` fails if one of
 them forgets a key or invents one:
 
 | Key | What it decides |
@@ -151,6 +156,8 @@ them forgets a key or invents one:
 | `deployment_complete` | Whether the `current` symlink is repointed |
 | `git_repo` | Where the release is cloned from |
 | `warmup` | Whether and how the storefront is warmed once maintenance is off. See [Warming the storefront](#warming-the-storefront) |
+| `health` | What each app host must serve after the cutover, and whether a failure puts the previous release back. See [After the cutover](#after-the-cutover-the-health-check-and-rollback) |
+| `lock_forecast` | Whether a release's `setup:upgrade` is rehearsed first, and how much it may lock. See [Rehearsing setup:upgrade](#rehearsing-setupupgrade) |
 | `audit` | Where the deploy's audit log is written, whether it is forwarded, and whether a record that fails stops the deploy |
 | `approval` | Whether a release needs a signed approval, and whose signatures count |
 | `backup` | Whether a backup runs before the cutover, what command takes it, and how long it may take |
@@ -281,6 +288,162 @@ window there is no moment before customers reach the new release, and during a
 window Magento's maintenance page blocks the warm-up's requests too. Warming a
 node before it takes traffic needs a rolling deploy, which this playbook does
 not do.
+
+## After the cutover: the health check and rollback
+
+Once the new release is live and maintenance is off, every app host requests
+each path in `health.paths` from its own web server, at `health.url`, with
+`health.host` as the Host header. That bypasses Varnish and any load
+balancer, so a cached page cannot answer for a broken release. A path passes
+only on a 2xx.
+
+```yaml
+health:
+  enabled: true
+  url: http://127.0.0.1/
+  host: stage.example.com
+  paths:
+    - /
+    - /customer/section/load/?sections=cart
+  timeout: 10
+  attempts: 3
+  delay: 5
+  rollback: auto      # auto | never
+```
+
+**Storefront paths, not `pub/health_check.php`.** That script checks the
+database and the cache answer, but never passes through the front controller,
+so a server whose code and database disagree answers 200 there while refusing
+every page. So does a server in maintenance mode. The cart section is never
+cached and reads the database.
+
+**When a path fails, the release the deploy replaced goes back, if it can.**
+Moving the symlink undoes the code, not the database, so a guard decides first:
+
+1. **The older release's own `setup:db:status` must pass** against the live
+   database. It runs the same version check Magento's front controller makes on
+   every page, so a failure means the older code would answer every page with a
+   500. That is what happens once a deploy's `setup:upgrade` records a newer
+   module version. An exit 2 can also be a column the new release only widened,
+   which is harmless; the refusal says so.
+2. **No data patch may have run since the older release went live.** Each
+   deploy records the highest `patch_list` id its release went live with, and
+   anything above it is data the older code has never seen and a rollback
+   cannot undo.
+3. **No NOT NULL column without a default may exist that the older release
+   does not declare**, in a table it does, because its INSERTs leave that
+   column out.
+
+It also reports what goes back regardless: recurring setup scripts only the
+newer release has, and configuration written since.
+
+**When the guard refuses, the live release goes into maintenance** and the
+deploy stops, naming the backup it took. A maintenance page tells a customer to
+come back; a failing page does not, and a rollback onto a newer database would
+fail every page instead of some.
+
+The status commands run with a private file cache, so the older release's code
+cannot write its configuration into the cache the live release reads. A Magento
+too old to allow that refuses the automatic rollback rather than risk it.
+
+### Rolling back by hand
+
+```bash
+make rollback environment=staging                      # the release before the live one
+make rollback environment=staging release=<name>       # a named release
+```
+
+The same guard decides. Each refusal can be overridden, and only by naming
+exactly what it listed, so nobody waves a refusal through without reading it:
+
+| The guard refused because | Override |
+|---|---|
+| The older release's `setup:db:status` exited 2 | `EXTRA='-e rollback_despite_database=true'` |
+| Data patches ran since it went live | `EXTRA="-e rollback_accept_patches='<every name listed>'"` |
+| A NOT NULL column it would leave out | `EXTRA="-e rollback_accept_columns='<every column listed>'"` |
+
+A status command that could not run, or a release missing from a host, cannot
+be overridden. `make rollback` takes the build lock, so it cannot run while a
+deploy does.
+
+## Rehearsing setup:upgrade
+
+`setup:upgrade` does more than a release's schema changes. It reconciles the
+whole database with the code, so it also drops and rebuilds grid tables and
+recreates every indexer trigger, and none of that shows in `--dry-run`. Some of
+it locks tables customers write to. With `lock_forecast.enabled`, a release
+whose `setup:upgrade` will run is rehearsed before anything goes live:
+
+1. The admin host writes production's row counts and sizes, and a dump of its
+   schema with the rows `setup:upgrade` reads to decide what to run: module
+   versions, applied patches, the stores, the EAV metadata and configuration.
+   No customer, order or catalogue rows.
+2. The builder runs the built release's real `setup:upgrade` against a
+   throwaway MariaDB of production's version, loaded with that dump, and keeps
+   every schema statement it sends.
+3. It loads the dump again and replays each statement, asking the server for
+   `ALGORITHM=INSTANT`, then `NOCOPY`, then `INPLACE` with `LOCK=NONE`. The first
+   it accepts is the statement's class. None means a table copy that blocks
+   writes for as long as it takes.
+
+```yaml
+lock_forecast:
+  enabled: true
+  image: mariadb:11.4      # production's major.minor, or the rehearsal refuses
+  stop_on_rows: 1000000    # 0 only reports
+  required: false          # stop when the rehearsal itself cannot finish
+  extra_tables: []         # more tables whose rows your data patches read
+```
+
+**A blocking copy of a table with more rows than `stop_on_rows` stops the
+deploy before the cutover.** So does a column the release narrows: Magento does
+not refuse data that no longer fits, it cuts it, with nothing in the output.
+Check the data, then accept each narrowing by name with
+`EXTRA="-e forecast_accept_narrowing='<entries, separated by ;>'"`.
+
+The report gives rows and bytes, not seconds: how fast a server rebuilds a
+table depends on disk and load that a rehearsal does not have. It lists data
+patches and data statements by name and count only, because they ran on empty
+tables. A class is the best case: a production table carrying earlier instant
+changes may need a rebuild where the copy did not. And trigger statements take a
+metadata lock that waits for every open transaction on the table, which no
+rehearsal can size.
+
+The dump holds the configuration table, secrets included. It is written 0600
+and deleted from the admin host and the builder when the rehearsal ends,
+whatever happened. The builder needs Docker and Python 3, and the admin host
+`mariadb-dump` or `mysqldump`.
+
+## Building only what changed
+
+The compiled code and the static content are each reused from the previous
+build on the builder when nothing that phase reads has changed. Each phase has
+a fingerprint over the tracked files it reads, the command that runs it and the
+settings it depends on; `composer.json`, `composer.lock` and `patches/` stand
+for `vendor/`, which is not tracked. `tests/test-build-skip.yml` changes one
+file at a time and asserts which fingerprint moves.
+
+```yaml
+build_skip:          # group_vars/all/build.yml
+  compile: true
+  static: true
+  max_age_days: 7    # output this old is rebuilt whatever its fingerprint says
+```
+
+Two things a fingerprint cannot see: the body of a PHP class that changes static
+output, such as an asset preprocessor (its `di.xml` registration is covered),
+and configuration held in the database, such as a store's locales. Turn a phase
+off for a release that changes either.
+
+**Static content is checked, not trusted.** With parallel jobs,
+`setup:static-content:deploy` exits 0 when a theme fails to compile part way:
+the error is printed, the theme is short of its files, and the release ships
+without its stylesheets. After every static deploy, the build reads the output
+for Magento's failure messages, requires every theme and locale to have
+reached all its files, and requires the files in `static_sentinels` to exist
+for each. Any miss stops the build before anything leaves the builder. A Hyva
+theme compiles `css/styles.css` rather than Luma's two stylesheets; set
+`static_sentinels` to match.
 
 ## Bundling the JavaScript
 
@@ -453,12 +616,14 @@ deployment.yml          seven plays: guard, preflight, build, upload, magento,
 verify-deploy.yml       asserts on the filesystem after a deploy
 audit.yml               checks the audit chain, writes an evidence bundle
 unlock.yml              clears a stale build lock
-test.yml                imports the eight offline suites
+rollback.yml            puts an earlier release back, under the guard
+test.yml                imports the nine offline suites
 tests/                  the suites, plus four symlinks -- see below
     test-vars-contract.yml  test-bundler.yml
     test-release-lock.yml   test-release-prune.yml
     test-outgoing-maintenance.yml  test-upgrade-gate.yml
     test-warmup.yml               test-controls.yml
+    test-build-skip.yml           build-skip-case.yml
     test_audit_log.py             (python, run by bin/check)
     group_vars -> ../group_vars   tasks -> ../tasks
     handlers   -> ../handlers     inventory -> ../inventory
@@ -476,13 +641,19 @@ inventory/<env>/        environment-SPECIFIC everything
 tasks/
     release-preflight.yml   resolves + VALIDATES; runs first, always
     disk-space.yml          room for a release, before anything is created
-    packaging/              git, deploy, php-build-steps, archive
+    packaging/              git, deploy, build reuse, static checks, bundle, archive
     deploy/                 upload, unarchive
-    magento-deploy/main.yml
+    magento-deploy/         the cutover, the upgrade gate, the health check
+    health/ rollback/       the health check, and the guarded rollback
+    forecast/               the setup:upgrade rehearsal
+    helpers/                puts files/helpers/ on the admin host
     release-lock/           acquire, release
     release-prune.yml  dora-event.yml
 handlers/main.yml       every handler; each play imports it
 files/                  release payloads releases.custom_files names
+files/helpers/          what runs on the hosts: the cache-isolated status
+                        commands, the rollback guard's database reads, the
+                        snapshot and rehearsal, the static content check
 
 bin/check               make check
 bin/check-structure     the five structural checks
@@ -554,7 +725,7 @@ evaluating it templates the values. Every suite imports preflight first.
 ## What the checks cover, and what they don't
 
 ```bash
-make check         # syntax, inventories, structure, the audit tool, eight offline suites, lint
+make check         # syntax, inventories, structure, the audit tool, nine offline suites, lint
 make docker-test   # the real thing, against six containers
 make docker-demo   # the same, building real Magento from GitHub
 make docker-down   # afterwards
@@ -567,7 +738,7 @@ make docker-down   # afterwards
 | `--syntax-check` × 3 | A bad include path, a malformed task, a bad play key |
 | Inventories × 4 | A hosts file where `builder`/`apps`/`admin`/`cron`/`varnish`/`web` don't all resolve. A deploy against a broken one reports "no hosts matched" and exits **0** |
 | `bin/check-structure` | A reintroduced `roles:`; a `notify` with no handler; an include path that only resolves at run time; **a parent-path reference**; **a stray `lookup('env', ...)`** |
-| `test.yml` | 266 tasks across eight suites: the variable contract and the precedence guard, the disk pre-flight, the `bundler_steps` table, the build lock, the prune against a real temporary filesystem, the replaced release's maintenance flag against another, and which status exit codes open a maintenance window or stop the cutover, and the warm-up against a local web server, and the audit, integrity, backup and approval controls against a real git repository and real signing keys |
+| `test.yml` | Nine suites: the variable contract and the precedence guard, the disk pre-flight, the `bundler_steps` table, the build lock, the prune against a real temporary filesystem, the replaced release's maintenance flag against another, and which status exit codes and unregistered themes open a maintenance window or stop the cutover, which file changes move which build fingerprint against a real git repository, and the warm-up against a local web server, and the audit, integrity, backup and approval controls against a real git repository and real signing keys |
 | yamllint / ansible-lint | Formatting. A broken tool reads as **SKIP**, never as a failure |
 
 Every structural check has been negative-tested -- a deliberate fault introduced
@@ -592,7 +763,7 @@ make deploy environment=staging
 ```
 
 `make check` will tell you if you forgot a key or added one the other
-environments don't have. Set every one of the fifteen explicitly, even where
+environments don't have. Set every one of the seventeen explicitly, even where
 the value is the same as everywhere else. An environment that omits a key falls
 back to whatever happens to be around, which is exactly the failure mode the
 shell profiles had.
@@ -611,23 +782,23 @@ an approval gate, a rollback target and a cutover that doesn't rebuild. That's a
 different playbook, and pretending one covers both is how a deploy goes live
 that nobody approved.
 
-**Also out:** the database. Nothing here runs a migration, a backup or a
-restore. `bin/magento setup:upgrade` is invoked as part of the Magento deploy
-step, but taking a snapshot first is your pipeline's job, not this playbook's.
+**Also out:** restoring the database. The deploy can take a backup before the
+cutover, rehearse `setup:upgrade`, and refuse a rollback the database has moved
+past, but putting a database back is a decision for a person, with the backup
+the audit log names.
 
 ## What this doesn't do
 
 Worth saying plainly, because a deploy tool that is vague about its edges is
 how people find out the hard way:
 
-- **No rollback command.** The previous releases are still on disk
-  (`teardown_releases_to_keep` keeps two) and the cutover is a symlink flip, so
-  rolling back is repointing that symlink and clearing caches. The deploy takes
-  the maintenance flag off the release it replaces, so the one you roll back to
-  is not in maintenance mode. A release replaced by an older version of this
+- **No database rollback.** `make rollback` and the automatic rollback move
+  the code, and refuse when the database has moved past the older release. What
+  undoes a database change is a restore from the backup the deploy recorded, and
+  that is yours to run. `teardown_releases_to_keep` keeps two releases on disk,
+  so there is one to go back to. A release replaced by an older version of this
   playbook still carries `var/.maintenance.flag`: run
-  `php bin/magento maint:disable` in it after repointing. There is no
-  `make rollback` that does it for you.
+  `php bin/magento maint:disable` in it after rolling back to it.
 - **No zero-downtime guarantee.** A release whose `setup:db:status` or
   `app:config:status` reports work to do takes a maintenance window, turned on in
   the incoming release before the flip and off after `setup:upgrade`. How long

@@ -1,0 +1,28 @@
+---
+###
+# Copies the deploy's PHP helpers to every admin host, where the Magento CLI
+# steps run. They sit beside the releases, outside any web root.
+###
+- name: Create the helpers directory
+  ansible.builtin.file:
+    path: "{{ deploy_helpers }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  run_once: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups.admin }}"
+
+- name: Copy the helpers
+  ansible.builtin.copy:
+    src: "helpers/{{ item.1 }}"
+    dest: "{{ deploy_helpers }}{{ item.1 }}"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  run_once: true
+  delegate_to: "{{ item.0 }}"
+  loop: "{{ groups.admin | product(['magento-isolated.php', 'magento-db-guard.php']) | list }}"

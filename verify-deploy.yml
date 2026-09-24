@@ -56,15 +56,20 @@
             # the subcommand. No \b anywhere in these patterns -- inside a Jinja
             # string literal that is a backspace, and matches nothing.
             - build_log is search('fake-composer\].*install.*--no-dev')
-            - build_log is search('s:d:c')
-            - build_log is search('s:static-content:d')
+            # With expect_reuse, the build before had the same inputs, so both
+            # phases must have been reused rather than run.
+            - (build_log is search('s:d:c')) != (expect_reuse | default(false) | bool)
+            - (build_log is search('s:static-content:d')) != (expect_reuse | default(false) | bool)
           fail_msg: >-
-            A build stage did not run. Log was:
-            {{ build_log }}
+            {{ 'A build phase ran although nothing it reads had changed'
+               if expect_reuse | default(false) | bool else 'A build stage did not run' }}.
+            Log was: {{ build_log }}
 
       # The suite runs the default bundler, so this is what an operator who
       # changes nothing gets. A magepack run would log `fake-docker] run`.
+      # Reused static content was bundled when it was built.
       - name: The bundler ran, and it was the configured one
+        when: not expect_reuse | default(false) | bool
         ansible.builtin.assert:
           that:
             - build_log is search('fake-manipulus\] build')

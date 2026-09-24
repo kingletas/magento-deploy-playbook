@@ -47,6 +47,87 @@ bundler_steps:
     - "{{ magepack_command }} bundle -m"
   none: []
 
+###
+# Reusing the previous build's compiled code and static content when nothing
+# either phase reads has changed. tasks/packaging/build-skip.yml says how the
+# fingerprints are taken and what they cannot see.
+#
+#   compile, static   false makes that phase run every time
+#   max_age_days      a phase's output this old is rebuilt whatever its
+#                     fingerprint says
+###
+build_skip:
+  compile: true
+  static: true
+  max_age_days: 7
+
+# Command strings as they run, so changing a flag changes the fingerprint.
+compile_command: "php bin/magento s:d:c"
+static_command: "php bin/magento s:static-content:d -j 5 -f"
+
+# Files every deployed theme and locale must have after static content deploy,
+# under pub/static/<area>/<vendor>/<theme>/<locale>/. Luma and Blank themes
+# compile these two stylesheets; a Hyva theme compiles css/styles.css instead.
+static_sentinels:
+  frontend:
+    - css/styles-m.css
+    - css/styles-l.css
+  adminhtml:
+    - css/styles.css
+
+# git pathspecs for what each phase reads. Compile reads everything except what
+# only the storefront's assets are made from; static reads those assets plus
+# what orders and registers them: config.php and module.xml fix the module
+# order the merged requirejs-config follows, and a di.xml can register an asset
+# preprocessor. composer.json, composer.lock and patches/ stand for vendor/.
+build_skip_compile_paths:
+  - "."
+  - ":(glob,exclude)**/view/**"
+  - ":(glob,exclude)**/i18n/**"
+  - ":(glob,exclude)**/web/**"
+  - ":(glob,exclude)lib/web/**"
+  - ":(glob,exclude)pub/**"
+  - ":(glob,exclude)**/*.md"
+  - ":(glob,exclude)**/*.phtml"
+  - ":(glob,exclude)**/*.less"
+  - ":(glob,exclude)**/*.css"
+  - ":(glob,exclude)**/*.js"
+  - ":(glob,exclude)**/*.html"
+  - ":(glob,exclude)**/*.csv"
+build_skip_static_paths:
+  - composer.json
+  - composer.lock
+  - ":(glob)patches/**"
+  - app/etc/config.php
+  - ":(glob)**/etc/module.xml"
+  - ":(glob)**/etc/di.xml"
+  - ":(glob)**/registration.php"
+  - ":(glob)**/theme.xml"
+  - ":(glob)**/view/**"
+  - ":(glob)**/i18n/**"
+  - ":(glob)**/web/**"
+  - ":(glob)app/design/**"
+  - ":(glob)lib/web/**"
+  - ":(glob)**/*.less"
+  - ":(glob)**/*.css"
+  - ":(glob)**/*.js"
+  - ":(glob)**/*.html"
+  - ":(glob)**/*.phtml"
+  - ":(glob)**/*.csv"
+  - magepack.config.js
+
+# Settings each phase's output depends on that are not files in the store.
+build_skip_compile_extra:
+  - "{{ compile_command }}"
+  - "php {{ php_version }}"
+build_skip_static_extra:
+  - "{{ static_command }}"
+  - "php {{ php_version }}"
+  - "bundler {{ bundler }}"
+  # Without the release's own path, which the bundler commands carry and which
+  # differs on every build.
+  - "{{ bundler_steps[bundler] | to_json | replace(wdir, '<release>') }}"
+
 # Run on the build host after the bundler: a theme's grunt task, a sourcemap
 # upload, anything this playbook does not know about.
 extra_build_steps: []

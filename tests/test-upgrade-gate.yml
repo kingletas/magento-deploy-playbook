@@ -14,6 +14,9 @@
     needs_work: {results: [{rc: 2, stdout: "Run 'setup:upgrade' to update your DB schema and data."}]}
     broken: {results: [{rc: 1, stdout: "No information is available: the Magento application is not installed."}]}
     no_admin: {}
+    no_new_themes: {results: [{rc: 0, stdout: '{"missing": []}'}]}
+    a_new_theme: {results: [{rc: 0, stdout: '{"missing": ["frontend/Acme/shop"]}'}]}
+    theme_check_broke: {results: [{rc: 65, stdout: ""}]}
     going_live: {complete: true}
     not_going_live: {complete: false}
   tasks:
@@ -42,6 +45,54 @@
         that:
           - upgrade_needed is sameas true
         fail_msg: "setup:db:status exited 2, and upgrade_needed is {{ upgrade_needed | to_json }}."
+
+    - name: A theme only the code knows means a window, although both commands pass
+      ansible.builtin.include_tasks: tasks/magento-deploy/upgrade-gate.yml
+      vars:
+        db_config: "{{ up_to_date }}"
+        app_config: "{{ up_to_date }}"
+        theme_config: "{{ a_new_theme }}"
+        releases: "{{ going_live }}"
+
+    - name: Assert a window for a new theme
+      ansible.builtin.assert:
+        that:
+          - upgrade_needed is sameas true
+        fail_msg: "The theme check named a new theme, and upgrade_needed is {{ upgrade_needed | to_json }}."
+
+    - name: No new theme means no window
+      ansible.builtin.include_tasks: tasks/magento-deploy/upgrade-gate.yml
+      vars:
+        db_config: "{{ up_to_date }}"
+        app_config: "{{ up_to_date }}"
+        theme_config: "{{ no_new_themes }}"
+        releases: "{{ going_live }}"
+
+    - name: Assert no window when the theme check finds nothing
+      ansible.builtin.assert:
+        that:
+          - upgrade_needed is sameas false
+        fail_msg: "The theme check found nothing, and upgrade_needed is {{ upgrade_needed | to_json }}."
+
+    - name: A theme check that fails stops the cutover
+      block:
+        - name: Run the gate over a failed theme check
+          ansible.builtin.include_tasks: tasks/magento-deploy/upgrade-gate.yml
+          vars:
+            db_config: "{{ up_to_date }}"
+            app_config: "{{ up_to_date }}"
+            theme_config: "{{ theme_check_broke }}"
+            releases: "{{ going_live }}"
+
+        - name: Fail, because the gate let a failed theme check through
+          ansible.builtin.fail:
+            msg: The gate accepted a theme check that exited 65.
+      rescue:
+        - name: Assert it was the gate that refused
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_task.name == 'Refuse to cut over when the release\'s status cannot be read'
+            fail_msg: "Failed at {{ ansible_failed_task.name }}, not at the gate's refusal."
 
     - name: Config work means a window
       ansible.builtin.include_tasks: tasks/magento-deploy/upgrade-gate.yml

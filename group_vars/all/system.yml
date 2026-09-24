@@ -13,3 +13,6 @@ php_service: "php{{ php_version }}-fpm"
 # use_existing_release - true when release_name= was passed, which reuses a
 # release instead of building one. Per-invocation, not per-environment.
 use_existing_release: "{{ (release_name_override | default('', true) | length) > 0 }}"
+
+# Where tasks/helpers/install.yml puts the deploy's PHP helpers on admin hosts.
+deploy_helpers: "{{ site.base }}deploy-helpers/"

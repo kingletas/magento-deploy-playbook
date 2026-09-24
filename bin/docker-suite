@@ -196,7 +196,7 @@ cmd_shell() { docker exec -it "mdp-${1:?usage: shell <builder|web1|web2|admin|cr
 cmd_reset() {
     for c in "${CONTAINERS[@]}"; do
         docker exec "${c}" sh -c '
-            rm -f /tmp/*.lock /tmp/magento-fake-needs-upgrade
+            rm -f /tmp/*.lock /tmp/magento-fake-needs-upgrade /tmp/magento-fake-patch-id /tmp/magento-fake-break-build /tmp/magento-fake-not-null /tmp/magento-fake-forecast-copy /tmp/magento-fake-break-static
             rm -rf /var/www/html/releases/* /var/www/html/archives/*
             rm -f /var/www/html/magento_current
         ' 2>/dev/null
@@ -227,6 +227,114 @@ set_needs_upgrade() {
 }
 
 cmd_down() { ( cd "${DOCKER_DIR}" && docker compose down -v --remove-orphans ); }
+
+cmd_rollback() {
+    [ -f "${PLAYBOOK_DIR}/inventory/docker/hosts" ] || die "no inventory yet: run 'bin/docker-suite up' first."
+    ( cd "${PLAYBOOK_DIR}" && ansible-playbook -i inventory/docker rollback.yml "$@" )
+}
+
+# What web1 serves, and which release its `current` points at.
+live_release() { docker exec mdp-web1 sh -c 'basename "$(readlink /var/www/html/magento_current)"'; }
+storefront_status() {
+    docker exec mdp-web1 python3 -c '
+import urllib.request, urllib.error
+try:
+    print(urllib.request.urlopen("http://127.0.0.1/", timeout=5).status)
+except urllib.error.HTTPError as e:
+    print(e.code)'
+}
+has_event_since() {  # has_event_since <line count before> <event>
+    tail -n +"$(( $1 + 1 ))" "${AUDIT_LOG_PATH}" | grep -q "\"event\": \"$2\""
+}
+
+# Every build here is of the same commit, so from the second on both phases are
+# reused. A scenario whose fake misbehaves at static deploy has to rebuild it.
+REBUILD_STATIC=(-e '{"build_skip": {"compile": true, "static": false, "max_age_days": 7}}')
+
+# setup:static-content:deploy's silent failure: with parallel jobs a theme can
+# stop part way with an error in the output and the command still exits 0.
+cmd_test_static_verify() {
+    local before lines
+    echo "########## a static deploy that failed but exited 0: the build must stop ##########"
+    before="$(live_release)"
+    lines="$(wc -l < "${AUDIT_LOG_PATH}")"
+    docker exec mdp-builder touch /tmp/magento-fake-break-static
+    cmd_deploy "${REBUILD_STATIC[@]}" && die "a build whose static content was incomplete went ahead."
+    docker exec mdp-builder rm -f /tmp/magento-fake-break-static
+    [ "$(live_release)" = "${before}" ] || die "the incomplete build went live anyway."
+    has_event_since "${lines}" build.succeeded && die "an incomplete build was recorded as build.succeeded."
+    ( cd "${PLAYBOOK_DIR}" && ansible-playbook -i inventory/docker unlock.yml >/dev/null ) || die "could not drop the lock the stopped build held."
+    echo "Static content: an incomplete theme behind an exit 0 stopped the build before anything left the builder."
+}
+
+# The lock rehearsal, with the real one swapped for a fake: the builder has no
+# MariaDB to rehearse on. A release whose setup:upgrade would copy a
+# five-million-row table must stop before anything goes live.
+cmd_test_forecast() {
+    local before lines
+    echo "########## a release that would block writes on a large table: it must stop before the cutover ##########"
+    before="$(live_release)"
+    lines="$(wc -l < "${AUDIT_LOG_PATH}")"
+    docker exec mdp-builder touch /tmp/magento-fake-forecast-copy
+    set_needs_upgrade touch
+    cmd_deploy \
+        -e '{"lock_forecast": {"enabled": true, "image": "mariadb:11.4", "stop_on_rows": 1000000, "required": true, "extra_tables": []}}' \
+        -e lock_rehearsal_command=/usr/local/bin/lock-rehearsal-fake \
+        && die "a release whose rehearsal found a blocking copy went ahead."
+    docker exec mdp-builder rm -f /tmp/magento-fake-forecast-copy
+    set_needs_upgrade "rm -f"
+    [ "$(live_release)" = "${before}" ] || die "the stopped release went live anyway."
+    [ "$(storefront_status)" = 200 ] || die "the site stopped answering 200 after a deploy that went nowhere."
+    has_event_since "${lines}" forecast.completed || die "the rehearsal left no forecast.completed record."
+    has_event_since "${lines}" cutover.started && die "the deploy started a cutover after its rehearsal said stop."
+    docker exec mdp-admin sh -c 'ls -d /tmp/lock-forecast-* 2>/dev/null' && die "the snapshot was left on the admin host."
+    docker exec mdp-builder sh -c 'ls -d /tmp/lock-forecast-* 2>/dev/null' && die "the snapshot was left on the builder."
+    ( cd "${PLAYBOOK_DIR}" && ansible-playbook -i inventory/docker unlock.yml >/dev/null ) || die "could not drop the lock the stopped deploy held."
+    echo "Forecast: a blocking copy over the limit stopped the deploy before the cutover, and the snapshot was deleted."
+}
+
+# The guarded rollback, both ways and from both entry points. Runs after the
+# audit check, because a rolled-back deploy rightly lacks cutover.succeeded.
+cmd_test_rollback() {
+    local before live lines
+    echo "########## roll back by hand, over a patch the target never saw ##########"
+    before="$(live_release)"
+    lines="$(wc -l < "${AUDIT_LOG_PATH}")"
+    cmd_rollback && die "the rollback went ahead over a data patch nobody accepted."
+    [ "$(live_release)" = "${before}" ] || die "a refused rollback still moved current."
+    has_event_since "${lines}" rollback.refused || die "the refused rollback left no rollback.refused record."
+    cmd_rollback -e 'rollback_accept_patches=Fake\Patch\Data\P1' \
+        || die "the rollback failed with the listed patch accepted."
+    [ "$(live_release)" != "${before}" ] || die "the accepted rollback did not move current."
+    [ "$(storefront_status)" = 200 ] || die "the release rolled back to does not answer 200."
+
+    echo ""
+    echo "########## deploy a broken release: it must roll itself back ##########"
+    before="$(live_release)"
+    lines="$(wc -l < "${AUDIT_LOG_PATH}")"
+    docker exec mdp-builder touch /tmp/magento-fake-break-build
+    cmd_deploy "${REBUILD_STATIC[@]}" && die "a deploy whose release failed its health check reported success."
+    docker exec mdp-builder rm -f /tmp/magento-fake-break-build
+    [ "$(live_release)" = "${before}" ] || die "the broken release was not rolled back: $(live_release) is live."
+    [ "$(storefront_status)" = 200 ] || die "the rolled-back site does not answer 200."
+    has_event_since "${lines}" deploy.rolled_back || die "the automatic rollback left no deploy.rolled_back record."
+    docker exec mdp-builder sh -c 'ls /tmp/*.lock 2>/dev/null' && die "the rolled-back deploy left the build lock behind."
+
+    echo ""
+    echo "########## deploy a broken release that moved the database: it must NOT roll back ##########"
+    lines="$(wc -l < "${AUDIT_LOG_PATH}")"
+    docker exec mdp-builder touch /tmp/magento-fake-break-build
+    set_needs_upgrade touch
+    cmd_deploy "${REBUILD_STATIC[@]}" && die "a deploy whose release failed its health check reported success."
+    docker exec mdp-builder rm -f /tmp/magento-fake-break-build
+    set_needs_upgrade "rm -f"
+    live="$(live_release)"
+    [ "${live}" != "${before}" ] || die "the rollback went ahead although the database had moved."
+    [ "$(storefront_status)" = 503 ] || die "the release that could not go back is not in maintenance: $(storefront_status)."
+    has_event_since "${lines}" rollback.refused || die "the refused rollback left no rollback.refused record."
+    "${PLAYBOOK_DIR}/bin/audit-log" verify --path "${AUDIT_LOG_PATH}" || die "the audit chain broke during the rollback runs."
+    echo "Rollback: refused over an unlisted patch, accepted with it named, automatic on a broken release, refused and in maintenance when the database moved."
+}
 
 # The deploy records what it did; this proves the record is intact and complete.
 cmd_audit() {
@@ -267,7 +375,7 @@ cmd_test() {
     cmd_deploy || die "the second deploy failed. bin/docker-suite logs shows what the fakes were asked to do."
     echo ""
     echo "########## verify ##########"
-    cmd_verify || die "the deploy completed but verification failed."
+    cmd_verify -e expect_reuse=true || die "the deploy completed but verification failed."
     # A third deploy whose status commands report work to do, so the maintenance
     # window and setup:upgrade are exercised as well as skipped.
     echo ""
@@ -277,11 +385,17 @@ cmd_test() {
     cmd_deploy || die "the upgrade deploy failed. bin/docker-suite logs shows what the fakes were asked to do."
     echo ""
     echo "########## verify the upgrade deploy ##########"
-    cmd_verify -e expect_upgrade=true || die "the upgrade deploy completed but verification failed."
+    cmd_verify -e expect_upgrade=true -e expect_reuse=true || die "the upgrade deploy completed but verification failed."
     set_needs_upgrade "rm -f"
     echo ""
     echo "########## audit trail ##########"
     cmd_audit || die "the audit trail is incomplete or has been changed." 
+    echo ""
+    cmd_test_static_verify
+    echo ""
+    cmd_test_forecast
+    echo ""
+    cmd_test_rollback
     echo ""
     echo "All good. Tear down with: bin/docker-suite down"
 }
@@ -290,6 +404,7 @@ case "${1:-}" in
     up)      shift; cmd_up "$@" ;;
     inventory) shift; cmd_inventory "$@" ;;
     deploy)  shift; cmd_deploy "$@" ;;
+    rollback) shift; cmd_rollback "$@" ;;
     verify)  shift; cmd_verify "$@" ;;
     audit)   shift; cmd_audit "$@" ;;
     test)    shift; cmd_test "$@" ;;

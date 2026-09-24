@@ -59,7 +59,7 @@ endif
 
 environments := $(notdir $(patsubst %/,%,$(wildcard inventory/*/)))
 
-.PHONY: help check lint venv collections test deploy verify unlock audit-verify evidence magepack-image \
+.PHONY: help check lint venv collections test deploy verify rollback unlock audit-verify evidence magepack-image \
         docker-up docker-test docker-demo docker-deploy docker-verify docker-reset \
         docker-logs docker-down
 
@@ -125,6 +125,11 @@ evidence:
 	$(require_environment)
 	@test -n "$(release)" || { echo "ERROR: release= is required, e.g. make evidence environment=staging release=20260915_1789500000_staging"; exit 2; }
 	$(ANSIBLE_PLAYBOOK) -i inventory/$(environment) audit.yml --extra-var "release='$(release)'" $(EXTRA)
+
+## rollback: point current back at the release before the live one, or release= (needs environment=)
+rollback:
+	$(require_environment)
+	$(ANSIBLE_PLAYBOOK) -i inventory/$(environment) rollback.yml $(if $(release),--extra-var "release='$(release)'") $(EXTRA)
 
 ## unlock: remove a stale build lock left by a hard-failed deploy (needs environment=)
 unlock:

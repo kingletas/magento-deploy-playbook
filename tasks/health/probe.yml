@@ -1,0 +1,60 @@
+---
+###
+# Asks every app host whether the live release serves pages, and sets
+# `health_failed_hosts` on every host to the ones that did not.
+#
+# Each host requests its own web server, bypassing Varnish and any load
+# balancer, so a cached page cannot answer for a broken release. The paths are
+# storefront pages rather than pub/health_check.php: that script checks the
+# database and cache answer, but never passes through the front controller, so
+# a host refusing every page because its code and database disagree still
+# passes it. So does a host in maintenance mode.
+#
+# A path passes on a 2xx. A redirect fails it, because the page it leads to was
+# not checked.
+###
+- name: Request the storefront paths from each app host's own web server
+  ansible.builtin.uri:
+    url: "{{ health.url }}{{ item | regex_replace('^/', '') }}"
+    headers: "{{ {'Host': health.host} if health.host | length > 0 else {} }}"
+    follow_redirects: none
+    timeout: "{{ health.timeout }}"
+  loop: "{{ health.paths }}"
+  register: health_responses
+  until: (health_responses.status | default(-1) | int) in range(200, 300)
+  retries: "{{ health.attempts - 1 }}"
+  delay: "{{ health.delay }}"
+  failed_when: false
+  become: false
+  when: inventory_hostname in groups.apps
+
+# A connection that never answered has status -1, which fails like any non-2xx.
+- name: Name the paths this app host failed
+  ansible.builtin.set_fact:
+    health_failed_paths: >-
+      {{ health_responses.results
+         | rejectattr('skipped', 'defined')
+         | rejectattr('status', 'in', range(200, 300) | list)
+         | map(attribute='item') | list }}
+  when: inventory_hostname in groups.apps
+
+- name: Collect the app hosts that failed, on every host
+  ansible.builtin.set_fact:
+    health_failed_hosts: >-
+      {{ groups.apps | intersect(ansible_play_hosts_all)
+         | map('extract', hostvars)
+         | selectattr('health_failed_paths', 'defined')
+         | rejectattr('health_failed_paths', 'equalto', [])
+         | map(attribute='inventory_hostname') | list }}
+
+- name: Report each app host that failed, and on which paths
+  ansible.builtin.debug:
+    msg: "{{ item }} did not answer 2xx on {{ hostvars[item].health_failed_paths | join(', ') }}"
+  loop: "{{ health_failed_hosts }}"
+  run_once: true
+
+- name: Report a clean health check
+  ansible.builtin.debug:
+    msg: "Every app host answered 2xx on {{ health.paths | join(', ') }}."
+  run_once: true
+  when: health_failed_hosts | length == 0

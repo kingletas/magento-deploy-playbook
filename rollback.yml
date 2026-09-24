@@ -1,0 +1,180 @@
+---
+###
+# Points `current` back at an earlier release, when that release's code still
+# fits the database. The same guard as a deploy's automatic rollback decides.
+#
+#   make rollback environment=staging                      the release before the live one
+#   make rollback environment=staging release=<name>       a named release
+#
+# Overrides, each accepting exactly one refusal the guard printed. See
+# tasks/rollback/guard.yml:
+#   rollback_despite_database=true
+#   rollback_accept_patches='<every patch name listed>'
+#   rollback_accept_columns='<every column listed>'
+###
+- name: Check this is not the shipped template
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Refuse the example inventory
+      ansible.builtin.import_tasks: tasks/template-guard.yml
+
+- name: Roll back to an earlier release
+  hosts: web
+  become: true
+  gather_facts: false
+  handlers:
+    - name: Playbook handlers
+      ansible.builtin.import_tasks: handlers/main.yml
+  tasks:
+    - name: Check the health check settings
+      ansible.builtin.import_tasks: tasks/health/validate.yml
+
+    - name: Resolve who is rolling back
+      ansible.builtin.import_tasks: tasks/audit/actor.yml
+
+    - name: Set the builder, which holds the lock
+      ansible.builtin.set_fact:
+        builder: "{{ groups.builder | first }}"
+      run_once: true
+
+    - name: Take the build lock, so no deploy runs meanwhile
+      ansible.builtin.import_tasks: tasks/release-lock/acquire.yml
+
+    - name: Roll back, and drop the lock whatever happens
+      block:
+        - name: Read which release is live
+          ansible.builtin.stat:
+            path: "{{ releases.current }}"
+            follow: false
+          register: rollback_current
+
+        - name: Refuse when nothing is live
+          ansible.builtin.assert:
+            that:
+              - rollback_current.stat.islnk | default(false)
+            fail_msg: "{{ releases.current }} is not a symlink on {{ inventory_hostname }}, so there is no live release to roll back from."
+
+        - name: List this environment's releases
+          ansible.builtin.find:
+            paths: "{{ releases.path }}"
+            file_type: directory
+            use_regex: true
+            patterns: ['^[0-9]{8}_[0-9]{10}_(?:.+_)?{{ suffix }}$']
+          register: rollback_releases
+          run_once: true
+
+        # Names lead with date and epoch, so sorting by name is chronological.
+        - name: Choose the release to go back to
+          ansible.builtin.set_fact:
+            rollback_live: "{{ rollback_current.stat.lnk_source }}"
+            rollback_older: >-
+              {{ rollback_releases.files | map(attribute='path') | map('basename') | sort
+                 | select('lt', rollback_current.stat.lnk_source | basename) | list }}
+          run_once: true
+
+        - name: Name the target's path
+          ansible.builtin.set_fact:
+            rollback_target: >-
+              {{ (releases.path ~ release) if release | default('') | length > 0 else
+                 ((releases.path ~ rollback_older | last) if rollback_older | length > 0 else '') }}
+          run_once: true
+
+        - name: Refuse a target that is not an earlier release of this environment
+          ansible.builtin.assert:
+            that:
+              - rollback_target | length > 0
+              - (rollback_target | basename) in (rollback_releases.files | map(attribute='path') | map('basename') | list)
+              - (rollback_target | basename) != (rollback_live | basename)
+            fail_msg: >-
+              {{ ('No release ' ~ release ~ ' of this environment is on ' ~ inventory_hostname)
+                 if release | default('') | length > 0 else
+                 'There is no release older than the live one to go back to.' }}
+              The releases here: {{ rollback_releases.files | map(attribute='path') | map('basename') | sort | join(', ') }}.
+          run_once: true
+
+        - name: Name the release for the audit log
+          ansible.builtin.set_fact:
+            release_id: "{{ rollback_target | basename }}"
+          run_once: true
+
+        - name: Read the mark the target went live with
+          ansible.builtin.slurp:
+            src: "{{ rollback_target }}/.deploy-db-mark.json"
+          register: rollback_mark_file
+          run_once: true
+          delegate_to: "{{ groups.admin | first }}"
+          failed_when: false
+
+        - name: Keep the mark, or none
+          ansible.builtin.set_fact:
+            rollback_mark: >-
+              {{ (rollback_mark_file.content | b64decode | from_json)
+                 if rollback_mark_file.content is defined else {} }}
+          run_once: true
+
+        - name: "Audit: record the rollback request"
+          ansible.builtin.include_tasks: tasks/audit/record.yml
+          vars:
+            audit_event: rollback.started
+            audit_detail:
+              from_release: "{{ rollback_live | basename }}"
+              to_release: "{{ rollback_target | basename }}"
+              has_mark: "{{ rollback_mark | length > 0 }}"
+
+        - name: Decide whether the target can go back
+          ansible.builtin.include_tasks: tasks/rollback/guard.yml
+
+        - name: "Audit: record the refusal"
+          ansible.builtin.include_tasks: tasks/audit/record.yml
+          vars:
+            audit_event: rollback.refused
+            audit_detail:
+              from_release: "{{ rollback_live | basename }}"
+              to_release: "{{ rollback_target | basename }}"
+              reasons: "{{ rollback_refusals }}"
+          when: not rollback_allowed | bool
+
+        - name: Refuse, saying why
+          ansible.builtin.fail:
+            msg: >-
+              Not rolled back to {{ rollback_target | basename }}; the live
+              release is unchanged. {{ rollback_refusals | join(' ') }}
+          run_once: true
+          when: not rollback_allowed | bool
+
+        - name: Point current at the target
+          ansible.builtin.include_tasks: tasks/rollback/repoint.yml
+
+        - name: Check the target serves pages
+          ansible.builtin.include_tasks: tasks/health/probe.yml
+          when: health.enabled | bool
+
+        - name: "Audit: record the rollback"
+          ansible.builtin.include_tasks: tasks/audit/record.yml
+          vars:
+            audit_event: deploy.rolled_back
+            audit_detail:
+              from_release: "{{ rollback_live | basename }}"
+              to_release: "{{ rollback_target | basename }}"
+              trigger: manual
+              recovered: "{{ health_failed_hosts | default([]) | length == 0 }}"
+              notes: "{{ rollback_notes }}"
+
+        - name: Fail when the target does not serve pages either
+          ansible.builtin.fail:
+            msg: >-
+              Rolled back to {{ rollback_target | basename }}, and it fails its
+              health check on {{ health_failed_hosts | join(', ') }}.
+          run_once: true
+          when: health_failed_hosts | default([]) | length > 0
+
+      always:
+        - name: Drop the build lock
+          ansible.builtin.file:
+            path: "{{ release_lock_file }}"
+            state: absent
+          delegate_to: "{{ builder }}"
+          run_once: true

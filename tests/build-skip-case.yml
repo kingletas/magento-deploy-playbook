@@ -1,0 +1,37 @@
+---
+###
+# One row of tests/test-build-skip.yml: change fp_case.file, stage it, and
+# assert which fingerprints moved against fp_start. Restores the file after.
+###
+- name: "Change {{ fp_case.file }}"
+  ansible.builtin.copy:
+    content: "second version of {{ fp_case.file }}\n"
+    dest: "{{ wdir }}/{{ fp_case.file }}"
+    mode: "0644"
+
+- name: Stage it
+  ansible.builtin.command:
+    argv: [git, add, "{{ fp_case.file }}"]
+    chdir: "{{ wdir }}"
+  changed_when: true
+
+- name: Fingerprint the changed tree
+  ansible.builtin.import_tasks: tasks/packaging/fingerprint.yml
+
+- name: Assert which fingerprints the change moved
+  ansible.builtin.assert:
+    that:
+      - (build_fingerprints.compile != fp_start.compile) == fp_case.compile
+      - (build_fingerprints.static != fp_start.static) == fp_case.static
+    fail_msg: >-
+      Changing {{ fp_case.file }} should
+      {{ '' if fp_case.compile else 'not ' }}move the compile fingerprint and
+      {{ '' if fp_case.static else 'not ' }}move the static one. Compile moved:
+      {{ build_fingerprints.compile != fp_start.compile }}; static moved:
+      {{ build_fingerprints.static != fp_start.static }}.
+
+- name: Put it back
+  ansible.builtin.command:
+    argv: [git, checkout, HEAD, --, "{{ fp_case.file }}"]
+    chdir: "{{ wdir }}"
+  changed_when: true

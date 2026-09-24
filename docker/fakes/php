@@ -1,8 +1,11 @@
 #!/bin/bash
 # Stands in for the PHP CLI, and it has to DISPATCH rather than blindly forward.
 #
-# Two callers invoke php with different scripts:
+# Four callers invoke php with different scripts:
 #   php bin/magento <subcommand>          the deploy tasks
+#   php .../magento-isolated.php ...      the same, run apart from the live cache
+#   php .../magento-db-guard.php ...      the rollback guard's database reads
+#   php .../magento-db-snapshot.php ...   the lock rehearsal's production snapshot
 #   php /usr/local/bin/composer help ...  the community.general.composer module,
 #                                         which shells out as `php composer ...`
 #
@@ -14,6 +17,18 @@ echo "[fake-php] ${script} $*" >> /tmp/build-log 2>/dev/null || true
 
 case "${script}" in
     *composer*) exec /usr/local/bin/composer "$@" ;;
+    # php magento-isolated.php <release> [--require-isolation] -- <command>
+    *magento-isolated*)
+        cd "${1:?}" || exit 66
+        while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
+        shift
+        exec /usr/local/bin/magento-fake "$@" ;;
+    *magento-db-guard*) exec /usr/local/bin/magento-db-guard-fake "$@" ;;
+    # php magento-db-snapshot.php <release> <stats.json> <dump.sql>
+    *magento-db-snapshot*)
+        printf '{"version": "11.4.10-MariaDB", "row_format": "dynamic", "tables": {}}\n' > "$2"
+        printf -- '-- fake schema dump\n' > "$3"
+        echo '{"tables": 0, "seeded": 0}' ;;
     *magento*)  exec /usr/local/bin/magento-fake "$@" ;;
     *)
         echo "[fake-php] unrecognised script: ${script}" >> /tmp/build-log 2>/dev/null || true

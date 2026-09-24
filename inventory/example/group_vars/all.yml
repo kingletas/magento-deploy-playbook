@@ -58,6 +58,56 @@ warmup:
   timeout: 30
   fail_below: 0
 
+
+# health - after the cutover, each app host requests these paths from its own
+# web server, bypassing Varnish, and a path passes only on a 2xx. When any
+# fails, the release it replaced goes back, provided that release's code still
+# fits the database; otherwise the live release goes into maintenance and the
+# deploy stops. Storefront paths rather than pub/health_check.php, which passes
+# on a host refusing every page. The cart section is never cached and reads the
+# database, so a page cache cannot answer for it.
+#   enabled   true or false
+#   url       each app host's own web server, a plain http URL ending in "/"
+#   host      the Host header the storefront answers to, "" for none
+#   paths     each starts with "/"
+#   timeout   seconds per request
+#   attempts  tries per path before it fails, 1 to 10
+#   delay     seconds between tries
+#   rollback  auto (put the previous release back) or never (stop, leave it)
+health:
+  enabled: true
+  url: http://127.0.0.1/
+  host: stage.example.com
+  paths:
+    - /
+    - /customer/section/load/?sections=cart
+  timeout: 10
+  attempts: 3
+  delay: 5
+  rollback: auto
+
+
+# lock_forecast - before a release whose setup:upgrade will run goes live, the
+# builder rehearses that setup:upgrade against a throwaway MariaDB loaded with
+# production's schema and the rows setup:upgrade reads, then asks that server
+# how it would run every schema statement: instantly, online, or as a table
+# copy that blocks writes. Each is sized with production's row counts. The
+# builder needs Docker and Python 3, the admin host mariadb-dump or mysqldump.
+#   enabled       true or false
+#   image         the MariaDB image, whose major.minor must be production's
+#   stop_on_rows  stop before the cutover when a blocking copy touches a table
+#                 with more rows than this. 0 only reports
+#   required      stop when the rehearsal itself cannot finish
+#   extra_tables  more tables whose rows your data patches read
+# A column the release narrows always stops the deploy until it is accepted by
+# name: pass forecast_accept_narrowing with the entries the run printed.
+lock_forecast:
+  enabled: true
+  image: mariadb:11.4
+  stop_on_rows: 1000000
+  required: false
+  extra_tables: []
+
 # audit - the append-only, hash-chained log of every deploy, on the control node.
 #   path      where the log lives. Keep it; `make audit-verify` checks it
 #   forward   a command and arguments that receive each record on stdin, such as

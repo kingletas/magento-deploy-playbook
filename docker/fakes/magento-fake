@@ -27,6 +27,41 @@ case "$1" in
     rm -f var/.maintenance.flag
     echo "Disabled maintenance mode"
     ;;
+  setup:upgrade)
+    # One patch per upgrade with work to do, which magento-db-guard-fake reads.
+    if needs_upgrade; then
+      echo $(( $(cat /tmp/magento-fake-patch-id 2>/dev/null || echo 0) + 1 )) > /tmp/magento-fake-patch-id
+    fi
+    echo "Magento installation complete."
+    ;;
+  s:d:c|setup:di:compile)
+    mkdir -p generated/code generated/metadata
+    date +%s > generated/code/compiled-at
+    echo "Generated code and dependency injection configuration successfully."
+    ;;
+  s:static-content:d|setup:static-content:deploy)
+    # A release the fake storefront answers 500 for, to exercise the rollback.
+    if [ -e /tmp/magento-fake-break-build ]; then
+      mkdir -p pub && touch pub/fake-broken
+    fi
+    # Output shaped like Magento's, so static-verify.py has something to read.
+    # /tmp/magento-fake-break-static makes the silent parallel failure: an
+    # error in the output, a theme short of its files, and still exit 0.
+    front=pub/static/frontend/Magento/luma/en_US admin=pub/static/adminhtml/Magento/backend/en_US
+    mkdir -p "${front}/css" "${admin}/css" var/view_preprocessed/pub/static
+    date +%s > pub/static/deployed_version.txt
+    echo "styles" > "${front}/css/styles-l.css" && echo "styles" > "${admin}/css/styles.css"
+    echo "adminhtml/Magento/backend/en_US          10/10           ============================ 100%"
+    if [ -e /tmp/magento-fake-break-static ]; then
+      echo "ParseError: missing closing \`}\` in _extend.less on line 1, column 8"
+      echo "Error happened during deploy process: Compilation from source: styles-m.less"
+      echo "frontend/Magento/luma/en_US             9/10            ==========================>- 90%"
+    else
+      echo "styles" > "${front}/css/styles-m.css"
+      echo "frontend/Magento/luma/en_US             10/10           ============================ 100%"
+    fi
+    echo "Execution time: 1"
+    ;;
   setup:db:status)
     if needs_upgrade; then
       echo "Run 'setup:upgrade' to update your DB schema and data."

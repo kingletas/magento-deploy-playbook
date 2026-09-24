@@ -1,0 +1,20 @@
+---
+###
+# Records this build's fingerprints beside it on the builder, once its archive
+# exists, for the next build's tasks/packaging/build-skip.yml to compare. A
+# build that failed earlier leaves no stamp, so the next one runs every phase.
+#
+# A reused phase keeps the time it was really built, not the time it was copied.
+###
+- name: Record the build fingerprints
+  ansible.builtin.copy:
+    content: >-
+      {{ {'compile': {'fingerprint': build_fingerprints.compile,
+                      'built_at': (build_skip_stamp.compile.built_at | int)
+                                  if build_skip_compile | bool else (build_skip_now | int)},
+          'static': {'fingerprint': build_fingerprints.static,
+                     'built_at': (build_skip_stamp.static.built_at | int)
+                                 if build_skip_static | bool else (build_skip_now | int)}}
+         | to_json }}
+    dest: "{{ wdir }}/.build-stamp.json"
+    mode: "0644"

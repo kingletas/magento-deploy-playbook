@@ -1,0 +1,207 @@
+---
+###
+# Rehearses this release's setup:upgrade before anything goes live, and stops
+# the deploy when what it would lock is more than lock_forecast allows. Runs
+# only when the upgrade gate decided setup:upgrade will run.
+#
+#   1. The admin host writes production's table sizes, and a dump of its schema
+#      with the rows setup:upgrade reads (files/helpers/magento-db-snapshot.php).
+#   2. The builder pulls both, and files/helpers/lock-rehearsal.py runs the
+#      built release's real setup:upgrade against a throwaway MariaDB of the
+#      same version, then classifies every schema statement by asking that
+#      server which algorithm it accepts.
+#   3. Both copies of the dump are deleted, whatever happened: it holds the
+#      configuration table.
+#
+# Sets `forecast` to the rehearsal's report.
+###
+- name: Rehearse, and always delete the dump
+  block:
+    - name: Make a private directory for the snapshot on the admin host
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: lock-forecast-
+      become: true
+      become_user: "{{ system.user }}"
+      register: forecast_admin_dir
+      run_once: true
+      delegate_to: "{{ groups.admin | first }}"
+
+    - name: Write production's table sizes and the schema dump
+      ansible.builtin.command:
+        argv: "{{ ['php', deploy_helpers ~ 'magento-db-snapshot.php', incoming_release,
+                   forecast_admin_dir.path ~ '/stats.json', forecast_admin_dir.path ~ '/dump.sql']
+                  + lock_forecast.extra_tables }}"
+      become: true
+      become_user: "{{ system.user }}"
+      register: forecast_snapshot
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ groups.admin | first }}"
+
+    # To the connecting user, whom the builder's rsync logs in as below.
+    - name: Hand the snapshot to the user the builder pulls as
+      ansible.builtin.file:
+        path: "{{ forecast_admin_dir.path }}"
+        owner: "{{ ansible_user | default(lookup('env', 'USER')) }}"
+        mode: u=rwX,go=
+        recurse: true
+      become: true
+      run_once: true
+      delegate_to: "{{ groups.admin | first }}"
+
+    - name: Make a private directory for the rehearsal on the builder
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: lock-forecast-
+      register: forecast_builder_dir
+      run_once: true
+      delegate_to: "{{ groups.builder | first }}"
+
+    # The builder already reaches every web host over SSH for the upload. This
+    # runs FOR the admin host, delegated to the builder, which makes the admin
+    # host the side rsync pulls from.
+    - name: Pull the snapshot to the builder
+      ansible.posix.synchronize:
+        mode: pull
+        src: "{{ forecast_admin_dir.path }}/"
+        dest: "{{ forecast_builder_dir.path }}/"
+        archive: false
+        checksum: true
+        verify_host: true
+        set_remote_user: true
+      become: false
+      delegate_to: "{{ groups.builder | first }}"
+      when: inventory_hostname == groups.admin | first
+
+    - name: Put the rehearsal on the builder
+      ansible.builtin.copy:
+        src: helpers/lock-rehearsal.py
+        dest: "{{ forecast_builder_dir.path }}/lock-rehearsal.py"
+        mode: "0700"
+      run_once: true
+      delegate_to: "{{ groups.builder | first }}"
+
+    - name: Rehearse setup:upgrade on a copy of production's schema
+      ansible.builtin.command:
+        argv: "{{ (lock_rehearsal_command | default('python3 ' ~ forecast_builder_dir.path ~ '/lock-rehearsal.py')).split()
+                  + ['--release', wdir, '--image', lock_forecast.image,
+                     '--dump', forecast_builder_dir.path ~ '/dump.sql',
+                     '--stats', forecast_builder_dir.path ~ '/stats.json',
+                     '--out', forecast_builder_dir.path ~ '/report.json'] }}"
+      register: forecast_run
+      changed_when: false
+      failed_when: false
+      run_once: true
+      delegate_to: "{{ groups.builder | first }}"
+
+    - name: Read the report
+      ansible.builtin.slurp:
+        src: "{{ forecast_builder_dir.path }}/report.json"
+      register: forecast_report_file
+      failed_when: false
+      run_once: true
+      delegate_to: "{{ groups.builder | first }}"
+
+  always:
+    - name: Delete the snapshot on the admin host
+      ansible.builtin.file:
+        path: "{{ forecast_admin_dir.path }}"
+        state: absent
+      become: true
+      run_once: true
+      delegate_to: "{{ groups.admin | first }}"
+      when: forecast_admin_dir.path is defined
+
+    - name: Delete the snapshot and the rehearsal on the builder
+      ansible.builtin.file:
+        path: "{{ forecast_builder_dir.path }}"
+        state: absent
+      run_once: true
+      delegate_to: "{{ groups.builder | first }}"
+      when: forecast_builder_dir.path is defined
+
+- name: Keep the report
+  ansible.builtin.set_fact:
+    forecast: >-
+      {{ (forecast_report_file.content | b64decode | from_json)
+         if forecast_report_file.content is defined else {} }}
+  run_once: true
+
+- name: Weigh it
+  ansible.builtin.set_fact:
+    forecast_blocking: >-
+      {{ forecast.statements | default([])
+         | selectattr('class', 'equalto', 'copy')
+         | selectattr('rows', 'number')
+         | selectattr('rows', 'gt', lock_forecast.stop_on_rows)
+         | list }}
+    forecast_narrowing: >-
+      {{ forecast.statements | default([])
+         | selectattr('narrowing', 'truthy')
+         | map(attribute='narrowing') | flatten | list }}
+    forecast_failed: "{{ forecast_run.rc | default(1) != 0 or forecast | length == 0 }}"
+    forecast_accepted_narrowing: >-
+      {{ forecast_accept_narrowing | default('') | split(';') | map('trim') | reject('equalto', '') | list }}
+  run_once: true
+
+- name: Report the rehearsal
+  ansible.builtin.debug:
+    msg:
+      - "Rehearsed on {{ forecast.rehearsal_version | default('?') }} for production's {{ forecast.production_version | default('?') }}."
+      - "{{ forecast.statements | default([]) | length }} schema statements:
+         {{ forecast.statements | default([]) | map(attribute='class') | community.general.counter | dictsort | map('join', ' ') | join(', ') }}."
+      - "Blocking table copies: {{ forecast.statements | default([]) | selectattr('class', 'equalto', 'copy')
+          | map(attribute='table') | zip(forecast.statements | default([]) | selectattr('class', 'equalto', 'copy') | map(attribute='rows'))
+          | map('join', ' at ') | join('; ') or 'none' }} rows."
+      - "Columns narrowed, which can cut data silently: {{ forecast_narrowing | join('; ') or 'none' }}."
+      - "{{ forecast.patches_applied | default([]) | length }} data patches and {{ forecast.data_statements | default(0) }} data statements, not costed: they ran on empty tables."
+      - "{{ 'The rehearsal did not finish: ' ~ (forecast_run.stderr | default('') | trim | truncate(600))
+           ~ (forecast.upgrade_output_tail | default('') | trim | truncate(600)) if forecast_failed else 'The rehearsal finished.' }}"
+  run_once: true
+
+- name: "Audit: record the rehearsal"
+  ansible.builtin.include_tasks: tasks/audit/record.yml
+  vars:
+    audit_event: forecast.completed
+    audit_detail:
+      finished: "{{ not forecast_failed }}"
+      statements: "{{ forecast.statements | default([]) | length }}"
+      blocking: "{{ forecast_blocking | map(attribute='table') | list }}"
+      narrowing: "{{ forecast_narrowing }}"
+      patches: "{{ forecast.patches_applied | default([]) }}"
+
+- name: Stop before the cutover when the rehearsal could not finish
+  ansible.builtin.fail:
+    msg: >-
+      The setup:upgrade rehearsal did not finish, and lock_forecast.required is
+      on, so nothing has gone live. Its output is above.
+  run_once: true
+  when:
+    - forecast_failed | bool
+    - lock_forecast.required | bool
+
+- name: Stop before the cutover on a blocking copy of a large table
+  ansible.builtin.fail:
+    msg: >-
+      setup:upgrade would rebuild these tables with a copy that blocks writes:
+      {{ forecast_blocking | map(attribute='table') | zip(forecast_blocking | map(attribute='rows'))
+         | map('join', ' at ') | join('; ') }} rows, over lock_forecast.stop_on_rows
+      ({{ lock_forecast.stop_on_rows }}). Nothing has gone live. Split the change,
+      or deploy it in a window with stop_on_rows raised for that run.
+  run_once: true
+  when:
+    - lock_forecast.stop_on_rows | int > 0
+    - forecast_blocking | length > 0
+
+- name: Stop before the cutover on a narrowed column nobody accepted
+  ansible.builtin.fail:
+    msg: >-
+      setup:upgrade would narrow these columns, and Magento does not refuse data
+      that does not fit: it cuts it. {{ forecast_narrowing | join('; ') }}.
+      Nothing has gone live. Check the data, then pass
+      forecast_accept_narrowing with exactly these entries, separated by ";".
+  run_once: true
+  when:
+    - forecast_narrowing | length > 0
+    - (forecast_narrowing | sort) != (forecast_accepted_narrowing | sort)

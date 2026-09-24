@@ -1,0 +1,21 @@
+---
+###
+# Refuses malformed `lock_forecast` settings before anything is built.
+###
+- name: Validate the lock forecast settings
+  ansible.builtin.assert:
+    that:
+      - lock_forecast is mapping
+      - lock_forecast.enabled is boolean
+      - lock_forecast.image is string
+      - lock_forecast.stop_on_rows is integer and lock_forecast.stop_on_rows >= 0
+      - lock_forecast.required is boolean
+      - lock_forecast.extra_tables is sequence and lock_forecast.extra_tables is not string
+      - (not lock_forecast.enabled) or (lock_forecast.image is match('^[a-z0-9./_-]+:[0-9]+\\.[0-9]+'))
+    fail_msg: >-
+      `lock_forecast` in inventory/{{ env_name | default('<env>') }}/group_vars/all.yml
+      needs: enabled (true/false), image (a MariaDB image whose tag starts with
+      production's major.minor, such as mariadb:11.4), stop_on_rows (a whole
+      number, 0 to only report), required (true/false) and extra_tables (a
+      list). Got: {{ lock_forecast | default('<UNSET>') }}
+  run_once: true

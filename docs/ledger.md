@@ -46,7 +46,7 @@ Every line has these nine keys, whatever the event. The first five are the tool'
 
 ## The events, and what each one adds
 
-Eleven event names, in the order a deploy writes them. **One deploy writes at most ten**, because a backup either succeeds or fails, and a deploy that stops writes fewer. Each row's fields are in addition to the envelope.
+Sixteen event names, in the order a deploy writes them, then the two only `make rollback` writes. **One deploy writes at most eleven**, because a backup either succeeds or fails, a release either passes its health check or is rolled back, and a deploy that stops writes fewer. Each row's fields are in addition to the envelope.
 
 | Event | Written when | Extra fields |
 |---|---|---|
@@ -54,13 +54,20 @@ Eleven event names, in the order a deploy writes them. **One deploy writes at mo
 | `approval.verified` | a signed tag on the built commit checks out, and `approval.required` is on | `commit`, `tag`, `signer`, `signing_key` |
 | `build.succeeded` | the release archive is built and checksummed | `commit`, `artefact_sha256`, `builder` |
 | `cutover.started` | the hosts begin switching over | `maintenance_window`, `artefact_sha256` |
+| `forecast.completed` | the `setup:upgrade` rehearsal ran, which it does only when `lock_forecast.enabled` is on and the release has database work | `finished`, `statements`, `blocking`, `narrowing`, `patches` |
 | `backup.succeeded` | the backup command exits 0 and names something | `backup_id`, `reason` |
 | `backup.failed` | the backup command fails, and the deploy stops | `reason`, `error` |
 | `maintenance.enabled` | the maintenance page goes up in the incoming release | none |
-| `cutover.succeeded` | the new release is the one serving | `maintenance_window`, `setup_upgrade_ran`, `backup_id` |
+| `health.failed` | an app host did not answer 2xx on a health check path after the cutover | `hosts`, `paths`, `rollback` |
+| `rollback.refused` | the release being rolled back to does not fit the database, so it was not put back | `from_release`, `to_release`, `reasons`, and `backup_id` after a deploy |
+| `deploy.rolled_back` | the release before is live again, after a failed health check or by `make rollback` | `from_release`, `to_release`, `trigger`, `recovered`, `notes` |
+| `cutover.succeeded` | the new release is the one serving and passed its health check | `maintenance_window`, `setup_upgrade_ran`, `backup_id` |
 | `warmup.completed` | the warm-up finishes, whatever it achieved | `requested`, `ok`, `percent` |
 | `deploy.finished` | the playbook reaches its end | `outcome` |
 | `deploy.verified` | `make verify` passes, which is a separate run | `outcome`, `upgrade_expected` |
+| `rollback.started` | `make rollback` has chosen the release to go back to | `from_release`, `to_release`, `has_mark` |
+
+`deploy.finished` carries `outcome: rolled_back` when the health check failed and the release before was put back. A `rollback.refused` from `make rollback` is also written by it, and `deploy.rolled_back` names `trigger: manual`.
 
 What each extra field means:
 
@@ -81,7 +88,20 @@ What each extra field means:
 | `setup_upgrade_ran` | boolean | Whether `setup:upgrade` ran inside the window |
 | `requested`, `ok` | integer | Pages the warm-up asked for, and pages that answered |
 | `percent` | number | `ok` as a percentage of `requested` |
-| `outcome` | string | `success` on `deploy.finished`, `passed` on `deploy.verified` |
+| `outcome` | string | `success` or `rolled_back` on `deploy.finished`, `passed` on `deploy.verified` |
+| `finished` | boolean | Whether the `setup:upgrade` rehearsal ran to the end. When it did not, its other fields are empty |
+| `statements` | integer | Schema statements the rehearsed `setup:upgrade` sent, triggers included |
+| `blocking` | list | Tables a statement would rebuild with a copy that blocks writes, over `lock_forecast.stop_on_rows` |
+| `narrowing` | list | Columns a statement would make smaller or stricter, as `table.column: old to new` |
+| `patches` | list | Data patches the rehearsal applied. Their cost is not measured: they ran on empty tables |
+| `hosts`, `paths` | list | The app hosts that failed the health check, and the paths it requested |
+| `rollback` | string | `health.rollback` when the check failed: `auto` or `never` |
+| `from_release`, `to_release` | string | The release that was live, and the one a rollback went, or would have gone, back to |
+| `reasons` | list | Why the rollback guard refused, one sentence each |
+| `trigger` | string | `health_check` for an automatic rollback, `manual` for `make rollback` |
+| `recovered` | boolean | Whether the release put back passed the health check |
+| `notes` | list | What a rollback leaves as it is: recurring setup scripts only the newer release has, and configuration written since |
+| `has_mark` | boolean | Whether the release being gone back to recorded the database it went live with. Without one, the guard compares patches by class name, which also lists patches of modules removed long ago |
 | `upgrade_expected` | boolean | What the verification was told to expect, so a reader knows which assertions ran |
 
 ## A record, whole

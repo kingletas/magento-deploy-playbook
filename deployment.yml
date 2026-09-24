@@ -57,6 +57,9 @@
     - name: Archive the release
       ansible.builtin.import_tasks: tasks/packaging/archive.yml
 
+    - name: Record what this build was made from, for the next one
+      ansible.builtin.import_tasks: tasks/packaging/stamp.yml
+
   tasks:
     - name: Read the built commit
       ansible.builtin.command: "git rev-parse HEAD"
@@ -128,9 +131,9 @@
     - name: "DORA: record the deploy"
       ansible.builtin.include_tasks: tasks/dora-event.yml
       vars:
-        dora_phase: cutover.succeeded
+        dora_phase: "{{ 'cutover.rolled_back' if deploy_rolled_back | default(false) | bool else 'cutover.succeeded' }}"
         dora_extra:
-          outcome: success
+          outcome: "{{ 'failure' if deploy_rolled_back | default(false) | bool else 'success' }}"
 
     - name: "Audit: record the cutover"
       ansible.builtin.include_tasks: tasks/audit/record.yml
@@ -140,6 +143,7 @@
           maintenance_window: "{{ upgrade_needed | bool }}"
           setup_upgrade_ran: "{{ upgrade_needed | bool }}"
           backup_id: "{{ backup_id | default('') }}"
+      when: not deploy_rolled_back | default(false) | bool
 
 - name: Clean old releases on the web hosts and the builder
   hosts: "web builder"
@@ -162,7 +166,7 @@
       vars:
         audit_event: deploy.finished
         audit_detail:
-          outcome: success
+          outcome: "{{ 'rolled_back' if hostvars[groups.web[0]].deploy_rolled_back | default(false) | bool else 'success' }}"
 
   handlers:
     - name: Playbook handlers
@@ -176,3 +180,19 @@
   tasks:
     - name: Fail when too few warm-up requests answered 2xx
       ansible.builtin.import_tasks: tasks/warmup/verdict.yml
+
+# After the prune and the lock, so a rolled-back deploy leaves neither behind,
+# and last, so the run still ends red.
+- name: Fail a deploy that was rolled back
+  hosts: web
+  become: false
+  gather_facts: false
+  tasks:
+    - name: Fail, naming the release that is live again
+      ansible.builtin.fail:
+        msg: >-
+          The new release failed its health check and the previous release,
+          {{ rollback_target | basename }}, is live again. The failed release is
+          still on disk for a look: {{ incoming_release }}.
+      run_once: true
+      when: deploy_rolled_back | default(false) | bool

@@ -1,0 +1,140 @@
+---
+###
+# tasks/packaging/fingerprint.yml, run for real against a temporary git
+# repository: changes one file at a time and asserts which phase's fingerprint
+# moved. A phase whose fingerprint does not move when its input changes would
+# ship a stale build, so every row below is a case that must hold.
+#
+#   ansible-playbook -i inventory/test tests/test-build-skip.yml
+###
+- name: Build fingerprints
+  hosts: builder
+  connection: local
+  gather_facts: false
+  vars:
+    fp_root: "/tmp/magento-deploy-playbook-fingerprint-test"
+    wdir: "{{ fp_root }}/store"
+    releases:
+      shared: "{{ fp_root }}/shared/"
+    fixture_files:
+      - app/code/Acme/Shop/Model/Price.php
+      - app/code/Acme/Shop/etc/di.xml
+      - app/code/Acme/Shop/etc/module.xml
+      - app/code/Acme/Shop/etc/extension_attributes.xml
+      - app/code/Acme/Shop/registration.php
+      - app/code/Acme/Shop/view/frontend/templates/price.phtml
+      - app/code/Acme/Shop/view/frontend/web/js/price.js
+      - app/code/Acme/Shop/i18n/en_US.csv
+      - app/design/frontend/Acme/theme/theme.xml
+      - app/design/frontend/Acme/theme/web/css/source/_extend.less
+      - app/etc/config.php
+      - composer.json
+      - composer.lock
+      - patches/fix-cart.patch
+      - README.md
+    # file changed => [compile moves, static moves]
+    cases:
+      - {file: app/code/Acme/Shop/Model/Price.php, compile: true, static: false}
+      - {file: app/code/Acme/Shop/etc/di.xml, compile: true, static: true}
+      - {file: app/code/Acme/Shop/etc/module.xml, compile: true, static: true}
+      - {file: app/code/Acme/Shop/etc/extension_attributes.xml, compile: true, static: false}
+      - {file: app/code/Acme/Shop/registration.php, compile: true, static: true}
+      - {file: app/code/Acme/Shop/view/frontend/templates/price.phtml, compile: false, static: true}
+      - {file: app/code/Acme/Shop/view/frontend/web/js/price.js, compile: false, static: true}
+      - {file: app/code/Acme/Shop/i18n/en_US.csv, compile: false, static: true}
+      - {file: app/design/frontend/Acme/theme/theme.xml, compile: true, static: true}
+      - {file: app/design/frontend/Acme/theme/web/css/source/_extend.less, compile: false, static: true}
+      - {file: app/etc/config.php, compile: true, static: true}
+      - {file: composer.json, compile: true, static: true}
+      - {file: composer.lock, compile: true, static: true}
+      - {file: patches/fix-cart.patch, compile: true, static: true}
+      - {file: README.md, compile: false, static: false}
+  tasks:
+    - name: Reset the fixture repository
+      ansible.builtin.file:
+        path: "{{ fp_root }}"
+        state: absent
+
+    - name: Create the fixture directories
+      ansible.builtin.file:
+        path: "{{ (wdir ~ '/' ~ item) | dirname }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ fixture_files }}"
+
+    - name: Write the fixture files
+      ansible.builtin.copy:
+        content: "first version of {{ item }}\n"
+        dest: "{{ wdir }}/{{ item }}"
+        mode: "0644"
+      loop: "{{ fixture_files }}"
+
+    - name: Commit them
+      ansible.builtin.shell:
+        cmd: >-
+          git init -q && git add -A &&
+          git -c user.email=suite@example.invalid -c user.name=suite commit -qm fixture
+        chdir: "{{ wdir }}"
+      changed_when: true
+
+    - name: Take the starting fingerprints
+      ansible.builtin.import_tasks: tasks/packaging/fingerprint.yml
+
+    - name: Keep them
+      ansible.builtin.set_fact:
+        fp_start: "{{ build_fingerprints }}"
+
+    - name: Check the same tree fingerprints the same twice
+      ansible.builtin.import_tasks: tasks/packaging/fingerprint.yml
+
+    - name: Assert a fingerprint is stable
+      ansible.builtin.assert:
+        that:
+          - build_fingerprints == fp_start
+          - fp_start.compile | length == 64
+          - fp_start.static | length == 64
+          - fp_start.compile != fp_start.static
+        fail_msg: "Fingerprints moved with nothing changed: {{ fp_start }} then {{ build_fingerprints }}"
+
+    # Every build is in a directory of its own, so a path in a fingerprint
+    # would make every build look new.
+    - name: Copy the repository to another path
+      ansible.builtin.command:
+        argv: [cp, -a, "{{ wdir }}", "{{ fp_root }}/elsewhere"]
+        creates: "{{ fp_root }}/elsewhere"
+
+    - name: Fingerprint the same tree at the other path
+      ansible.builtin.import_tasks: tasks/packaging/fingerprint.yml
+      vars:
+        wdir: "{{ fp_root }}/elsewhere"
+
+    - name: Assert the path is not part of the fingerprint
+      ansible.builtin.assert:
+        that:
+          - build_fingerprints == fp_start
+        fail_msg: >-
+          The same tree fingerprints differently at another path, so no build
+          would ever be reused: {{ fp_start }} against {{ build_fingerprints }}.
+
+    - name: Change one file at a time and check which fingerprint moves
+      ansible.builtin.include_tasks: build-skip-case.yml
+      loop: "{{ cases }}"
+      loop_control:
+        loop_var: fp_case
+
+    - name: Check a changed compile command moves only the compile fingerprint
+      ansible.builtin.import_tasks: tasks/packaging/fingerprint.yml
+      vars:
+        compile_command: "php bin/magento s:d:c --something-new"
+
+    - name: Assert the command is part of the compile fingerprint
+      ansible.builtin.assert:
+        that:
+          - build_fingerprints.compile != fp_start.compile
+          - build_fingerprints.static == fp_start.static
+        fail_msg: "Changing compile_command did not move the compile fingerprint alone."
+
+    - name: Remove the fixture repository
+      ansible.builtin.file:
+        path: "{{ fp_root }}"
+        state: absent

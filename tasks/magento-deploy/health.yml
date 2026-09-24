@@ -1,0 +1,137 @@
+---
+###
+# After the cutover: checks the new release serves pages and, when it does not,
+# puts the release it replaced back, provided that release's code still matches
+# the database. Sets `deploy_rolled_back` on every host.
+#
+#   outgoing_link   the `current` symlink as it was before the flip, from
+#                   tasks/magento-deploy/main.yml.
+#
+# The rollback is refused rather than attempted when the deploy moved the
+# database past the old code; tasks/rollback/guard.yml says why. The run then
+# puts the live release into maintenance, because a maintenance page tells a
+# customer to come back and a failing page does not, and stops naming the
+# backup taken before the deploy.
+###
+- name: Check the new release serves pages
+  ansible.builtin.include_tasks: tasks/health/probe.yml
+
+- name: Keep what the check found
+  ansible.builtin.set_fact:
+    health_failed_after_cutover: "{{ health_failed_hosts }}"
+    rollback_target: >-
+      {{ outgoing_link.stat.lnk_source | default('')
+         if outgoing_link.stat.islnk | default(false) else '' }}
+
+- name: "Audit: record the failed health check"
+  ansible.builtin.include_tasks: tasks/audit/record.yml
+  vars:
+    audit_event: health.failed
+    audit_detail:
+      hosts: "{{ health_failed_after_cutover }}"
+      paths: "{{ health.paths }}"
+      rollback: "{{ health.rollback }}"
+  when: health_failed_after_cutover | length > 0
+
+- name: Stop with the new release live, because rollback is off
+  ansible.builtin.fail:
+    msg: >-
+      The new release failed its health check on
+      {{ health_failed_after_cutover | join(', ') }} and health.rollback is
+      "never", so it is still live. Roll back with
+      make rollback environment={{ env_name }} once you have looked.
+  run_once: true
+  when:
+    - health_failed_after_cutover | length > 0
+    - health.rollback == 'never'
+
+- name: Stop with the new release live, because there is nothing to go back to
+  ansible.builtin.fail:
+    msg: >-
+      The new release failed its health check on
+      {{ health_failed_after_cutover | join(', ') }}, and it replaced no
+      earlier release, so there is none to roll back to.
+  run_once: true
+  when:
+    - health_failed_after_cutover | length > 0
+    - rollback_target | length == 0
+
+- name: Decide whether the release it replaced can go back
+  ansible.builtin.include_tasks: tasks/rollback/guard.yml
+  vars:
+    rollback_mark: "{{ db_mark_before_upgrade }}"
+    rollback_live: "{{ incoming_release }}"
+  when: health_failed_after_cutover | length > 0
+
+- name: "Audit: record the refused rollback"
+  ansible.builtin.include_tasks: tasks/audit/record.yml
+  vars:
+    audit_event: rollback.refused
+    audit_detail:
+      from_release: "{{ release_id }}"
+      to_release: "{{ rollback_target | basename }}"
+      reasons: "{{ rollback_refusals }}"
+      backup_id: "{{ backup_id | default('') }}"
+  when:
+    - health_failed_after_cutover | length > 0
+    - not rollback_allowed | bool
+
+- name: Put the live release into maintenance, since it cannot go back
+  ansible.builtin.command: "php bin/magento maint:enable"
+  args:
+    chdir: "{{ releases.current }}"
+  become: true
+  become_user: "{{ system.user }}"
+  when:
+    - health_failed_after_cutover | length > 0
+    - not rollback_allowed | bool
+
+- name: Stop in maintenance, because rolling back would be worse
+  ansible.builtin.fail:
+    msg: >-
+      The new release failed its health check on
+      {{ health_failed_after_cutover | join(', ') }} and was NOT rolled back:
+      {{ rollback_refusals | join('; ') }}. The site is in maintenance mode.
+      {{ ('The backup taken before this deploy is ' ~ backup_id ~ '.')
+         if backup_id | default('') | length > 0 else
+         'This deploy took no backup.' }}
+  run_once: true
+  when:
+    - health_failed_after_cutover | length > 0
+    - not rollback_allowed | bool
+
+- name: Put the release this deploy replaced back
+  ansible.builtin.include_tasks: tasks/rollback/repoint.yml
+  when: health_failed_after_cutover | length > 0
+
+- name: Check the release put back serves pages
+  ansible.builtin.include_tasks: tasks/health/probe.yml
+  when: health_failed_after_cutover | length > 0
+
+- name: Record the rollback on every host
+  ansible.builtin.set_fact:
+    deploy_rolled_back: "{{ health_failed_after_cutover | length > 0 }}"
+
+- name: "Audit: record the rollback"
+  ansible.builtin.include_tasks: tasks/audit/record.yml
+  vars:
+    audit_event: deploy.rolled_back
+    audit_detail:
+      from_release: "{{ release_id }}"
+      to_release: "{{ rollback_target | basename }}"
+      trigger: health_check
+      recovered: "{{ health_failed_hosts | length == 0 }}"
+      notes: "{{ rollback_notes }}"
+  when: deploy_rolled_back | bool
+
+- name: Stop when the release put back fails too
+  ansible.builtin.fail:
+    msg: >-
+      The new release failed its health check and was rolled back to
+      {{ rollback_target | basename }}, which ALSO fails on
+      {{ health_failed_hosts | join(', ') }}. The fault is probably not in
+      the release: check the web servers, the database and the cache.
+  run_once: true
+  when:
+    - deploy_rolled_back | bool
+    - health_failed_hosts | length > 0

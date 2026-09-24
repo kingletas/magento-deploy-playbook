@@ -6,8 +6,13 @@
 #                           app:config:status, read from the incoming release.
 #   releases.complete       false never migrates, because nothing goes live.
 #
+#   theme_config            the looped register from magento-db-guard.php
+#                           themes: JSON naming the themes in the code that the
+#                           theme table lacks. Optional; absent reads as none.
+#
 # Both commands exit 0 when up to date and 2 when there is work to do. Anything
-# else means the status could not be read, and the cutover stops here.
+# else means the status could not be read, and the cutover stops here. So does a
+# theme check that ran and failed.
 ###
 
 # Looped registers are dicts with a .results list. `| first | default({})` keeps
@@ -17,18 +22,30 @@
     upgrade_gate_db_rc: "{{ (db_config.results | default([]) | first | default({})).rc | default('missing') }}"
     upgrade_gate_config_rc: "{{ (app_config.results | default([]) | first | default({})).rc | default('missing') }}"
 
+- name: Read the theme check
+  ansible.builtin.set_fact:
+    upgrade_gate_theme_rc: "{{ (theme_config.results | default([]) | first | default({})).rc | default(0) }}"
+    upgrade_gate_missing_themes: >-
+      {{ ((theme_config.results | default([]) | first | default({})).stdout | default('{}', true) | from_json).missing | default([])
+         if (theme_config.results | default([]) | first | default({})).rc | default(0) == 0 else [] }}
+
 - name: Refuse to cut over when the release's status cannot be read
   ansible.builtin.assert:
     that:
       - upgrade_gate_db_rc | string in ['0', '2']
       - upgrade_gate_config_rc | string in ['0', '2']
+      - upgrade_gate_theme_rc | string == '0'
     fail_msg: >-
-      setup:db:status exited {{ upgrade_gate_db_rc }} and app:config:status
-      exited {{ upgrade_gate_config_rc }} in the incoming release. Only 0 (up to
-      date) and 2 (work to do) are answers, so whether this release needs a
+      setup:db:status exited {{ upgrade_gate_db_rc }}, app:config:status
+      exited {{ upgrade_gate_config_rc }} and the theme check exited
+      {{ upgrade_gate_theme_rc }} in the incoming release. Only 0 (up to date)
+      and 2 (work to do) are answers, and the theme check must exit 0, so whether this release needs a
       maintenance window is unknown. Nothing has gone live; run both commands in
       the release to see why.
 
 - name: Decide whether the release needs setup:upgrade
   ansible.builtin.set_fact:
-    upgrade_needed: "{{ (releases.complete | bool) and ((upgrade_gate_db_rc | string == '2') or (upgrade_gate_config_rc | string == '2')) }}"
+    upgrade_needed: >-
+      {{ (releases.complete | bool)
+         and ((upgrade_gate_db_rc | string == '2') or (upgrade_gate_config_rc | string == '2')
+              or (upgrade_gate_missing_themes | length > 0)) }}

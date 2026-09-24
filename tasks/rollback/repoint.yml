@@ -1,0 +1,51 @@
+---
+###
+# Points `current` at an older release on every web host and makes it the one
+# serving. Only ever included after tasks/rollback/guard.yml allowed it.
+#
+#   rollback_target   required. The release path to go back to.
+###
+- name: Point the current symlink at the target release
+  ansible.builtin.file:
+    src: "{{ rollback_target }}"
+    path: "{{ releases.current }}"
+    state: link
+    force: true
+  become: true
+
+# A php-fpm worker keeps the path it resolved `current` to until it reloads.
+- name: Reload the web services, so they serve the target release
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: reloaded
+  become: true
+  loop:
+    - "{{ php_service }}"
+    - nginx
+
+# `var` is per release, so a flag a failed deploy left in the target would put
+# the site into maintenance the moment the symlink moved.
+- name: Take the target release out of maintenance mode
+  ansible.builtin.file:
+    path: "{{ rollback_target }}/var/.maintenance.flag"
+    state: absent
+  become: true
+
+- name: Flush Magento's cache from the target release
+  ansible.builtin.command: "php bin/magento cache:flush"
+  args:
+    chdir: "{{ releases.current }}"
+  become: true
+  become_user: "{{ system.user }}"
+  run_once: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups.admin }}"
+
+- name: Invalidate Magento's pages in Varnish
+  ansible.builtin.command:
+    argv: [varnishadm, ban, obj.http.X-Magento-Tags, "~", "."]
+    expand_argument_vars: false
+  become: true
+  run_once: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups.varnish }}"

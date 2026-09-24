@@ -1,0 +1,106 @@
+---
+###
+# Decides whether this build can reuse the compiled code and the static content
+# of the previous build on this builder, and copies them in when it can. Sets
+# `build_skip_compile` and `build_skip_static`, and `build_fingerprints` for
+# tasks/packaging/stamp.yml to record once the archive exists.
+#
+# Each phase's fingerprint hashes the tracked files that phase reads, from
+# `git ls-files -s`, with the command that runs it and the settings it depends
+# on. vendor/ is not tracked, so composer.json, composer.lock and any patch
+# files stand for it, and they are in both. A phase is reused only when its
+# fingerprint matches the previous build's, the previous build's output is still
+# on disk, and that output was really built within build_skip.max_age_days:
+# reuse carries the original build time forward, so a chain of reuses cannot
+# outlive it.
+#
+# What a fingerprint cannot see, and why each phase can be switched off in
+# build_skip: the body of a PHP class that changes static output (a LESS or
+# asset preprocessor; its di.xml registration is covered), and configuration
+# held in the database, such as a store's locale.
+###
+- name: Fingerprint what the compile and static phases read
+  ansible.builtin.import_tasks: tasks/packaging/fingerprint.yml
+
+- name: List this environment's earlier builds on the builder
+  ansible.builtin.find:
+    paths: "{{ releases.path }}"
+    file_type: directory
+    use_regex: true
+    patterns: ['^[0-9]{8}_[0-9]{10}_(?:.+_)?{{ suffix }}$']
+  register: build_skip_earlier
+
+- name: Name the newest earlier build
+  ansible.builtin.set_fact:
+    build_skip_previous: >-
+      {{ build_skip_earlier.files | map(attribute='path') | map('basename') | sort
+         | select('lt', release_id) | list | last | default('', true) }}
+
+- name: Read the previous build's stamp
+  ansible.builtin.slurp:
+    src: "{{ releases.path }}{{ build_skip_previous }}/.build-stamp.json"
+  register: build_skip_stamp_file
+  failed_when: false
+  when: build_skip_previous | length > 0
+
+- name: Check the previous build's output is still there
+  ansible.builtin.stat:
+    path: "{{ releases.path }}{{ build_skip_previous }}/{{ item }}"
+  loop: [generated/code, generated/metadata, pub/static/frontend, generated/view_preprocessed]
+  register: build_skip_outputs
+  when: build_skip_previous | length > 0
+
+- name: Decide which phases to reuse
+  ansible.builtin.set_fact:
+    build_skip_stamp: "{{ (build_skip_stamp_file.content | b64decode | from_json) if build_skip_stamp_file.content is defined else {} }}"
+    build_skip_now: "{{ lookup('pipe', 'date +%s') | int }}"
+    build_skip_present: "{{ build_skip_outputs.results | default([]) | selectattr('stat', 'defined') | selectattr('stat.exists') | map(attribute='item') | list }}"
+
+- name: Weigh the stamp against this build
+  ansible.builtin.set_fact:
+    build_skip_compile: >-
+      {{ build_skip.compile | bool
+         and build_skip_stamp.compile.fingerprint | default('') == build_fingerprints.compile
+         and (build_skip_now | int) - (build_skip_stamp.compile.built_at | default(0) | int) < build_skip.max_age_days * 86400
+         and 'generated/code' in build_skip_present and 'generated/metadata' in build_skip_present }}
+    build_skip_static: >-
+      {{ build_skip.static | bool
+         and build_skip_stamp.static.fingerprint | default('') == build_fingerprints.static
+         and (build_skip_now | int) - (build_skip_stamp.static.built_at | default(0) | int) < build_skip.max_age_days * 86400
+         and 'pub/static/frontend' in build_skip_present and 'generated/view_preprocessed' in build_skip_present }}
+
+- name: Report the decision
+  ansible.builtin.debug:
+    msg: >-
+      Compile: {{ ('reused from ' ~ build_skip_previous) if build_skip_compile | bool else 'runs' }}.
+      Static content: {{ ('reused from ' ~ build_skip_previous) if build_skip_static | bool else 'runs' }}.
+
+- name: Make sure the release has a generated directory to copy into
+  ansible.builtin.file:
+    path: "{{ wdir }}/generated"
+    state: directory
+    mode: "0755"
+  when: build_skip_compile | bool or build_skip_static | bool
+
+# A copy, not hard links: the previous build must stay exactly what it was, in
+# case it is redeployed with release_name=.
+- name: Copy the compiled code from the previous build
+  ansible.builtin.command:
+    argv: [cp, -a, --reflink=auto, "{{ releases.path }}{{ build_skip_previous }}/generated/{{ item }}", "{{ wdir }}/generated/"]
+  loop: [code, metadata]
+  when: build_skip_compile | bool
+
+# pub/static/_cache is left out: in a finished build it is the shared symlink.
+- name: Copy the static content from the previous build
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      mkdir -p {{ (wdir ~ '/pub/static') | quote }} {{ (wdir ~ '/generated') | quote }} &&
+      find {{ (releases.path ~ build_skip_previous ~ '/pub/static') | quote }} -mindepth 1 -maxdepth 1 ! -name _cache -print0
+      | xargs -0 -r cp -a --reflink=auto -t {{ (wdir ~ '/pub/static') | quote }} &&
+      for d in view_preprocessed _cache; do
+        src={{ (releases.path ~ build_skip_previous ~ '/generated/') | quote }}"$d";
+        if [ -e "$src" ]; then cp -a --reflink=auto "$src" {{ (wdir ~ '/generated/') | quote }}; fi;
+      done
+    executable: /bin/bash
+  when: build_skip_static | bool

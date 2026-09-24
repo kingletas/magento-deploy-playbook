@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""Stands in for nginx and php-fpm serving the live release, on 127.0.0.1:80.
+
+Every request resolves the `current` symlink afresh and answers as Magento
+would for the release it points at: 503 when the release is in maintenance
+mode, 500 when the build marked it broken (pub/fake-broken, written by the
+Magento fake when /tmp/magento-fake-break-build exists on the builder), 200
+otherwise. The health check and rollback are tested against this.
+"""
+import http.server
+import os
+
+CURRENT = "/var/www/html/magento_current"
+
+
+class Storefront(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        release = os.path.realpath(CURRENT)
+        if os.path.exists(os.path.join(release, "var/.maintenance.flag")):
+            status = 503
+        elif os.path.exists(os.path.join(release, "pub/fake-broken")):
+            status = 500
+        else:
+            status = 200
+        body = f"{status} {os.path.basename(release)}\n".encode()
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+http.server.ThreadingHTTPServer(("127.0.0.1", 80), Storefront).serve_forever()

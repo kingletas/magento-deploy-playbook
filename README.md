@@ -333,9 +333,21 @@ Moving the symlink undoes the code, not the database, so a guard decides first:
 3. **No NOT NULL column without a default may exist that the older release
    does not declare**, in a table it does, because its INSERTs leave that
    column out.
+4. **No unique or foreign key may have been added since it went live**, on a
+   table it declares, because its writes know nothing of it. Keys are compared
+   by their columns, against the list each release records when it goes live;
+   a release with no such record is compared with what it declares, which also
+   names keys that predate it.
 
 It also reports what goes back regardless: recurring setup scripts only the
 newer release has, and configuration written since.
+
+**What the automatic rollback covers is a release that went live and does not
+serve pages.** It does not cover `setup:upgrade` failing part way: then the
+database may be half migrated, a code rollback is the wrong answer, and the
+deploy stops with the site in maintenance, releases the build lock, records
+`upgrade.failed` and prints the way back: restore the backup, or fix the cause
+and run `setup:upgrade` again.
 
 **When the guard refuses, the live release goes into maintenance** and the
 deploy stops, naming the backup it took. A maintenance page tells a customer to
@@ -361,10 +373,26 @@ exactly what it listed, so nobody waves a refusal through without reading it:
 | The older release's `setup:db:status` exited 2 | `EXTRA='-e rollback_despite_database=true'` |
 | Data patches ran since it went live | `EXTRA="-e rollback_accept_patches='<every name listed>'"` |
 | A NOT NULL column it would leave out | `EXTRA="-e rollback_accept_columns='<every column listed>'"` |
+| A unique or foreign key added since it went live | `EXTRA='-e {"rollback_accept_constraints": "<every key listed, separated by ;>"}'` |
 
 A status command that could not run, or a release missing from a host, cannot
 be overridden. `make rollback` takes the build lock, so it cannot run while a
 deploy does.
+
+### What the configuration import will delete
+
+`setup:upgrade` imports `config.php` when it changed, and the import asks for a
+yes before it creates, updates or deletes websites, stores, groups and themes.
+Without `--no-interaction` a deploy has nobody to answer and the import
+aborts; with it, every question is answered yes, including "these stores will
+be deleted". So before the cutover, whenever `app:config:status` reports work,
+the deploy asks Magento's own importers what they would warn about. Creations
+and updates are printed and go ahead. **A deletion stops the deploy before
+anything goes live**, until it is accepted by exactly what was printed:
+
+```bash
+make deploy environment=staging EXTRA='-e {"config_import_accept": "These Stores will be deleted: Second"}'
+```
 
 ## Rehearsing setup:upgrade
 
@@ -376,8 +404,11 @@ whose `setup:upgrade` will run is rehearsed before anything goes live:
 
 1. The admin host writes production's row counts and sizes, and a dump of its
    schema with the rows `setup:upgrade` reads to decide what to run: module
-   versions, applied patches, the stores, the EAV metadata and configuration.
-   No customer, order or catalogue rows.
+   versions, applied patches, the stores, the EAV metadata and configuration,
+   plus the tables the release's not-yet-applied patches name. Tables holding
+   people, orders or payments are never dumped, whatever a patch names, and
+   neither are patch-named tables over 10,000 rows; the report lists both, so
+   you know which patches ran on an empty table.
 2. The builder runs the built release's real `setup:upgrade` against a
    throwaway MariaDB of production's version, loaded with that dump, and keeps
    every schema statement it sends.
@@ -396,7 +427,8 @@ lock_forecast:
 ```
 
 **A blocking copy of a table with more rows than `stop_on_rows` stops the
-deploy before the cutover.** So does a column the release narrows: Magento does
+deploy before the cutover.** The row count is InnoDB's estimate, so the
+threshold is approximate. So does a column the release narrows: Magento does
 not refuse data that no longer fits, it cuts it, with nothing in the output.
 Check the data, then accept each narrowing by name with
 `EXTRA="-e forecast_accept_narrowing='<entries, separated by ;>'"`.

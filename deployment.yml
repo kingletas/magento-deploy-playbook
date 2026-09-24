@@ -166,7 +166,14 @@
       vars:
         audit_event: deploy.finished
         audit_detail:
-          outcome: "{{ 'rolled_back' if hostvars[groups.web[0]].deploy_rolled_back | default(false) | bool else 'success' }}"
+          # From the web hosts in this run, not the inventory's first one, which
+          # --limit can leave out.
+          outcome: >-
+            {{ 'rolled_back'
+               if groups.web | intersect(ansible_play_hosts_all) | map('extract', hostvars)
+                  | selectattr('deploy_rolled_back', 'defined') | selectattr('deploy_rolled_back')
+                  | list | length > 0
+               else 'success' }}
 
   handlers:
     - name: Playbook handlers

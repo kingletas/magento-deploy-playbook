@@ -46,7 +46,7 @@ Every line has these nine keys, whatever the event. The first five are the tool'
 
 ## The events, and what each one adds
 
-Sixteen event names, in the order a deploy writes them, then the two only `make rollback` writes. **One deploy writes at most eleven**, because a backup either succeeds or fails, a release either passes its health check or is rolled back, and a deploy that stops writes fewer. Each row's fields are in addition to the envelope.
+Seventeen event names, in the order a deploy writes them, then the two only `make rollback` writes. **One deploy writes at most eleven**, because a backup either succeeds or fails, a release either passes its health check or is rolled back, and a deploy that stops writes fewer. Each row's fields are in addition to the envelope.
 
 | Event | Written when | Extra fields |
 |---|---|---|
@@ -58,6 +58,7 @@ Sixteen event names, in the order a deploy writes them, then the two only `make 
 | `backup.succeeded` | the backup command exits 0 and names something | `backup_id`, `reason` |
 | `backup.failed` | the backup command fails, and the deploy stops | `reason`, `error` |
 | `maintenance.enabled` | the maintenance page goes up in the incoming release | none |
+| `upgrade.failed` | `setup:upgrade` failed after the cutover; the site stays in maintenance and the lock is released | `error`, `backup_id` |
 | `health.failed` | an app host did not answer 2xx on a health check path after the cutover | `hosts`, `paths`, `rollback` |
 | `rollback.refused` | the release being rolled back to does not fit the database, so it was not put back | `from_release`, `to_release`, `reasons`, and `backup_id` after a deploy |
 | `deploy.rolled_back` | the release before is live again, after a failed health check or by `make rollback` | `from_release`, `to_release`, `trigger`, `recovered`, `notes` |

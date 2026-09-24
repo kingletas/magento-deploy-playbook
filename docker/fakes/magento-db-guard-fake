@@ -4,7 +4,9 @@
 # The fake Magento's setup:upgrade applies one patch whenever it runs with work
 # to do, and /tmp/magento-fake-patch-id counts them, so a mark and a check see
 # the same thing the real helper would read from patch_list. Lines in
-# /tmp/magento-fake-not-null are reported as undeclared NOT NULL columns.
+# /tmp/magento-fake-not-null are reported as undeclared NOT NULL columns, and
+# lines in /tmp/magento-fake-new-constraint as unique or foreign keys added
+# since the mark.
 echo "[fake-db-guard] $1" >> /tmp/build-log 2>/dev/null || true
 patch_id="$(cat /tmp/magento-fake-patch-id 2>/dev/null || echo 0)"
 case "$1" in
@@ -15,13 +17,17 @@ case "$1" in
     python3 - "${mark}" "${patch_id}" <<'PY'
 import json, sys
 mark, now = int(sys.argv[1]), int(sys.argv[2])
-try:
-    columns = [l.strip() for l in open("/tmp/magento-fake-not-null") if l.strip()]
-except FileNotFoundError:
-    columns = []
+def lines(path):
+    try:
+        return [l.strip() for l in open(path) if l.strip()]
+    except FileNotFoundError:
+        return []
+columns = lines("/tmp/magento-fake-not-null")
+constraints = lines("/tmp/magento-fake-new-constraint")
 print(json.dumps({
     "patches_after": [f"Fake\\Patch\\Data\\P{i}" for i in range(mark + 1, now + 1)],
     "undeclared_not_null": columns,
+    "undeclared_constraints": constraints,
     "recurring_missing": [],
     "config_changed": 0,
 }))

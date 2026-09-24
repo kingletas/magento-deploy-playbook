@@ -130,6 +130,7 @@
 
 - name: Weigh it
   ansible.builtin.set_fact:
+    # TABLE_ROWS is InnoDB's estimate, so the threshold is approximate.
     forecast_blocking: >-
       {{ forecast.statements | default([])
          | selectattr('class', 'equalto', 'copy')
@@ -156,6 +157,8 @@
           | map('join', ' at ') | join('; ') or 'none' }} rows."
       - "Columns narrowed, which can cut data silently: {{ forecast_narrowing | join('; ') or 'none' }}."
       - "{{ forecast.patches_applied | default([]) | length }} data patches and {{ forecast.data_statements | default(0) }} data statements, not costed: they ran on empty tables."
+      - "Pending patches name these tables, whose rows production kept to itself, so those patches ran on them empty:
+         {{ ((forecast.withheld.personal | default([])) + (forecast.withheld.large | default([]))) | join(', ') or 'none' }}."
       - "{{ 'The rehearsal did not finish: ' ~ (forecast_run.stderr | default('') | trim | truncate(600))
            ~ (forecast.upgrade_output_tail | default('') | trim | truncate(600)) if forecast_failed else 'The rehearsal finished.' }}"
   run_once: true

@@ -28,6 +28,18 @@ case "$1" in
     echo "Disabled maintenance mode"
     ;;
   setup:upgrade)
+    # config.php changed: Magento's config import asks for a yes, and without
+    # --no-interaction and nobody to answer, it aborts.
+    if [ -e /tmp/magento-fake-config-change ] && ! printf '%s\n' "$@" | grep -qx -- '--no-interaction'; then
+      echo "The following themes will be registered: frontend/Acme/shop"
+      echo "Do you want to continue [yes/no]?"
+      echo "Import failed: Aborted."
+      exit 1
+    fi
+    if [ -e /tmp/magento-fake-upgrade-fails ]; then
+      echo "Unable to apply data patch Acme\\Shop\\Setup\\Patch\\Data\\Broken" >&2
+      exit 1
+    fi
     # One patch per upgrade with work to do, which magento-db-guard-fake reads.
     if needs_upgrade; then
       echo $(( $(cat /tmp/magento-fake-patch-id 2>/dev/null || echo 0) + 1 )) > /tmp/magento-fake-patch-id
@@ -69,8 +81,11 @@ case "$1" in
     fi
     echo "All modules are up to date."
     ;;
+  */magento-config-warnings.php)
+    cat /tmp/magento-fake-config-warnings 2>/dev/null || echo '{"warnings": [], "destructive": []}'
+    ;;
   app:config:status)
-    if needs_upgrade; then
+    if needs_upgrade || [ -e /tmp/magento-fake-config-change ]; then
       echo "Config files have changed. Run app:config:import or setup:upgrade command to synchronize configuration."
       exit 2
     fi

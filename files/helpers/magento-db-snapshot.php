@@ -17,6 +17,34 @@ const SEED_TABLES = [
     'authorization_rule',
 ];
 
+// Whatever a patch names, rows from these never leave production: people, orders, payments, sessions.
+const PERSONAL_TABLES = '/^(customer|sales|quote|vault|newsletter_(subscriber|queue)|admin_(user|passwords)|oauth'
+    . '|integration|login_as_customer|email|persistent|wishlist|review|rating_option_vote|paypal|gift|company'
+    . '|negotiable|password_reset|captcha_log|security|report_event|report_viewed|magento_(customer|sales|reward'
+    . '|giftcard|rma))/';
+
+// A patch-named table with more rows than this is dumped without them.
+const MAX_DERIVED_ROWS = 10000;
+
+/** @return list<string> tables named by getTable('...') in the release's patches that patch_list lacks */
+function tablesNamedByPendingPatches(string $release, array $applied): array
+{
+    $tables = [];
+    foreach (['app/code/*/*/Setup/Patch/*/*.php', 'vendor/*/*/Setup/Patch/*/*.php'] as $pattern) {
+        foreach (glob($release . '/' . $pattern) ?: [] as $file) {
+            $source = (string) file_get_contents($file);
+            if (!preg_match('/^namespace\s+([^;]+);/m', $source, $namespace)
+                || isset($applied[trim($namespace[1]) . '\\' . basename($file, '.php')])) {
+                continue;
+            }
+            preg_match_all('/getTable\(\s*[\'"]([A-Za-z0-9_]+)[\'"]/', $source, $names);
+            array_push($tables, ...$names[1]);
+        }
+    }
+
+    return array_values(array_unique($tables));
+}
+
 function fail(string $message, int $code = 65): never
 {
     fwrite(STDERR, $message . "\n");
@@ -73,10 +101,32 @@ file_put_contents($optionFile, implode("\n", array_filter([
     $port ? 'port=' . $port : null,
 ])) . "\n");
 
-$seed = array_values(array_intersect(
-    array_map(static fn (string $t): string => $prefix . $t, array_merge(SEED_TABLES, array_slice($argv, 4))),
-    array_keys($tables)
-));
+if (!preg_match('/^[A-Za-z0-9_]{0,32}$/D', $prefix)) {
+    fail('the table prefix in env.php is not a plain identifier');
+}
+$patchList = $pdo->prepare('SELECT patch_name FROM `' . $prefix . 'patch_list`');
+$patchList->execute();
+$applied = array_flip($patchList->fetchAll(PDO::FETCH_COLUMN));
+$fixed = array_map(static fn (string $t): string => $prefix . $t, array_merge(SEED_TABLES, array_slice($argv, 4)));
+$withheld = ['personal' => [], 'large' => []];
+$derived = [];
+foreach (tablesNamedByPendingPatches($release, $applied) as $name) {
+    $table = $prefix . $name;
+    if (!isset($tables[$table]) || in_array($table, $fixed, true)) {
+        continue;
+    }
+    if (preg_match(PERSONAL_TABLES, $name)) {
+        $withheld['personal'][] = $table;
+    } elseif ($tables[$table]['rows'] > MAX_DERIVED_ROWS) {
+        $withheld['large'][] = $table;
+    } else {
+        $derived[] = $table;
+    }
+}
+$seed = array_values(array_intersect(array_merge($fixed, $derived), array_keys($tables)));
+$stats['seeded_from_patches'] = $derived;
+$stats['withheld'] = $withheld;
+file_put_contents($statsFile, json_encode($stats, JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT));
 // --defaults-file, not --defaults-extra-file: a ~/.my.cnf on this host must not
 // add a password or a host of its own.
 $common = ["--defaults-file=$optionFile", '--single-transaction', '--skip-lock-tables',

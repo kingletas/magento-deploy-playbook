@@ -1,7 +1,8 @@
 <?php
 /**
  * Runs one bin/magento command in a release with a private file cache, removed afterwards, so it cannot write
- * into the cache the live release reads: `<release> [--require-isolation] -- <arguments>`.
+ * into the cache the live release reads: `<release> [--require-isolation] -- <arguments>`. When the first argument
+ * is a PHP file, that script runs in the release instead of bin/magento.
  */
 
 declare(strict_types=1);
@@ -55,8 +56,11 @@ if ($supportsOverride) {
     fwrite(STDERR, "warning: this Magento has no MAGENTO_DC__OVERRIDE; running against the shared cache\n");
 }
 
+$entry = isset($command[0]) && str_ends_with($command[0], '.php') && is_file($command[0])
+    ? [array_shift($command)]
+    : ['bin/magento'];
 $process = proc_open(
-    array_merge([PHP_BINARY, 'bin/magento'], $command),
+    array_merge([PHP_BINARY], $entry, $command),
     [0 => STDIN, 1 => STDOUT, 2 => STDERR],
     $pipes,
     $release,

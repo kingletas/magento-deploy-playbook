@@ -22,7 +22,8 @@
 
 - name: Verify the static content
   ansible.builtin.command:
-    argv: [python3, "{{ static_verify_script.path }}", --root, "{{ wdir }}", --sentinels, "{{ static_sentinels | to_json }}"]
+    argv: [python3, "{{ static_verify_script.path }}", --root, "{{ wdir }}", --sentinels, "{{ static_sentinels | to_json }}",
+           --since, "{{ static_deploy_started }}"]
     stdin: "{{ static_deploy.stdout | default('') }}\n{{ static_deploy.stderr | default('') }}"
   register: static_verify
   changed_when: false

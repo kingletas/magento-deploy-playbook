@@ -1,7 +1,7 @@
 <?php
 /**
- * Reads what the database has gained since a release went live, for the rollback guard and the upgrade gate,
- * using only env.php's credentials so no cache is touched: `mark <release>`, `check <release> <mark-json>
+ * Reads what the database has gained since a release went live (patches, NOT NULL columns, unique and foreign
+ * keys), for the rollback guard and the upgrade gate, using only env.php's credentials so no cache is touched: `mark <release>`, `check <release> <mark-json>
  * [<live-release>]` or `themes <release>`, each printing JSON.
  */
 
@@ -38,7 +38,7 @@ function connect(string $release): array
     $pdo = new PDO($dsn, (string) $db['username'], (string) ($db['password'] ?? ''), $options);
 
     $prefix = (string) ($env['db']['table_prefix'] ?? '');
-    if (!preg_match('/^[A-Za-z0-9_]*$/', $prefix)) {
+    if (!preg_match('/^[A-Za-z0-9_]{0,32}$/D', $prefix)) {
         fail("the table prefix in $envFile is not a plain identifier");
     }
 
@@ -69,10 +69,14 @@ function schemaFiles(string $release): array
     );
 }
 
-/** @return array<string, array<string, true>> declared columns, by prefixed table name */
-function declaredColumns(string $release, string $prefix): array
+/**
+ * @return array{columns: array<string, array<string, true>>, constraints: array<string, true>} the columns the
+ *     release declares by prefixed table name, and its unique and foreign-key constraints as constraintKey() keys
+ */
+function declaredSchema(string $release, string $prefix): array
 {
-    $tables = [];
+    $columns = [];
+    $constraints = [];
     foreach (schemaFiles($release) as $file) {
         $xml = simplexml_load_file($file);
         if ($xml === false) {
@@ -83,16 +87,40 @@ function declaredColumns(string $release, string $prefix): array
                 continue;
             }
             $name = $prefix . (string) $table['name'];
-            $tables[$name] ??= [];
+            $columns[$name] ??= [];
             foreach ($table->column as $column) {
                 if ((string) $column['disabled'] !== 'true') {
-                    $tables[$name][(string) $column['name']] = true;
+                    $columns[$name][(string) $column['name']] = true;
+                }
+            }
+            foreach ($table->constraint as $constraint) {
+                $type = (string) $constraint->attributes('xsi', true)->type;
+                if ((string) $constraint['disabled'] === 'true') {
+                    continue;
+                }
+                if ($type === 'unique') {
+                    $names = [];
+                    foreach ($constraint->column as $column) {
+                        $names[] = (string) $column['name'];
+                    }
+                    $constraints[constraintKey('UNIQUE', $name, $names)] = true;
+                } elseif ($type === 'foreign') {
+                    $constraints[constraintKey('FOREIGN KEY', $name, [(string) $constraint['column']],
+                        $prefix . (string) $constraint['referenceTable'], (string) $constraint['referenceColumn'])] = true;
                 }
             }
         }
     }
 
-    return $tables;
+    return ['columns' => $columns, 'constraints' => $constraints];
+}
+
+/** How a unique or foreign-key constraint is named in the report: by its columns, never by its name. */
+function constraintKey(string $type, string $table, array $columns, string $refTable = '', string $refColumn = ''): string
+{
+    return $type === 'UNIQUE'
+        ? "UNIQUE $table(" . implode(',', $columns) . ')'
+        : "FOREIGN KEY $table(" . implode(',', $columns) . ") -> $refTable($refColumn)";
 }
 
 /** @return list<string> the release's recurring setup scripts, relative to it */
@@ -144,6 +172,39 @@ function codeThemes(string $release): array
     return array_values(array_unique($themes));
 }
 
+/** @return array<string, string> every unique and foreign-key constraint as constraintKey(), to its table */
+function currentConstraints(PDO $pdo): array
+{
+    $grouped = [];
+    foreach (rows($pdo, "SELECT tc.TABLE_NAME, tc.CONSTRAINT_NAME, tc.CONSTRAINT_TYPE, k.COLUMN_NAME,
+            k.REFERENCED_TABLE_NAME, k.REFERENCED_COLUMN_NAME
+          FROM information_schema.TABLE_CONSTRAINTS tc
+          JOIN information_schema.KEY_COLUMN_USAGE k
+            ON k.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA AND k.TABLE_NAME = tc.TABLE_NAME
+           AND k.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+         WHERE tc.CONSTRAINT_SCHEMA = DATABASE() AND tc.CONSTRAINT_TYPE IN ('UNIQUE', 'FOREIGN KEY')
+         ORDER BY tc.TABLE_NAME, tc.CONSTRAINT_NAME, k.ORDINAL_POSITION") as $row) {
+        [$table, $name, $type, $column, $refTable, $refColumn] = $row;
+        $id = $table . "\0" . $name;
+        $grouped[$id] ??= ['table' => $table, 'type' => $type, 'columns' => [],
+            'ref' => [(string) $refTable, (string) $refColumn]];
+        $grouped[$id]['columns'][] = $column;
+    }
+    $keys = [];
+    foreach ($grouped as $constraint) {
+        $keys[constraintKey($constraint['type'], $constraint['table'], $constraint['columns'], ...$constraint['ref'])]
+            = $constraint['table'];
+    }
+
+    return $keys;
+}
+
+/** A short hash of a constraint key, which keeps a mark small enough to pass on a command line. */
+function constraintHash(string $key): string
+{
+    return substr(hash('sha256', $key), 0, 16);
+}
+
 [, $mode, $release] = array_pad($argv, 3, null);
 $release = rtrim((string) $release, '/');
 if (!in_array($mode, ['mark', 'check', 'themes'], true) || $release === '') {
@@ -166,7 +227,10 @@ if ($mode === 'mark') {
     $patchId = (int) rows($pdo, 'SELECT COALESCE(MAX(patch_id), 0) FROM ' . table($prefix, 'patch_list'))[0][0];
     // NOW(), not UTC_TIMESTAMP(): updated_at is a TIMESTAMP, shown in the session's time zone.
     $now = (string) rows($pdo, 'SELECT NOW()')[0][0];
-    echo json_encode(['patch_id' => $patchId, 'recorded_at' => $now], JSON_THROW_ON_ERROR), "\n";
+    $constraints = array_map('constraintHash', array_keys(currentConstraints($pdo)));
+    sort($constraints);
+    echo json_encode(['patch_id' => $patchId, 'recorded_at' => $now, 'constraints' => $constraints],
+        JSON_THROW_ON_ERROR), "\n";
     exit(0);
 }
 
@@ -188,7 +252,8 @@ if (isset($mark['patch_id'])) {
     ));
 }
 
-$declared = declaredColumns($release, $prefix);
+$schema = declaredSchema($release, $prefix);
+$declared = $schema['columns'];
 $undeclaredNotNull = [];
 foreach (rows($pdo, "SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS
       WHERE TABLE_SCHEMA = DATABASE() AND IS_NULLABLE = 'NO'
@@ -197,6 +262,22 @@ foreach (rows($pdo, "SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLU
       ORDER BY TABLE_NAME, ORDINAL_POSITION") as [$table, $column]) {
     if (isset($declared[$table]) && !isset($declared[$table][$column])) {
         $undeclaredNotNull[] = $table . '.' . $column;
+    }
+}
+
+// Unique and foreign-key constraints on tables the release declares that were added since its mark: its
+// writes know nothing of them, so an INSERT can break on one. With no mark, those it does not declare.
+$markConstraints = isset($mark['constraints']) ? array_flip((array) $mark['constraints']) : null;
+$undeclaredConstraints = [];
+foreach (currentConstraints($pdo) as $key => $table) {
+    if (!isset($declared[$table])) {
+        continue;
+    }
+    $added = $markConstraints !== null
+        ? !isset($markConstraints[constraintHash($key)])
+        : !isset($schema['constraints'][$key]);
+    if ($added) {
+        $undeclaredConstraints[] = $key;
     }
 }
 
@@ -212,6 +293,7 @@ if (isset($mark['recorded_at'])) {
 echo json_encode([
     'patches_after' => $patchesAfter,
     'undeclared_not_null' => $undeclaredNotNull,
+    'undeclared_constraints' => $undeclaredConstraints,
     'recurring_missing' => $recurringMissing,
     'config_changed' => $configChanged,
 ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES), "\n";

@@ -2,7 +2,7 @@
 """Checks that setup:static-content:deploy did the job, instead of trusting its
 exit code.
 
-    static-verify.py --root DIR --sentinels JSON < deploy-output
+    static-verify.py --root DIR --sentinels JSON [--since EPOCH] < deploy-output
 
 With parallel jobs (-j), a theme whose LESS fails to compile stops part way,
 the error goes to the output, and the command still exits 0: the failure
@@ -12,9 +12,13 @@ theme is then shipped without its stylesheets. So three things are checked:
   1. the output carries none of the messages Magento prints on a failure
   2. every theme and locale the output reports reached all of its files: the
      last progress line for each must read N/N
-  3. the files named in --sentinels exist and are not empty, for every theme
-     and locale deployed. --sentinels is JSON: {"frontend": [...],
-     "adminhtml": [...]}, paths under pub/static/<area>/<vendor>/<theme>/<locale>/
+  3. the files named in --sentinels exist, are not empty and, with --since,
+     were written by this deploy, for every theme and locale deployed.
+     --sentinels is JSON: {"frontend": [...], "adminhtml": [...]}, each a list
+     of alternatives, each alternative a list of paths under
+     pub/static/<area>/<vendor>/<theme>/<locale>/. A theme passes when every
+     path of any one alternative is there, so a Luma-shaped and a Hyva-shaped
+     theme can both pass one setting
 
 Prints what it found as JSON and exits 1 when any check fails.
 """
@@ -28,7 +32,7 @@ FAILURE_SIGNATURES = (
     "Error happened during deploy process",
     "ParseError",
     "Compilation from source",
-    "PHP Fatal error",
+    "Fatal error:",
     "Exception:",
 )
 ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -38,7 +42,8 @@ PROGRESS = re.compile(r"^\s*((?:frontend|adminhtml)/[^\s/]+/[^\s/]+/[A-Za-z]{2,3
 def main():
     parser = argparse.ArgumentParser(description="Check a static content deploy did the job.")
     parser.add_argument("--root", required=True, help="the release root")
-    parser.add_argument("--sentinels", required=True, help='JSON: {"frontend": [...], "adminhtml": [...]}')
+    parser.add_argument("--sentinels", required=True, help='JSON: {"frontend": [[...], ...], "adminhtml": [[...]]}')
+    parser.add_argument("--since", type=float, default=0, help="the deploy's start, as a Unix time")
     args = parser.parse_args()
     sentinels = json.loads(args.sentinels)
 
@@ -50,13 +55,22 @@ def main():
         last[target] = (int(done), int(total))
     incomplete = [f"{t} stopped at {d}/{n}" for t, (d, n) in sorted(last.items()) if d < n]
 
+    def fresh(path):
+        return (os.path.isfile(path) and os.path.getsize(path) > 0
+                and os.path.getmtime(path) >= args.since)
+
     missing = []
     for target in sorted(last):
         area = target.split("/", 1)[0]
-        for sentinel in sentinels.get(area, []):
-            path = os.path.join(args.root, "pub", "static", target, sentinel)
-            if not os.path.isfile(path) or os.path.getsize(path) == 0:
-                missing.append(f"{target}/{sentinel}")
+        alternatives = sentinels.get(area, [])
+        # A flat list of paths is one alternative.
+        if alternatives and all(isinstance(a, str) for a in alternatives):
+            alternatives = [alternatives]
+        if not alternatives:
+            continue
+        base = os.path.join(args.root, "pub", "static", target)
+        if not any(all(fresh(os.path.join(base, p)) for p in paths) for paths in alternatives):
+            missing.append(f"{target}/(" + " or ".join("+".join(paths) for paths in alternatives) + ")")
     if not os.path.isfile(os.path.join(args.root, "pub", "static", "deployed_version.txt")):
         missing.append("deployed_version.txt")
 
@@ -68,7 +82,7 @@ def main():
     if incomplete:
         problems.append("themes that did not finish: " + "; ".join(incomplete))
     if missing:
-        problems.append("files missing or empty: " + ", ".join(missing))
+        problems.append("files missing, empty or older than this deploy: " + ", ".join(missing))
 
     print(json.dumps({"themes": sorted(last), "signatures": signatures, "incomplete": incomplete,
                       "missing": missing, "problems": problems}))

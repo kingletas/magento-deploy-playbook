@@ -42,6 +42,18 @@
     chdir: '{{ wdir }}'
   when: not build_skip_compile | bool
 
+# On the builder's own clock, which is the one that stamps the files it writes.
+- name: Note when the static content deploy starts
+  ansible.builtin.command: date +%s
+  register: static_deploy_clock
+  changed_when: false
+  when: not build_skip_static | bool
+
+- name: Keep that time
+  ansible.builtin.set_fact:
+    static_deploy_started: "{{ static_deploy_clock.stdout | int - 1 }}"
+  when: not build_skip_static | bool
+
 - name: Deploy Magento's static code
   ansible.builtin.command: "{{ static_command }}"
   args:

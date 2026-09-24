@@ -18,6 +18,13 @@ changed, because there's nothing before it.
   `setup:db:status` nor `app:config:status` reads the theme table, so both
   passed and the theme was never registered. The upgrade gate now also compares
   the themes the code registers with the ones the database has.
+- A release whose `config.php` would delete a website, store, group or theme
+  now stops before the cutover until the deletion is accepted by name. The
+  configuration import inside `setup:upgrade` warns before deleting, and a
+  deploy has nobody to read the warning.
+- A `setup:upgrade` that fails after the cutover no longer leaves the build
+  lock behind. The site stays in maintenance, `upgrade.failed` is recorded,
+  and the run prints how to recover.
 - The status commands the deploy runs in the incoming release, before it goes
   live, no longer write that release's configuration into the cache the live
   release is reading. They run with a private file cache, removed afterwards.
@@ -45,7 +52,8 @@ changed, because there's nothing before it.
   the database. A guard decides that before anything moves: the older release's
   own `setup:db:status` must pass against the live database, no data patch may
   have run since it went live, and no NOT NULL column its INSERTs leave out may
-  have appeared. When the guard refuses, the live release goes into maintenance,
+  have appeared, nor a unique or foreign key its writes know nothing of. When
+  the guard refuses, the live release goes into maintenance,
   because a maintenance page tells a customer to come back and a failing page
   does not, and the deploy stops naming the backup it took.
   `pub/health_check.php` is not used: it never passes through the front

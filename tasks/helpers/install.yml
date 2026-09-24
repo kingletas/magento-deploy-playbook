@@ -25,4 +25,4 @@
   become: true
   run_once: true
   delegate_to: "{{ item.0 }}"
-  loop: "{{ groups.admin | product(['magento-isolated.php', 'magento-db-guard.php']) | list }}"
+  loop: "{{ groups.admin | product(['magento-isolated.php', 'magento-db-guard.php', 'magento-config-warnings.php']) | list }}"

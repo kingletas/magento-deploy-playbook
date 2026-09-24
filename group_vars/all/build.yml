@@ -66,14 +66,16 @@ compile_command: "php bin/magento s:d:c"
 static_command: "php bin/magento s:static-content:d -j 5 -f"
 
 # Files every deployed theme and locale must have after static content deploy,
-# under pub/static/<area>/<vendor>/<theme>/<locale>/. Luma and Blank themes
-# compile these two stylesheets; a Hyva theme compiles css/styles.css instead.
+# under pub/static/<area>/<vendor>/<theme>/<locale>/, each written by this
+# deploy. Each area lists alternatives, and a theme passes on any one of them:
+# Luma and Blank themes compile the two stylesheets, a Hyva theme compiles
+# css/styles.css.
 static_sentinels:
   frontend:
-    - css/styles-m.css
-    - css/styles-l.css
+    - [css/styles-m.css, css/styles-l.css]
+    - [css/styles.css]
   adminhtml:
-    - css/styles.css
+    - [css/styles.css]
 
 # git pathspecs for what each phase reads. Compile reads everything except what
 # only the storefront's assets are made from; static reads those assets plus

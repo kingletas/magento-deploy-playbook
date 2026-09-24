@@ -233,10 +233,17 @@ cmd_rollback() {
     ( cd "${PLAYBOOK_DIR}" && ansible-playbook -i inventory/docker rollback.yml "$@" )
 }
 
-# What web1 serves, and which release its `current` points at.
-live_release() { docker exec mdp-web1 sh -c 'basename "$(readlink /var/www/html/magento_current)"'; }
+# Which release `current` points at, and what an app host serves. live_release
+# refuses to answer when the two app hosts disagree, which is itself a failure.
+live_release() {
+    local one two
+    one="$(docker exec mdp-web1 sh -c 'basename "$(readlink /var/www/html/magento_current)"')"
+    two="$(docker exec mdp-web2 sh -c 'basename "$(readlink /var/www/html/magento_current)"')"
+    [ "${one}" = "${two}" ] || die "the app hosts serve different releases: web1 ${one}, web2 ${two}."
+    echo "${one}"
+}
 storefront_status() {
-    docker exec mdp-web1 python3 -c '
+    docker exec "${1:-mdp-web1}" python3 -c '
 import urllib.request, urllib.error
 try:
     print(urllib.request.urlopen("http://127.0.0.1/", timeout=5).status)
@@ -284,7 +291,9 @@ cmd_test_forecast() {
     docker exec mdp-builder rm -f /tmp/magento-fake-forecast-copy
     set_needs_upgrade "rm -f"
     [ "$(live_release)" = "${before}" ] || die "the stopped release went live anyway."
-    [ "$(storefront_status)" = 200 ] || die "the site stopped answering 200 after a deploy that went nowhere."
+    for host in mdp-web1 mdp-web2; do
+        [ "$(storefront_status "${host}")" = 200 ] || die "${host} stopped answering 200 after a deploy that went nowhere."
+    done
     has_event_since "${lines}" forecast.completed || die "the rehearsal left no forecast.completed record."
     has_event_since "${lines}" cutover.started && die "the deploy started a cutover after its rehearsal said stop."
     docker exec mdp-admin sh -c 'ls -d /tmp/lock-forecast-* 2>/dev/null' && die "the snapshot was left on the admin host."
@@ -293,20 +302,81 @@ cmd_test_forecast() {
     echo "Forecast: a blocking copy over the limit stopped the deploy before the cutover, and the snapshot was deleted."
 }
 
+# `touch` or `rm -f` a marker file on every container.
+set_marker() {
+    for c in "${CONTAINERS[@]}"; do
+        docker exec "${c}" sh -c "$1 /tmp/$2" 2>/dev/null
+    done
+}
+
+# What setup:upgrade's config import will ask, read before the cutover.
+cmd_test_config_import() {
+    local lines
+    echo "########## a release that changes config.php's themes: setup:upgrade must not stop to ask ##########"
+    ( cd "${PLAYBOOK_DIR}" && ansible-playbook -i inventory/docker unlock.yml >/dev/null ) || die "could not drop the lock."
+    cmd_deploy || die "the recovery deploy after the refused rollback failed."
+    set_marker touch magento-fake-config-change
+    docker exec mdp-admin sh -c 'cd /var/www/html/magento_current && php bin/magento setup:upgrade --keep-generated' >/dev/null \
+        && die "the fake setup:upgrade answered its own prompt, so this scenario proves nothing."
+    docker exec mdp-admin sh -c 'echo "{\"warnings\": [{\"section\": \"themes\", \"message\": \"The following themes will be registered: frontend/Acme/shop\"}], \"destructive\": []}" > /tmp/magento-fake-config-warnings'
+    truncate_logs
+    cmd_deploy || die "a release whose config import only registers a theme failed."
+    docker exec mdp-admin grep -q -- 'setup:upgrade --keep-generated --no-interaction' /tmp/build-log \
+        || die "setup:upgrade ran without --no-interaction."
+
+    echo ""
+    echo "########## a release whose config import deletes a store: it must stop before the cutover ##########"
+    lines="$(wc -l < "${AUDIT_LOG_PATH}")"
+    docker exec mdp-admin sh -c 'echo "{\"warnings\": [{\"section\": \"scopes\", \"message\": \"These Stores will be deleted: Second\"}], \"destructive\": [{\"section\": \"scopes\", \"message\": \"These Stores will be deleted: Second\"}]}" > /tmp/magento-fake-config-warnings'
+    cmd_deploy && die "a release that deletes a store went ahead unaccepted."
+    has_event_since "${lines}" cutover.started && die "the deploy started a cutover before the deletion was accepted."
+    ( cd "${PLAYBOOK_DIR}" && ansible-playbook -i inventory/docker unlock.yml >/dev/null ) || die "could not drop the lock."
+    cmd_deploy -e '{"config_import_accept": "These Stores will be deleted: Second"}' \
+        || die "the deploy failed with the deletion accepted by name."
+    set_marker "rm -f" magento-fake-config-change
+    set_marker "rm -f" magento-fake-config-warnings
+    echo "Config import: a theme change deployed with --no-interaction, a store deletion stopped before the cutover until accepted by name."
+}
+
+# setup:upgrade failing after the flip: the lock must be released, maintenance
+# left on, and the failure recorded. Last, because it leaves the site down.
+cmd_test_upgrade_fails() {
+    local lines
+    echo "########## setup:upgrade fails after the flip: maintenance stays, the lock goes ##########"
+    lines="$(wc -l < "${AUDIT_LOG_PATH}")"
+    set_needs_upgrade touch
+    set_marker touch magento-fake-upgrade-fails
+    cmd_deploy && die "a deploy whose setup:upgrade failed reported success."
+    set_marker "rm -f" magento-fake-upgrade-fails
+    set_needs_upgrade "rm -f"
+    has_event_since "${lines}" upgrade.failed || die "the failed setup:upgrade left no upgrade.failed record."
+    docker exec mdp-builder sh -c 'ls /tmp/*.lock 2>/dev/null' && die "the failed setup:upgrade left the build lock behind."
+    for host in mdp-web1 mdp-web2; do
+        [ "$(storefront_status "${host}")" = 503 ] || die "${host} is not in maintenance after setup:upgrade failed."
+    done
+    echo "Upgrade failure: maintenance kept on both app hosts, the lock released, upgrade.failed recorded."
+}
+
 # The guarded rollback, both ways and from both entry points. Runs after the
 # audit check, because a rolled-back deploy rightly lacks cutover.succeeded.
 cmd_test_rollback() {
     local before live lines
-    echo "########## roll back by hand, over a patch the target never saw ##########"
+    echo "########## roll back by hand, over a patch and a key the target never saw ##########"
     before="$(live_release)"
     lines="$(wc -l < "${AUDIT_LOG_PATH}")"
-    cmd_rollback && die "the rollback went ahead over a data patch nobody accepted."
+    docker exec mdp-admin sh -c 'echo "UNIQUE cms_block(identifier)" > /tmp/magento-fake-new-constraint'
+    cmd_rollback && die "the rollback went ahead over a data patch and a key nobody accepted."
     [ "$(live_release)" = "${before}" ] || die "a refused rollback still moved current."
     has_event_since "${lines}" rollback.refused || die "the refused rollback left no rollback.refused record."
     cmd_rollback -e 'rollback_accept_patches=Fake\Patch\Data\P1' \
-        || die "the rollback failed with the listed patch accepted."
+        && die "the rollback went ahead with the patch accepted but not the key."
+    cmd_rollback -e 'rollback_accept_patches=Fake\Patch\Data\P1' -e '{"rollback_accept_constraints": "UNIQUE cms_block(identifier)"}' \
+        || die "the rollback failed with the listed patch and key accepted."
+    docker exec mdp-admin rm -f /tmp/magento-fake-new-constraint
     [ "$(live_release)" != "${before}" ] || die "the accepted rollback did not move current."
-    [ "$(storefront_status)" = 200 ] || die "the release rolled back to does not answer 200."
+    for host in mdp-web1 mdp-web2; do
+        [ "$(storefront_status "${host}")" = 200 ] || die "the release rolled back to does not answer 200 on ${host}."
+    done
 
     echo ""
     echo "########## deploy a broken release: it must roll itself back ##########"
@@ -316,7 +386,9 @@ cmd_test_rollback() {
     cmd_deploy "${REBUILD_STATIC[@]}" && die "a deploy whose release failed its health check reported success."
     docker exec mdp-builder rm -f /tmp/magento-fake-break-build
     [ "$(live_release)" = "${before}" ] || die "the broken release was not rolled back: $(live_release) is live."
-    [ "$(storefront_status)" = 200 ] || die "the rolled-back site does not answer 200."
+    for host in mdp-web1 mdp-web2; do
+        [ "$(storefront_status "${host}")" = 200 ] || die "the rolled-back site does not answer 200 on ${host}."
+    done
     has_event_since "${lines}" deploy.rolled_back || die "the automatic rollback left no deploy.rolled_back record."
     docker exec mdp-builder sh -c 'ls /tmp/*.lock 2>/dev/null' && die "the rolled-back deploy left the build lock behind."
 
@@ -330,7 +402,9 @@ cmd_test_rollback() {
     set_needs_upgrade "rm -f"
     live="$(live_release)"
     [ "${live}" != "${before}" ] || die "the rollback went ahead although the database had moved."
-    [ "$(storefront_status)" = 503 ] || die "the release that could not go back is not in maintenance: $(storefront_status)."
+    for host in mdp-web1 mdp-web2; do
+        [ "$(storefront_status "${host}")" = 503 ] || die "the release that could not go back is not in maintenance on ${host}."
+    done
     has_event_since "${lines}" rollback.refused || die "the refused rollback left no rollback.refused record."
     "${PLAYBOOK_DIR}/bin/audit-log" verify --path "${AUDIT_LOG_PATH}" || die "the audit chain broke during the rollback runs."
     echo "Rollback: refused over an unlisted patch, accepted with it named, automatic on a broken release, refused and in maintenance when the database moved."
@@ -396,6 +470,10 @@ cmd_test() {
     cmd_test_forecast
     echo ""
     cmd_test_rollback
+    echo ""
+    cmd_test_config_import
+    echo ""
+    cmd_test_upgrade_fails
     echo ""
     echo "All good. Tear down with: bin/docker-suite down"
 }

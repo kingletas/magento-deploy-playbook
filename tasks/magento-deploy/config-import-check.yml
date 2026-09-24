@@ -1,0 +1,64 @@
+---
+###
+# Reads what setup:upgrade's configuration import would ask before it imports
+# this release's config.php, and stops the deploy on anything that deletes: a
+# website, store, group or theme. setup:upgrade runs with --no-interaction,
+# which answers every one of those questions yes, so this is where they are
+# answered instead. Creations and updates are printed and go ahead.
+#
+# Runs only when app:config:status reported work, before anything goes live.
+# Accept a deletion by naming exactly what it printed:
+#   -e '{"config_import_accept": "<every warning listed, separated by ;>"}'
+###
+- name: Ask the importers what they would warn about
+  ansible.builtin.command: >-
+    php {{ deploy_helpers }}magento-isolated.php {{ incoming_release }}
+    --require-isolation -- {{ deploy_helpers }}magento-config-warnings.php
+  become: true
+  become_user: "{{ system.user }}"
+  run_once: true
+  delegate_to: "{{ item }}"
+  loop: "{{ groups.admin }}"
+  register: config_warnings_run
+  changed_when: false
+  failed_when: false
+  when: upgrade_gate_config_rc | string == '2'
+
+- name: Read them
+  ansible.builtin.set_fact:
+    config_warnings: >-
+      {{ ((config_warnings_run.results | first).stdout | from_json)
+         if (config_warnings_run.results | default([{}]) | first).rc | default(1) == 0
+         else {'warnings': [], 'destructive': []} }}
+    config_warnings_failed: >-
+      {{ upgrade_gate_config_rc | string == '2'
+         and (config_warnings_run.results | default([{}]) | first).rc | default(1) != 0 }}
+    config_accepted: "{{ config_import_accept | default('') | split(';') | map('trim') | reject('equalto', '') | list }}"
+  run_once: true
+
+- name: Report what the configuration import will do
+  ansible.builtin.debug:
+    msg: "{{ config_warnings.warnings | map(attribute='message') | list }}"
+  run_once: true
+  when: config_warnings.warnings | length > 0
+
+- name: Stop when the importers could not be asked
+  ansible.builtin.fail:
+    msg: >-
+      app:config:status reported work, and what the import would delete could
+      not be read, so setup:upgrade will not be let answer it blind. Nothing has
+      gone live. {{ (config_warnings_run.results | first).stderr | default('') | trim | truncate(600) }}
+  run_once: true
+  when: config_warnings_failed | bool
+
+- name: Stop before the cutover on a deletion nobody accepted
+  ansible.builtin.fail:
+    msg: >-
+      Importing this release's config.php would delete:
+      {{ config_warnings.destructive | map(attribute='message') | join('; ') }}.
+      Nothing has gone live. If that is intended, pass config_import_accept
+      with exactly these, separated by ";".
+  run_once: true
+  when:
+    - config_warnings.destructive | length > 0
+    - (config_warnings.destructive | map(attribute='message') | sort) != (config_accepted | sort)

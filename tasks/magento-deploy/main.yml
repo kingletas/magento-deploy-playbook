@@ -73,6 +73,9 @@
 - name: Decide whether this release needs a maintenance window
   ansible.builtin.import_tasks: tasks/magento-deploy/upgrade-gate.yml
 
+- name: Stop before the cutover on a configuration import that deletes
+  ansible.builtin.import_tasks: tasks/magento-deploy/config-import-check.yml
+
 # The database as the outgoing release left it, read before anything changes
 # so a database that cannot be read stops the deploy with nothing live. What
 # setup:upgrade applies after this is what a rollback cannot take back.
@@ -176,19 +179,54 @@
   delegate_to: "{{ item }}"
   loop: "{{ groups.admin }}"
 
-# --no-interaction: when config.php's themes or scopes change, the config import
-# inside setup:upgrade asks for a yes, and with nobody to give one it aborts and
-# fails the deploy with the site in maintenance.
-- name: "Magento's setup upgrade"
-  ansible.builtin.command: "php bin/magento setup:upgrade --keep-generated --no-interaction"
-  args:
-    chdir: '{{ releases.current }}'
-  become_user: '{{ system.user }}'
-  become: true
-  run_once: true
-  delegate_to: "{{ item }}"
-  loop: "{{ groups.admin }}"
-  when: upgrade_needed | bool
+# --no-interaction answers the config import's questions yes, which is safe only
+# because config-import-check.yml read those questions before the cutover and
+# stopped on any deletion nobody accepted. Without it the import aborts on a
+# theme or scope change and fails the deploy mid-window.
+- name: Run setup:upgrade, and when it fails leave maintenance on and say how to recover
+  block:
+    - name: "Magento's setup upgrade"
+      ansible.builtin.command: "php bin/magento setup:upgrade --keep-generated --no-interaction"
+      args:
+        chdir: '{{ releases.current }}'
+      become_user: '{{ system.user }}'
+      become: true
+      run_once: true
+      delegate_to: "{{ item }}"
+      loop: "{{ groups.admin }}"
+      when: upgrade_needed | bool
+  rescue:
+    - name: "Audit: record the failed setup:upgrade"
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: upgrade.failed
+        audit_detail:
+          error: "{{ (ansible_failed_result.results | default([ansible_failed_result]) | selectattr('failed', 'defined')
+                      | selectattr('failed') | map(attribute='stderr') | first | default('', true))[-500:] }}"
+          backup_id: "{{ backup_id | default('') }}"
+
+    # The run ends here, so the prune play that normally drops the lock never runs.
+    - name: Drop the build lock, since the run ends here
+      ansible.builtin.file:
+        path: "{{ release_lock_file }}"
+        state: absent
+      delegate_to: "{{ groups.builder | first }}"
+      run_once: true
+
+    - name: Stop in maintenance, and say how to recover
+      ansible.builtin.fail:
+        msg: >-
+          setup:upgrade failed after the cutover, so the database may be part
+          migrated. The site is in maintenance on {{ release_id }} and stays
+          there. A code rollback is no answer: the rollback guard refuses one
+          after a partial migration. Either restore the database
+          {{ ('from the backup this deploy took, ' ~ backup_id ~ ',')
+             if backup_id | default('') | length > 0 else '(this deploy took no backup)' }}
+          and then make rollback, or fix the cause and run
+          php bin/magento setup:upgrade --keep-generated --no-interaction in
+          {{ releases.current }} on {{ groups.admin | first }}, then
+          php bin/magento maint:disable. The build lock is released.
+      run_once: true
 
 - name: Flush and enforce cache
   ansible.builtin.command: "php bin/magento {{ item }}"
@@ -250,6 +288,8 @@
 
 # Written only once the release has passed its health check, so a rollback to
 # it later can tell what the database gained after it went live.
+# Not fatal: the release is live and healthy by now. Without the mark a later
+# rollback to it compares against what it declares, which refuses more often.
 - name: Mark the database the new release went live with
   ansible.builtin.command: "php {{ deploy_helpers }}magento-db-guard.php mark {{ releases.current }}"
   become_user: '{{ system.user }}'
@@ -259,9 +299,22 @@
   loop: "{{ groups.admin }}"
   register: db_mark_live
   changed_when: false
+  failed_when: false
   when:
     - releases.complete | bool
     - not deploy_rolled_back | default(false) | bool
+
+- name: Warn when the mark could not be taken
+  ansible.builtin.debug:
+    msg: >-
+      The database mark for {{ release_id }} could not be read, so a later
+      rollback to it will compare against what it declares instead:
+      {{ (db_mark_live.results | first).stderr | default('') | trim }}
+  run_once: true
+  when:
+    - releases.complete | bool
+    - not deploy_rolled_back | default(false) | bool
+    - (db_mark_live.results | default([{}]) | first).rc | default(0) != 0
 
 - name: Keep that mark in the release on every web host
   ansible.builtin.copy:
@@ -274,3 +327,4 @@
   when:
     - releases.complete | bool
     - not deploy_rolled_back | default(false) | bool
+    - (db_mark_live.results | default([{}]) | first).rc | default(1) == 0

@@ -14,6 +14,7 @@
 #   rollback_accept_patches     the comma-separated patch names the refusal
 #                               listed, all of them.
 #   rollback_accept_columns     the same, for the NOT NULL columns.
+#   rollback_accept_constraints the same, for unique and foreign keys.
 #
 # The target answers whether its code still matches the database: its own
 # `setup:db:status`, run against the live database, exits 0 when they match. Its
@@ -25,7 +26,8 @@
 #
 # Exit 0 is necessary, not sufficient, so magento-db-guard.php then reads what
 # the status command does not check: data patches applied since the target went
-# live, and NOT NULL columns the target's INSERTs would leave out.
+# live, NOT NULL columns the target's INSERTs would leave out, and unique and
+# foreign keys added since it went live, which its writes know nothing of.
 #
 # Anything that cannot be read refuses, and no override passes it.
 ###
@@ -99,6 +101,9 @@
     rollback_columns: "{{ rollback_gained.undeclared_not_null | default([]) }}"
     rollback_accepted_patches: "{{ rollback_accept_patches | default('') | split(',') | map('trim') | reject('equalto', '') | list }}"
     rollback_accepted_columns: "{{ rollback_accept_columns | default('') | split(',') | map('trim') | reject('equalto', '') | list }}"
+    rollback_constraints: "{{ rollback_gained.undeclared_constraints | default([]) }}"
+    # Semicolons: a constraint's own description contains commas.
+    rollback_accepted_constraints: "{{ rollback_accept_constraints | default('') | split(';') | map('trim') | reject('equalto', '') | list }}"
   run_once: true
 
 - name: Decide
@@ -126,7 +131,11 @@
          + ([('NOT NULL columns without a default that the target does not declare, so its INSERTs would fail: '
               ~ (rollback_columns | join(', ')) ~ '. To go back anyway, pass rollback_accept_columns with '
               ~ 'exactly these names')]
-            if rollback_columns | length > 0 and (rollback_columns | sort) != (rollback_accepted_columns | sort) else []) }}
+            if rollback_columns | length > 0 and (rollback_columns | sort) != (rollback_accepted_columns | sort) else [])
+         + ([('unique or foreign keys added since the target went live, which its writes can break on: '
+              ~ (rollback_constraints | join('; ')) ~ '. To go back anyway, pass rollback_accept_constraints with '
+              ~ 'exactly these, separated by ";"')]
+            if rollback_constraints | length > 0 and (rollback_constraints | sort) != (rollback_accepted_constraints | sort) else []) }}
     rollback_notes: >-
       {{ ([('recurring setup scripts the live release has and the target does not, whose changes cannot be '
             ~ 'listed: ' ~ (rollback_gained.recurring_missing | join(', ')))]

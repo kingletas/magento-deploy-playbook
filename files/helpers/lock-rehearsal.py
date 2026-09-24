@@ -215,7 +215,13 @@ def logged_statements(server):
     return statements
 
 
+PLAIN_TABLE = re.compile(r"^[A-Za-z0-9_$]{1,64}$")
+
+
 def columns(server, table):
+    # The name comes from the release's own DDL; anything but a plain identifier is left unread.
+    if not PLAIN_TABLE.match(table):
+        return {}
     out = server.sql(
         "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE FROM information_schema.COLUMNS "
         f"WHERE TABLE_SCHEMA = '{DATABASE}' AND TABLE_NAME = '{table}'").stdout
@@ -366,6 +372,8 @@ def main():
             "upgrade_seconds_on_empty_tables": upgrade_seconds,
             "statements": report_statements,
             "patches_applied": applied,
+            "seeded_from_patches": stats.get("seeded_from_patches", []),
+            "withheld": stats.get("withheld", {}),
             "data_statements": len(data),
             "data_statements_by_table": dict(sorted(data_by_table.items(), key=lambda kv: -kv[1])),
             "blind_spots": [

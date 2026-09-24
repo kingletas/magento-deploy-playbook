@@ -13,9 +13,7 @@
   gather_facts: false
   vars:
     fp_root: "/tmp/magento-deploy-playbook-fingerprint-test"
-    wdir: "{{ fp_root }}/store"
-    releases:
-      shared: "{{ fp_root }}/shared/"
+    fp_repo: "{{ fp_root }}/store"
     fixture_files:
       - app/code/Acme/Shop/Model/Price.php
       - app/code/Acme/Shop/etc/di.xml
@@ -50,6 +48,14 @@
       - {file: patches/fix-cart.patch, compile: true, static: true}
       - {file: README.md, compile: false, static: false}
   tasks:
+    # Facts, not play vars: test.yml runs the suites in one process, and an
+    # earlier suite's set_fact of wdir would outrank a play var here.
+    - name: Point the build at the fixture repository
+      ansible.builtin.set_fact:
+        wdir: "{{ fp_repo }}"
+        releases:
+          shared: "{{ fp_root }}/shared/"
+
     - name: Reset the fixture repository
       ansible.builtin.file:
         path: "{{ fp_root }}"
@@ -100,13 +106,15 @@
     # would make every build look new.
     - name: Copy the repository to another path
       ansible.builtin.command:
-        argv: [cp, -a, "{{ wdir }}", "{{ fp_root }}/elsewhere"]
+        argv: [cp, -a, "{{ fp_repo }}", "{{ fp_root }}/elsewhere"]
         creates: "{{ fp_root }}/elsewhere"
+
+    - name: Point the build at the other path
+      ansible.builtin.set_fact:
+        wdir: "{{ fp_root }}/elsewhere"
 
     - name: Fingerprint the same tree at the other path
       ansible.builtin.import_tasks: tasks/packaging/fingerprint.yml
-      vars:
-        wdir: "{{ fp_root }}/elsewhere"
 
     - name: Assert the path is not part of the fingerprint
       ansible.builtin.assert:
@@ -115,6 +123,10 @@
         fail_msg: >-
           The same tree fingerprints differently at another path, so no build
           would ever be reused: {{ fp_start }} against {{ build_fingerprints }}.
+
+    - name: Point the build back at the fixture repository
+      ansible.builtin.set_fact:
+        wdir: "{{ fp_repo }}"
 
     - name: Change one file at a time and check which fingerprint moves
       ansible.builtin.include_tasks: build-skip-case.yml

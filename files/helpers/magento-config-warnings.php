@@ -28,9 +28,11 @@ foreach ($objectManager->get(ImporterPool::class)->getImporters() as $section =>
         $warnings[] = ['section' => $section, 'message' => trim(strip_tags((string) $message))];
     }
 }
+// Only the wordings that create, update or register are benign; anything else, however worded, needs accepting.
+$benign = '/^(These \S+ will be (created|updated): |The following themes will be registered: )/';
 $destructive = array_values(array_filter(
     $warnings,
-    static fn (array $w): bool => (bool) preg_match('/will be (deleted|removed)/i', $w['message'])
+    static fn (array $w): bool => !preg_match($benign, $w['message'])
 ));
 
 echo json_encode(['warnings' => $warnings, 'destructive' => $destructive], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES), "\n";

@@ -386,9 +386,10 @@ yes before it creates, updates or deletes websites, stores, groups and themes.
 Without `--no-interaction` a deploy has nobody to answer and the import
 aborts; with it, every question is answered yes, including "these stores will
 be deleted". So before the cutover, whenever `app:config:status` reports work,
-the deploy asks Magento's own importers what they would warn about. Creations
-and updates are printed and go ahead. **A deletion stops the deploy before
-anything goes live**, until it is accepted by exactly what was printed:
+the deploy asks Magento's own importers what they would warn about. Creations,
+updates and theme registrations are printed and go ahead. **Anything else, a
+deletion or any warning worded otherwise, stops the deploy before anything
+goes live**, until it is accepted by exactly what was printed:
 
 ```bash
 make deploy environment=staging EXTRA='-e {"config_import_accept": "These Stores will be deleted: Second"}'

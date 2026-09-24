@@ -1,10 +1,10 @@
 ---
 ###
 # Reads what setup:upgrade's configuration import would ask before it imports
-# this release's config.php, and stops the deploy on anything that deletes: a
-# website, store, group or theme. setup:upgrade runs with --no-interaction,
-# which answers every one of those questions yes, so this is where they are
-# answered instead. Creations and updates are printed and go ahead.
+# this release's config.php, and stops the deploy on anything but a creation, an
+# update or a theme registration: a deletion, or any warning worded otherwise.
+# setup:upgrade runs with --no-interaction, which answers every one of those
+# questions yes, so this is where they are answered instead.
 #
 # Runs only when app:config:status reported work, before anything goes live.
 # Accept a deletion by naming exactly what it printed:

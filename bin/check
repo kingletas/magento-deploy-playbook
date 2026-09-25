@@ -4,16 +4,18 @@
 #
 #   bin/check            (or: make check)
 #
-# Four layers, cheapest first:
+# Five layers, cheapest first:
 #
 #   1. --syntax-check on the two real playbooks. Catches a bad include path, a
 #      malformed task, an undefined play-level key.
 #   2. bin/check-structure. Catches what --syntax-check cannot: a reintroduced
 #      `roles:`, a notify with no handler, a parent-path reference, a stray
 #      lookup('env', ...).
-#   3. test.yml -- the eight offline suites, run for real against
+#   3. The Python tests for bin/audit-log and bin/zdt-proof. The proof runner's
+#      tests use stand-ins for docker and Kapelos, so no store is needed.
+#   4. test.yml -- the eight offline suites, run for real against
 #      inventory/test. No host is contacted; every play is connection: local.
-#   4. yamllint, if it is available.
+#   5. yamllint, ansible-lint and shellcheck, where they are available.
 #
 # Every check runs FROM this directory, because ansible.cfg is resolved from the
 # working directory. That is why this script cd's rather than taking a path.
@@ -91,6 +93,16 @@ else
 fi
 
 echo ""
+echo "Proof runner:"
+if output=$("${python:-python3}" -m unittest tests/test_zdt_proof.py 2>&1); then
+    printf '  ok    bin/zdt-proof: %s\n' "$(printf '%s\n' "${output}" | grep -oE 'Ran [0-9]+ tests')"
+else
+    echo "  FAIL  bin/zdt-proof"
+    printf '%s\n' "${output}" | tail -30 | sed 's/^/          /'
+    fail=$((fail + 1))
+fi
+
+echo ""
 echo "Offline suites:"
 if output=$(ansible-playbook -i inventory/test test.yml 2>&1); then
     # One line per suite, from the play names, so a green run still says what ran.
@@ -139,6 +151,22 @@ elif [ "${REQUIRE_LINT:-0}" = "1" ]; then
     fail=$((fail + 1))
 else
     echo "  SKIP  ansible-lint not installed or not working (pip install -r requirements.txt)"
+fi
+
+# The proof runner is the only shell here held to shellcheck.
+if shellcheck --version >/dev/null 2>&1; then
+    if output=$(shellcheck bin/zdt-proof bin/zdt-proof.d/*.sh bin/zdt-proof.d/proofs/*.sh 2>&1); then
+        echo "  ok    shellcheck bin/zdt-proof"
+    else
+        echo "  FAIL  shellcheck bin/zdt-proof"
+        printf '%s\n' "${output}" | tail -30 | sed 's/^/          /'
+        fail=$((fail + 1))
+    fi
+elif [ "${REQUIRE_LINT:-0}" = "1" ]; then
+    echo "  FAIL  shellcheck not installed, and REQUIRE_LINT=1"
+    fail=$((fail + 1))
+else
+    echo "  SKIP  shellcheck not installed"
 fi
 
 echo ""

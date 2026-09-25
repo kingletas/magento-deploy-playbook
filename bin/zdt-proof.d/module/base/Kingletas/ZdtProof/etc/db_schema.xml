@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<schema xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:Setup/Declaration/Schema/etc/schema.xsd">
+    <table name="zdt_proof_item" resource="default" engine="innodb" comment="Zero-downtime proof fixture">
+        <column xsi:type="int" name="item_id" unsigned="true" nullable="false" identity="true" comment="Item ID"/>
+        <column xsi:type="varchar" name="sku" length="32" nullable="false" comment="SKU"/>
+        <column xsi:type="int" name="qty" unsigned="false" nullable="false" default="0" comment="Quantity"/>
+        <column xsi:type="varchar" name="note" length="255" nullable="true" comment="Note"/>
+        <constraint xsi:type="primary" referenceId="PRIMARY">
+            <column name="item_id"/>
+        </constraint>
+    </table>
+</schema>

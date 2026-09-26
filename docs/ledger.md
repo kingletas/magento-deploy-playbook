@@ -65,6 +65,7 @@ Seventeen event names, in the order a deploy writes them, then the two only `mak
 | `cutover.succeeded` | the new release is the one serving and passed its health check | `maintenance_window`, `setup_upgrade_ran`, `backup_id` |
 | `warmup.completed` | the warm-up finishes, whatever it achieved | `requested`, `ok`, `percent` |
 | `deploy.finished` | the playbook reaches its end | `outcome` |
+| `deploy.failed` | a web host the deploy began with dropped out, during the upload, before the switch or during it; the deploy stops and no success is recorded | `phase`, `lost_hosts` |
 | `deploy.verified` | `make verify` passes, which is a separate run | `outcome`, `upgrade_expected` |
 | `rollback.started` | `make rollback` has chosen the release to go back to | `from_release`, `to_release`, `has_mark` |
 

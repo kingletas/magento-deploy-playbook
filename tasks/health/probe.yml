@@ -38,14 +38,18 @@
          | map(attribute='item') | list }}
   when: inventory_hostname in groups.apps
 
+# An app host the deploy began with that has since dropped out counts as failing:
+# one that is gone cannot pass by being absent.
 - name: Collect the app hosts that failed, on every host
   ansible.builtin.set_fact:
     health_failed_hosts: >-
-      {{ groups.apps | intersect(ansible_play_hosts_all)
-         | map('extract', hostvars)
-         | selectattr('health_failed_paths', 'defined')
-         | rejectattr('health_failed_paths', 'equalto', [])
-         | map(attribute='inventory_hostname') | list }}
+      {{ (groups.apps | intersect(ansible_play_hosts_all)
+          | map('extract', hostvars)
+          | selectattr('health_failed_paths', 'defined')
+          | rejectattr('health_failed_paths', 'equalto', [])
+          | map(attribute='inventory_hostname') | list)
+         + (hostvars['localhost'].fleet_expected | default([])
+            | intersect(groups.apps) | difference(ansible_play_hosts)) }}
 
 - name: Report each app host that failed, and on which paths
   ansible.builtin.debug:

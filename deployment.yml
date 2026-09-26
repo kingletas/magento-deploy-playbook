@@ -14,6 +14,9 @@
   become: true
   gather_facts: true
   pre_tasks:
+    - name: Record the web hosts this deploy begins with
+      ansible.builtin.import_tasks: tasks/fleet/record.yml
+
     - name: Resolve and validate the release facts, before anything is created
       ansible.builtin.include_tasks: tasks/release-preflight.yml
 
@@ -114,6 +117,11 @@
     - name: Unarchive the release on the host
       ansible.builtin.import_tasks: tasks/deploy/unarchive.yml
       when: releases.unarchive
+
+    - name: Stop if a web host dropped out during the upload
+      ansible.builtin.include_tasks: tasks/fleet/intact.yml
+      vars:
+        fleet_phase: upload
 
 - name: Deploy Magento to the web hosts (includes admin & cron)
   hosts: "web"

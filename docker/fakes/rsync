@@ -1,0 +1,11 @@
+#!/bin/bash
+# Test-only rsync wrapper, in the suite image only. When /tmp/mdp-hold-upload names
+# a host, a copy to that host waits until the file is removed, so the suite can
+# stop the host while its upload is in flight. Every other call is plain rsync.
+hold="$(cat /tmp/mdp-hold-upload 2>/dev/null)"
+if [ -n "${hold}" ] && [[ " $* " == *"${hold}:"* ]]; then
+    touch /tmp/mdp-holding
+    for _ in $(seq 1 600); do [ -e /tmp/mdp-hold-upload ] || break; sleep 0.1; done
+    rm -f /tmp/mdp-holding
+fi
+exec /usr/bin/rsync "$@"

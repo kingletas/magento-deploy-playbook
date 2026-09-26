@@ -7,7 +7,8 @@
 # Maintenance stays as the failed step left it.
 #
 #   after_switch_from   before-upgrade or after-upgrade: which side of
-#                       setup:upgrade the failed step was on.
+#                       setup:upgrade the failed step was on. handlers: every
+#                       step has run, and a handler flushed at the end failed.
 #   ansible_failed_task, ansible_failed_result   set by the rescue.
 ###
 - name: Read what failed
@@ -21,15 +22,19 @@
                  | default(f, true) %}{{ ((r.stderr | default('', true)
                  or r.msg | default('', true)) | trim | replace('\n', ' ') | truncate(300))
                  or 'a host this step needed could not be reached' }}
-    after_switch_upgraded: "{{ after_switch_from == 'after-upgrade' and upgrade_needed | bool }}"
+    after_switch_upgraded: "{{ after_switch_from != 'before-upgrade' and upgrade_needed | bool }}"
     after_switch_left: >-
-      {{ ((['php bin/magento cache:flush, on ' ~ magento_host] if after_switch_from == 'before-upgrade' else [])
+      {{ (((['pkill -9 php' ~ php_version ~ ', on ' ~ ((groups.cron + groups.admin) | unique | join(', ')),
+             'mysql -e "use ' ~ (magento_database | default('magento')) ~ '; ' ~ (indexers_reset_sql | join(' '))
+             ~ '", on ' ~ (ansible_play_hosts | first)] if releases.kill_php | bool else [])
+           if after_switch_from == 'handlers' else
+         ((['php bin/magento cache:flush, on ' ~ magento_host] if after_switch_from == 'before-upgrade' else [])
           + (['php bin/magento setup:upgrade --keep-generated --no-interaction, on ' ~ magento_host]
              if after_switch_from == 'before-upgrade' and upgrade_needed | bool else [])
           + ['php bin/magento cache:flush and cache:enable, on every web host',
              'varnishadm ban obj.http.X-Magento-Tags ~ ., on ' ~ (groups.varnish | default([]) | join(', ')),
              'php bin/magento maint:disable, on every web host']
-          + (['php bin/magento ind:reset, on ' ~ magento_host] if releases.kill_php | bool else [])) }}
+          + (['php bin/magento ind:reset, on ' ~ magento_host] if releases.kill_php | bool else [])))) }}
   run_once: true
 
 - name: "Audit: record the failed deploy"

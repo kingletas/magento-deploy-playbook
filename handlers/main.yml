@@ -120,7 +120,9 @@
 # This loops over `groups.cron + groups.admin`, so every inventory must define
 # them. `make check` parses each one and asserts they resolve.
 
-# pkill exits 1 when it matched nothing, which is the ordinary case.
+# pkill exits 1 when it matched nothing, which is the ordinary case. A host that
+# cannot be reached is registered rather than dropped, and the Magento play
+# names it once the handlers have run.
 - name: Stop lingering PHP processes
   ansible.builtin.shell: "pkill -9 -c php{{ php_version }} || true"
   changed_when: false
@@ -128,8 +130,13 @@
   when: releases.kill_php | bool
   delegate_to: "{{ item }}"
   loop: "{{ groups.cron + groups.admin }}"
+  register: php_stopped
+  ignore_unreachable: true
 
-# indexers_reset_sql comes from group_vars/all/build.yml.
+# indexers_reset_sql comes from group_vars/all/build.yml. A failure here stops the
+# deploy, because the Magento play runs its handlers inside a guarded block.
 - name: Reset the indexers
   ansible.builtin.raw: mysql -e "use {{ magento_database | default('magento') }}; {{ item }}"
   loop: '{{ indexers_reset_sql }}'
+  register: indexers_sql_reset
+  ignore_unreachable: true

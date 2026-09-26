@@ -1,0 +1,12 @@
+#!/bin/bash
+# Stands in for the `mysql` client that the indexer-reset handler calls. Logs its
+# arguments and succeeds.
+#
+# Test-only: while /tmp/mysql-fake-fail exists it fails instead, so the suite can
+# fail that handler after the switch.
+echo "[fake-mysql] $*" >> /tmp/build-log 2>/dev/null || true
+if [ -e /tmp/mysql-fake-fail ]; then
+  echo "[fake-mysql] failed on purpose" >&2
+  exit 1
+fi
+exit 0

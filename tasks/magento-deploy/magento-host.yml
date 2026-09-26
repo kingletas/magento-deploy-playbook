@@ -98,7 +98,10 @@
           No host could run Magento's commands against the database:
           {{ magento_host_answers | join('; ') if magento_host_answers | length > 0
              else 'none of ' ~ (magento_hosts | default(groups.admin) | join(', ')) ~ ' is still in the deploy' }}.
-          Nothing has gone live and maintenance is off. Fix the host, or name
-          another in magento_hosts for this environment, and deploy again.
-          The build lock is released.
+          Nothing has gone live and maintenance is off.
+          {{ 'Under --check the release is not unpacked and the commands do not run,
+          so no host can answer; see Known limitations in the README.'
+             if ansible_check_mode else
+             'Fix the host, or name another in magento_hosts for this environment,
+          and deploy again. The build lock is released.' }}
       run_once: true

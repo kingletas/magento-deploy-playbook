@@ -1,0 +1,13 @@
+---
+###
+# Records, on the control node, which web hosts this deploy begins with, so a
+# later check can tell a host that dropped out from one that was never in scope.
+# Taken in the first play, whose hosts include any already unreachable and
+# respect --limit.
+###
+- name: "Fleet: record the web hosts this deploy begins with"
+  ansible.builtin.set_fact:
+    fleet_expected: "{{ groups.web | default([]) | intersect(ansible_play_hosts_all) }}"
+  delegate_to: localhost
+  delegate_facts: true
+  run_once: true

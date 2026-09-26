@@ -1,7 +1,7 @@
 ---
-# Fake fleet for local end-to-end testing: one builder, two app nodes, an admin,
-# a cron and a varnish, so the playbook's `hosts:` patterns resolve as they do
-# against a real environment. All six run sshd.
+# Fake fleet for local end-to-end testing: one builder, three app nodes, an
+# admin, a cron and a varnish, so the playbook's `hosts:` patterns resolve as they
+# do against a real environment. All seven run sshd.
 services:
   builder:
     build: { context: ., dockerfile: Dockerfile }
@@ -25,6 +25,13 @@ services:
     image: magento-deploy-suite
     container_name: mdp-web2
     hostname: web2
+    networks: [fleet]
+    depends_on: [builder]
+
+  web3:
+    image: magento-deploy-suite
+    container_name: mdp-web3
+    hostname: web3
     networks: [fleet]
     depends_on: [builder]
 

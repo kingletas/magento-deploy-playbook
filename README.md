@@ -15,7 +15,7 @@ thing run end to end without owning any servers.
 ```bash
 make help                          # every target, every environment
 make check                         # everything verifiable without a host
-make docker-test                   # full end-to-end run, six containers
+make docker-test                   # full end-to-end run, seven containers
 make docker-demo                   # the same, building real Magento from GitHub
 make deploy environment=staging    # a real deploy, once you have one
 ```
@@ -38,7 +38,7 @@ No servers needed, no credentials, nothing to configure.
 make docker-test
 ```
 
-That builds six throwaway containers -- a builder, two app nodes, an admin
+That builds seven throwaway containers -- a builder, three app nodes, an admin
 host, a cron host and varnish -- stands up a bare git repository as the release
 source, runs the whole deploy against them, and then asserts on what it left
 behind. Nothing is stubbed at the Ansible layer: every assert, gate,

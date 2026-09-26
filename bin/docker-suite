@@ -8,6 +8,7 @@
 #   bin/docker-suite verify    assert on what the deploy actually produced
 #   bin/docker-suite audit     check the audit chain and write an evidence bundle
 #   bin/docker-suite test      up + deploy + verify (what `make docker-test` runs)
+#   bin/docker-suite test-lost-host  lose web3 mid-upload and mid-switch; the deploy must fail and say so
 #   bin/docker-suite logs      show the fake tools' call log per container
 #   bin/docker-suite reset     clear locks and releases, to repeat a run
 #   bin/docker-suite shell <name>
@@ -29,7 +30,8 @@ PLAYBOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOCKER_DIR="${PLAYBOOK_DIR}/docker"
 INVENTORY_DIR="${PLAYBOOK_DIR}/inventory/docker"
 INVENTORY="${INVENTORY_DIR}/hosts"
-CONTAINERS=(mdp-builder mdp-web1 mdp-web2 mdp-admin mdp-cron mdp-varnish)
+CONTAINERS=(mdp-builder mdp-web1 mdp-web2 mdp-web3 mdp-admin mdp-cron mdp-varnish)
+APP_CONTAINERS=(mdp-web1 mdp-web2 mdp-web3)
 
 # Who approves the fixture release, and who deploys it. They must differ: the
 # playbook refuses a release approved by the person deploying it. The deployer is
@@ -111,7 +113,7 @@ cmd_inventory() {
         echo "# The settings for this environment are in group_vars/all.yml, which"
         echo "# is NOT generated."
         echo ""
-        for grp in builder:builder apps:web1,web2 admin:admin cron:cron varnish:varnish; do
+        for grp in builder:builder apps:web1,web2,web3 admin:admin cron:cron varnish:varnish; do
             echo "[${grp%%:*}]"
             IFS=',' read -ra members <<< "${grp#*:}"
             for m in "${members[@]}"; do
@@ -187,7 +189,7 @@ cmd_logs() {
     done
 }
 
-cmd_shell() { docker exec -it "mdp-${1:?usage: shell <builder|web1|web2|admin|cron|varnish>}" bash; }
+cmd_shell() { docker exec -it "mdp-${1:?usage: shell <builder|web1|web2|web3|admin|cron|varnish>}" bash; }
 
 # Clear the build lock and the release tree so a run can be repeated without
 # recreating the containers. Deliberately NOT part of `deploy`: a leftover lock
@@ -234,13 +236,16 @@ cmd_rollback() {
 }
 
 # Which release `current` points at, and what an app host serves. live_release
-# refuses to answer when the two app hosts disagree, which is itself a failure.
+# refuses to answer when the app hosts disagree, which is itself a failure.
+release_on() { docker exec "$1" sh -c 'basename "$(readlink /var/www/html/magento_current)"'; }
 live_release() {
-    local one two
-    one="$(docker exec mdp-web1 sh -c 'basename "$(readlink /var/www/html/magento_current)"')"
-    two="$(docker exec mdp-web2 sh -c 'basename "$(readlink /var/www/html/magento_current)"')"
-    [ "${one}" = "${two}" ] || die "the app hosts serve different releases: web1 ${one}, web2 ${two}."
-    echo "${one}"
+    local first host this
+    first="$(release_on "${APP_CONTAINERS[0]}")"
+    for host in "${APP_CONTAINERS[@]}"; do
+        this="$(release_on "${host}")"
+        [ "${this}" = "${first}" ] || die "the app hosts serve different releases: ${APP_CONTAINERS[0]} ${first}, ${host} ${this}."
+    done
+    echo "${first}"
 }
 storefront_status() {
     docker exec "${1:-mdp-web1}" python3 -c '
@@ -291,7 +296,7 @@ cmd_test_forecast() {
     docker exec mdp-builder rm -f /tmp/magento-fake-forecast-copy
     set_needs_upgrade "rm -f"
     [ "$(live_release)" = "${before}" ] || die "the stopped release went live anyway."
-    for host in mdp-web1 mdp-web2; do
+    for host in "${APP_CONTAINERS[@]}"; do
         [ "$(storefront_status "${host}")" = 200 ] || die "${host} stopped answering 200 after a deploy that went nowhere."
     done
     has_event_since "${lines}" forecast.completed || die "the rehearsal left no forecast.completed record."
@@ -340,6 +345,59 @@ cmd_test_config_import() {
 
 # setup:upgrade failing after the flip: the lock must be released, maintenance
 # left on, and the failure recorded. Last, because it leaves the site down.
+# A web host lost part way through a deploy. The deploy must stop as a whole,
+# name the host and the phase in a deploy.failed record, and record no success,
+# however far the other hosts got. The host is brought back and the fleet made
+# whole again before the next scenario.
+lost_host_restore() {
+    docker start mdp-web3 >/dev/null
+    cmd_inventory >/dev/null
+    docker exec mdp-web3 /etc/init.d/nginx start >/dev/null
+    docker exec mdp-builder sh -c 'rm -f /tmp/mdp-hold-upload /tmp/mdp-holding'
+    ( cd "${PLAYBOOK_DIR}" && ansible-playbook -i inventory/docker unlock.yml >/dev/null ) || die "could not drop the lock the lost host left held."
+}
+lost_host_assert() {  # lost_host_assert <lines before> <phase>
+    has_event_since "$1" deploy.failed || die "a deploy that lost web3 at $2 left no deploy.failed record."
+    tail -n +"$(( $1 + 1 ))" "${AUDIT_LOG_PATH}" | grep '"event": "deploy.failed"' | grep -q "\"phase\": \"$2\"" \
+        || die "the deploy.failed record does not say it happened at $2."
+    tail -n +"$(( $1 + 1 ))" "${AUDIT_LOG_PATH}" | grep '"event": "deploy.failed"' | grep -q web3 \
+        || die "the deploy.failed record does not name web3."
+    for event in cutover.succeeded deploy.finished; do
+        has_event_since "$1" "${event}" && die "a deploy that lost web3 at $2 still recorded ${event}."
+    done
+    return 0
+}
+cmd_test_lost_host() {
+    local lines ip
+    echo "########## a web host lost mid-upload: the deploy fails, names it, records no success ##########"
+    lines="$(wc -l < "${AUDIT_LOG_PATH}")"
+    ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' mdp-web3)"
+    docker exec mdp-builder sh -c "echo ${ip} > /tmp/mdp-hold-upload"
+    cmd_deploy > "${PLAYBOOK_DIR}/local.d/lost-upload.log" 2>&1 &
+    local pid=$!
+    for _ in $(seq 1 600); do docker exec mdp-builder test -e /tmp/mdp-holding && break; sleep 0.2; done
+    docker exec mdp-builder test -e /tmp/mdp-holding || die "the upload to web3 was never held."
+    docker stop -t 1 mdp-web3 >/dev/null
+    docker exec mdp-builder rm -f /tmp/mdp-hold-upload
+    wait "${pid}" && die "a deploy that lost web3 mid-upload reported success."
+    lost_host_assert "${lines}" upload
+    lost_host_restore
+    echo "Lost mid-upload: the deploy failed, deploy.failed names web3 at upload, no success recorded."
+    echo ""
+    echo "########## a web host lost mid-switch: the same, after the other hosts flipped ##########"
+    lines="$(wc -l < "${AUDIT_LOG_PATH}")"
+    docker exec mdp-web3 touch /tmp/mdp-die-on-reload
+    cmd_deploy > "${PLAYBOOK_DIR}/local.d/lost-switch.log" 2>&1 && die "a deploy that lost web3 mid-switch reported success."
+    lost_host_assert "${lines}" switch
+    lost_host_restore
+    echo "Lost mid-switch: the deploy failed, deploy.failed names web3 at switch, no success recorded."
+    echo ""
+    echo "########## the fleet whole again: a deploy with no fault passes ##########"
+    cmd_deploy > "${PLAYBOOK_DIR}/local.d/lost-after.log" 2>&1 || die "a deploy after web3 came back failed."
+    live_release >/dev/null
+    echo "After both: a clean deploy passes and every app host serves one release."
+}
+
 cmd_test_upgrade_fails() {
     local lines
     echo "########## setup:upgrade fails after the flip: maintenance stays, the lock goes ##########"
@@ -351,7 +409,7 @@ cmd_test_upgrade_fails() {
     set_needs_upgrade "rm -f"
     has_event_since "${lines}" upgrade.failed || die "the failed setup:upgrade left no upgrade.failed record."
     docker exec mdp-builder sh -c 'ls /tmp/*.lock 2>/dev/null' && die "the failed setup:upgrade left the build lock behind."
-    for host in mdp-web1 mdp-web2; do
+    for host in "${APP_CONTAINERS[@]}"; do
         [ "$(storefront_status "${host}")" = 503 ] || die "${host} is not in maintenance after setup:upgrade failed."
     done
     echo "Upgrade failure: maintenance kept on both app hosts, the lock released, upgrade.failed recorded."
@@ -374,7 +432,7 @@ cmd_test_rollback() {
         || die "the rollback failed with the listed patch and key accepted."
     docker exec mdp-admin rm -f /tmp/magento-fake-new-constraint
     [ "$(live_release)" != "${before}" ] || die "the accepted rollback did not move current."
-    for host in mdp-web1 mdp-web2; do
+    for host in "${APP_CONTAINERS[@]}"; do
         [ "$(storefront_status "${host}")" = 200 ] || die "the release rolled back to does not answer 200 on ${host}."
     done
 
@@ -386,7 +444,7 @@ cmd_test_rollback() {
     cmd_deploy "${REBUILD_STATIC[@]}" && die "a deploy whose release failed its health check reported success."
     docker exec mdp-builder rm -f /tmp/magento-fake-break-build
     [ "$(live_release)" = "${before}" ] || die "the broken release was not rolled back: $(live_release) is live."
-    for host in mdp-web1 mdp-web2; do
+    for host in "${APP_CONTAINERS[@]}"; do
         [ "$(storefront_status "${host}")" = 200 ] || die "the rolled-back site does not answer 200 on ${host}."
     done
     has_event_since "${lines}" deploy.rolled_back || die "the automatic rollback left no deploy.rolled_back record."
@@ -402,7 +460,7 @@ cmd_test_rollback() {
     set_needs_upgrade "rm -f"
     live="$(live_release)"
     [ "${live}" != "${before}" ] || die "the rollback went ahead although the database had moved."
-    for host in mdp-web1 mdp-web2; do
+    for host in "${APP_CONTAINERS[@]}"; do
         [ "$(storefront_status "${host}")" = 503 ] || die "the release that could not go back is not in maintenance on ${host}."
     done
     has_event_since "${lines}" rollback.refused || die "the refused rollback left no rollback.refused record."
@@ -475,6 +533,8 @@ cmd_test() {
     echo ""
     cmd_test_upgrade_fails
     echo ""
+    cmd_test_lost_host
+    echo ""
     echo "All good. Tear down with: bin/docker-suite down"
 }
 
@@ -486,6 +546,7 @@ case "${1:-}" in
     verify)  shift; cmd_verify "$@" ;;
     audit)   shift; cmd_audit "$@" ;;
     test)    shift; cmd_test "$@" ;;
+    test-lost-host) shift; cmd_test_lost_host "$@" ;;
     logs)    shift; cmd_logs "$@" ;;
     shell)   shift; cmd_shell "$@" ;;
     reset)   shift; cmd_reset "$@" ;;

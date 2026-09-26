@@ -5,6 +5,13 @@
 # fake-storefront, the web server the health check requests, if it is not
 # already listening.
 echo "[fake-service] nginx $1" >> /tmp/build-log 2>/dev/null || true
+# Test-only: with /tmp/mdp-die-on-reload present, a reload stops this container
+# (sshd is PID 1 and exits on TERM), so the suite can lose a host mid-switch.
+if [ "$1" = reload ] && [ -e /tmp/mdp-die-on-reload ]; then
+    rm -f /tmp/mdp-die-on-reload
+    kill -TERM 1
+    sleep 5
+fi
 case "$1" in
   start|restart|reload|force-reload)
     listening() { python3 -c 'import socket; socket.create_connection(("127.0.0.1", 80), 1)' 2>/dev/null; }

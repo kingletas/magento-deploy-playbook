@@ -1,0 +1,33 @@
+---
+###
+# Stops the whole deploy when a web host it began with has dropped out, so a
+# fleet split between two releases is recorded as a failure, never a success.
+#
+#   fleet_phase   where in the deploy this is checked: upload, before-switch
+#                 or switch.
+###
+- name: "Fleet: every web host that began the deploy is still in it, at {{ fleet_phase }}"
+  any_errors_fatal: true
+  block:
+    - name: Name the web hosts that dropped out
+      ansible.builtin.set_fact:
+        fleet_lost: "{{ hostvars['localhost'].fleet_expected | default([]) | difference(ansible_play_hosts) }}"
+      run_once: true
+
+    - name: "Audit: record the failed deploy"
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: deploy.failed
+        audit_detail:
+          phase: "{{ fleet_phase }}"
+          lost_hosts: "{{ fleet_lost }}"
+      when: fleet_lost | length > 0
+
+    - name: Stop the deploy, naming the hosts it lost
+      ansible.builtin.fail:
+        msg: >-
+          The deploy lost {{ fleet_lost | join(', ') }} at {{ fleet_phase }}, so the web
+          hosts may now serve different releases. The deploy is recorded as failed.
+          Bring the host back and deploy again; the build lock is still held, so run
+          make unlock environment=<env> first.
+      when: fleet_lost | length > 0

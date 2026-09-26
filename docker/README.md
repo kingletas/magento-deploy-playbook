@@ -1,6 +1,6 @@
 # Local end-to-end suite
 
-Runs this playbook against six throwaway containers instead of real servers,
+Runs this playbook against seven throwaway containers instead of real servers,
 so the deploy path can be exercised without an AWS account, a VPN, or a
 maintenance window.
 
@@ -47,12 +47,12 @@ is how the suite proves *which* commands ran and *how many times* -- the
 
 ## The fleet
 
-Six containers on one bridge network, from one image. They differ only by which
+Seven containers on one bridge network, from one image. They differ only by which
 inventory group they land in, which is how a real fleet works too.
 
 ```text
 builder   ── clones, builds, tars, and rsyncs to the fleet
-web1 web2 ── [apps]
+web1 web2 web3 ── [apps]
 admin     ── [admin]   the delegate target for every Magento CLI step
 cron      ── [cron]
 varnish   ── receives the page ban (`varnishadm` is a fake)
@@ -82,6 +82,7 @@ varnish   ── receives the page ban (`varnishadm` is a fake)
 | `make docker-reset` | Clear locks and releases so a run can be repeated |
 | `make docker-logs` | Print each container's fake-tool call log |
 | `make docker-down` | Stop and remove |
+| `bin/docker-suite test-lost-host` | Lose `web3` mid-upload, then mid-switch: each deploy must fail, record `deploy.failed` naming the host and the phase, and record no success. Then a clean deploy must pass |
 | `bin/docker-suite shell admin` | Get a shell in a container |
 
 `bin/docker-suite deploy` is three lines -- `cd` to the playbook directory and
@@ -114,7 +115,7 @@ This file used to claim Slack was "off via `notify_via_*`". It wasn't.
 `notify_via_slack` was `true` playbook-side and `SLACK_TOKEN` was empty, so every
 suite run called the Slack module and `failed_when: false` swallowed the failure.
 `notify_via_slack` is per-environment now and `false` here; the handler reports
-`skipping:` on all six containers.
+`skipping:` on all seven containers.
 
 ## The fixture repo
 
@@ -139,11 +140,24 @@ docker exec -e MAGENTO_FAKE_NEEDS_UPGRADE=1 mdp-admin true
 That env var has to be set on the container rather than passed per-command, so
 in practice add it to the `admin` service in `docker-compose.yml` and recreate.
 
+## Losing a host on purpose
+
+`test-lost-host` needs a host to disappear at a chosen step, which a real deploy
+here is too fast to hit by hand. Two hooks do it, and both live only in this
+image's fakes, so no real inventory can reach them:
+
+- **Mid-upload.** `docker/fakes/rsync` wraps rsync on the builder. While
+  `/tmp/mdp-hold-upload` names a host's address, a copy to that host waits, so the
+  suite can stop the host and then let the copy go.
+- **Mid-switch.** `docker/fakes/initd-nginx` stops its own container on a reload
+  while `/tmp/mdp-die-on-reload` exists. The reload comes right after the
+  `current` symlink flips, so the other hosts have switched and this one is gone.
+
 ## What this doesn't cover
 
 - **Real Magento.** No database, no indexers, no static content. A release that
   extracts and symlinks correctly here could still be broken Magento.
-- **Scale and timing.** Two app nodes on one host say nothing about a 5-node
+- **Scale and timing.** Three app nodes on one host say nothing about a 5-node
   rsync fan-out or a realistic maintenance window.
 - **Anything the fakes paper over.** `composer install` never resolves a
   dependency; the bundler never bundles anything.
@@ -164,7 +178,7 @@ fine:
    where `ansible.cfg` is, so a path relative to the inventory *file* isn't the
    same thing as a path relative to the working directory.
 2. **`IdentitiesOnly=yes` is mandatory.** Without it `ssh` offers every key in
-   the operator's agent, and six containers at the default `MaxAuthTries` reject
+   the operator's agent, and seven containers at the default `MaxAuthTries` reject
    the connection before the right key is tried.
 3. **The builder genuinely runs as `ubuntu`.** `/var/www/html` owned by
    `www-data` made the clone fail with "Permission denied". A `become_user`

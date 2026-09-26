@@ -322,6 +322,25 @@ releases the build lock, and prints the steps left to run by hand, with whether
 for all of them, so no host carries on alone. `setup:upgrade` keeps its own
 response, described below.
 
+**The build lock is released or held for a reason, never left behind.** It
+says who took it and for which release, and a second deploy is refused with
+whatever it says.
+
+- **A deploy that stops before anything goes live releases it**: a refused
+  commit, a failed build or upload, the upgrade gate, the configuration import,
+  the rehearsal, the backup, or no host able to run Magento's commands. Nothing
+  changed that anyone must look at first, so the next deploy is the retry.
+  `deploy.failed` records the phase (`preflight`, `build`, `upload` or
+  `before-switch`) and the step, unless the step already recorded why.
+- **A deploy that stops after the switch in a state a person must see keeps it,
+  and writes why into it**: a web host lost at or after the switch, which can
+  leave the fleet split, and every health-check stop that leaves the new
+  release live or the site in maintenance. The next deploy is refused with that
+  reason until `make unlock` clears it.
+- A failed `setup:upgrade` or a failed step after the switch releases it, since
+  the message names the exact recovery. A prune that fails at the very end
+  still lets it go.
+
 ## After the cutover: the health check and rollback
 
 Once the new release is live and maintenance is off, every app host requests

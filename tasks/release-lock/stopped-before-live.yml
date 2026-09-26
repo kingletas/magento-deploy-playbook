@@ -1,0 +1,48 @@
+---
+###
+# The decided response to a deploy that stops before anything goes live: the
+# build, the upload, or any gate before the switch. Nothing changed that a
+# person has to look at first, so the next deploy is the retry. It records
+# deploy.failed with the phase and the step, unless the step already recorded
+# why it failed, releases the build lock, and stops with the step's own message.
+#
+#   stopped_phase   preflight, build, upload or before-switch.
+#   ansible_failed_task, ansible_failed_result   set by the rescue.
+###
+- name: Read why it stopped
+  ansible.builtin.set_fact:
+    # A host sent here because another host's run_once step failed has no
+    # failure of its own to read, and neither does one whose host went
+    # unreachable, so both fall back to saying that much.
+    stopped_step: "{{ (ansible_failed_task | default({})).name | default('a step on another host') }}"
+    stopped_message: >-
+      {% set f = ansible_failed_result | default({}) %}{% set r = f.results | default([f])
+                 | selectattr('failed', 'defined') | selectattr('failed') | list | first
+                 | default(f, true) %}{{ ((r.msg | default('', true)
+                 or r.stderr | default('', true)) | trim)
+                 or 'A host this step needed could not be reached.' }}
+  run_once: true
+
+- name: "Audit: record the failed deploy"
+  ansible.builtin.include_tasks: tasks/audit/record.yml
+  vars:
+    audit_event: deploy.failed
+    audit_detail:
+      phase: "{{ stopped_phase }}"
+      step: "{{ stopped_step }}"
+      error: "{{ stopped_message | replace('\n', ' ') | truncate(300) }}"
+  when: not audit_failure_recorded | default(false) | bool
+
+- name: Drop the build lock, since nothing went live
+  ansible.builtin.file:
+    path: "{{ release_lock_file }}"
+    state: absent
+  delegate_to: "{{ groups.builder | first }}"
+  run_once: true
+
+- name: Stop with the step's own message
+  ansible.builtin.fail:
+    msg: >-
+      {{ stopped_message }}{{ '' if stopped_message is search('lock is released')
+      else ' Nothing went live, and the build lock is released.' }}
+  run_once: true

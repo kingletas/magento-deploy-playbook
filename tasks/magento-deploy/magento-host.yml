@@ -6,7 +6,8 @@
 # bin/magento against the database, read as setup:db:status answering 0 (up to
 # date) or 2 (work to do). The first that qualifies in magento_hosts is chosen,
 # so a host after it is used only when every one before it cannot. When none
-# can, the deploy stops here with nothing live and maintenance off.
+# can, the deploy stops here with nothing live and maintenance off, and the
+# response main.yml gives every stop before the switch releases the lock.
 #
 #   magento_hosts      the candidates, in order of preference, from the
 #                      inventory; the admin group when unset.
@@ -15,9 +16,11 @@
 # setup:db:status is the probe, so the chosen host's answer is the one the
 # upgrade gate reads, as db_config.
 ###
+# `select('in', ...)` rather than `intersect`, which does not keep the first list's
+# order on newer Ansible, and the order is the preference.
 - name: Name the hosts that may run Magento's commands
   ansible.builtin.set_fact:
-    magento_host_candidates: "{{ magento_hosts | default(groups.admin) | intersect(ansible_play_hosts) }}"
+    magento_host_candidates: "{{ magento_hosts | default(groups.admin) | select('in', ansible_play_hosts) | list }}"
   run_once: true
 
 - name: Put the deploy's PHP helpers on each of them
@@ -85,13 +88,6 @@
           phase: magento-host
           tried: "{{ magento_host_answers }}"
 
-    - name: Drop the build lock, since the run ends here
-      ansible.builtin.file:
-        path: "{{ release_lock_file }}"
-        state: absent
-      delegate_to: "{{ groups.builder | first }}"
-      run_once: true
-
     - name: Stop, before anything goes live
       ansible.builtin.fail:
         msg: >-
@@ -103,5 +99,5 @@
           so no host can answer; see Known limitations in the README.'
              if ansible_check_mode else
              'Fix the host, or name another in magento_hosts for this environment,
-          and deploy again. The build lock is released.' }}
+          and deploy again.' }}
       run_once: true

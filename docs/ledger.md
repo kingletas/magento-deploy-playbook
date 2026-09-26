@@ -65,7 +65,7 @@ Seventeen event names, in the order a deploy writes them, then the two only `mak
 | `cutover.succeeded` | the new release is the one serving and passed its health check | `maintenance_window`, `setup_upgrade_ran`, `backup_id` |
 | `warmup.completed` | the warm-up finishes, whatever it achieved | `requested`, `ok`, `percent` |
 | `deploy.finished` | the playbook reaches its end | `outcome` |
-| `deploy.failed` | the deploy stopped and no success is recorded: a web host it began with dropped out (`phase` upload, before-cutover, before-switch, switch or after-switch, with `lost_hosts`); no host could run Magento's commands (`phase: magento-host`, with what each answered in `tried`); or a step after the switch failed (`phase: after-switch`, with `step`, `magento_host` and `error`), which also releases the lock | `phase`, and `lost_hosts`, `tried` or `step`, `magento_host`, `error` |
+| `deploy.failed` | the deploy stopped and no success is recorded: a web host it began with dropped out (`phase` upload, before-cutover, before-switch, switch or after-switch, with `lost_hosts`); no host could run Magento's commands (`phase: magento-host`, with what each answered in `tried`); a step after the switch failed (`phase: after-switch`, with `step`, `magento_host` and `error`); or any other step stopped it before anything went live (`phase` preflight, build, upload or before-switch, with `step` and `error`), unless that step recorded its own failure | `phase`, and `lost_hosts`, `tried` or `step`, `magento_host`, `error` |
 | `deploy.verified` | `make verify` passes, which is a separate run | `outcome`, `upgrade_expected` |
 | `rollback.started` | `make rollback` has chosen the release to go back to | `from_release`, `to_release`, `has_mark` |
 

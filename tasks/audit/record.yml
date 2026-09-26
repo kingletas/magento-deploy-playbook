@@ -31,3 +31,11 @@
   become: false
   changed_when: true
   failed_when: audit_append.rc != 0 and (audit.required | bool)
+
+# So a stop that already said why it failed is not recorded twice by the
+# response that releases the lock (release-lock/stopped-before-live.yml).
+- name: "Audit: note that this run has recorded a failure"
+  ansible.builtin.set_fact:
+    audit_failure_recorded: true
+  run_once: true
+  when: audit_event is search('\\.(failed|refused)$')

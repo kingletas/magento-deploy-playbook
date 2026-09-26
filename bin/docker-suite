@@ -522,6 +522,14 @@ cmd_test_magento_host() {
         || die "cutover.started does not name web1 as the host that ran Magento's commands."
     live_release >/dev/null
     echo "Fallback: admin passed over, web1 ran Magento's commands, and the deploy passed."
+    echo ""
+    echo "########## both can, admin listed first: admin is chosen, the fallback stays a fallback ##########"
+    lines="$(wc -l < "${AUDIT_LOG_PATH}")"
+    cmd_deploy -e '{"magento_hosts": ["admin", "web1"]}' > "${PLAYBOOK_DIR}/local.d/magento-host-preferred.log" 2>&1 \
+        || die "a deploy with both hosts able to answer failed."
+    tail -n +"$(( lines + 1 ))" "${AUDIT_LOG_PATH}" | grep '"event": "cutover.started"' | grep -q '"magento_host": "admin"' \
+        || die "admin, listed first and able to answer, was not the host chosen."
+    echo "Preference: admin, listed first, ran Magento's commands with web1 as the unused fallback."
 }
 
 # A step after the switch fails on one host: the deploy stops for every host,

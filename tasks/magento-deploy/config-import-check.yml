@@ -18,7 +18,7 @@
   become_user: "{{ system.user }}"
   run_once: true
   delegate_to: "{{ item }}"
-  loop: "{{ groups.admin }}"
+  loop: "{{ [magento_host] }}"
   register: config_warnings_run
   changed_when: false
   failed_when: false

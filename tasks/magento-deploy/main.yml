@@ -2,11 +2,13 @@
 ###
 # Put Magento onto the extracted release and cut over to it.
 #
-# Two things hold throughout. No `changed_when` on commands that change the
+# Three things hold throughout. No `changed_when` on commands that change the
 # store, deliberately: they report changed every run, and that is what fires the
-# handlers. And `run_once` is load-bearing on every delegated task -- without it
-# `delegate_to: item` with `loop: groups.admin` runs once per WEB host, so a
-# five-host fleet fires the same command five times at one admin.
+# handlers. Every Magento command runs on one host, magento_host, chosen before
+# anything goes live (magento-host.yml); the tasks loop over it as a one-item
+# list so their registers keep the `.results` shape the readers expect. And
+# `run_once` is load-bearing on every delegated task -- without it the command
+# runs once per WEB host, so a five-host fleet fires it five times at one host.
 #
 # `var` is per release, so a maintenance flag only covers the release it was
 # written in. Maintenance goes on in the incoming release, before the flip, and
@@ -24,25 +26,17 @@
     follow: false
   register: outgoing_link
 
-# `var` is not in the archive, so Magento creates var/log on this call, owned by
-# whoever runs it. Every later step runs as system.user and must be able to write.
-- name: Put the deploy's PHP helpers on the admin host
-  ansible.builtin.import_tasks: tasks/helpers/install.yml
+- name: Stop if a web host dropped out before the cutover
+  ansible.builtin.include_tasks: tasks/fleet/intact.yml
+  vars:
+    fleet_phase: before-cutover
+  when: releases.complete | bool
 
-# Through magento-isolated.php, because the incoming code would otherwise store
-# its merged configuration in the cache the live release is still reading.
-- name: Check for setup upgrade, the first bin/magento call on the release
-  ansible.builtin.command: "php {{ deploy_helpers }}magento-isolated.php {{ incoming_release }} -- setup:db:status"
-  args:
-    chdir: '{{ incoming_release }}'
-  become: true
-  become_user: '{{ system.user }}'    # not root; see above
-  run_once: true
-  delegate_to: "{{ item }}"
-  loop: "{{ groups.admin }}"
-  register: db_config
-  changed_when: false
-  failed_when: false
+# Its setup:db:status is the first bin/magento call on the release. `var` is not
+# in the archive, so Magento creates var/log on it, owned by whoever runs it, and
+# every later step runs as system.user, which must be able to write there.
+- name: Choose the host that runs Magento's commands, and stop if none can
+  ansible.builtin.import_tasks: tasks/magento-deploy/magento-host.yml
 
 - name: "Check for app config status"
   ansible.builtin.command: "php {{ deploy_helpers }}magento-isolated.php {{ incoming_release }} -- app:config:status"
@@ -52,7 +46,7 @@
   become: true
   run_once: true
   delegate_to: "{{ item }}"
-  loop: "{{ groups.admin }}"
+  loop: "{{ [magento_host] }}"
   register: app_config
   changed_when: false
   failed_when: false
@@ -65,7 +59,7 @@
   become: true
   run_once: true
   delegate_to: "{{ item }}"
-  loop: "{{ groups.admin }}"
+  loop: "{{ [magento_host] }}"
   register: theme_config
   changed_when: false
   failed_when: false
@@ -85,7 +79,7 @@
   become: true
   run_once: true
   delegate_to: "{{ item }}"
-  loop: "{{ groups.admin }}"
+  loop: "{{ [magento_host] }}"
   register: db_mark_before
   changed_when: false
 
@@ -114,6 +108,7 @@
     audit_detail:
       maintenance_window: "{{ upgrade_needed | bool }}"
       artefact_sha256: "{{ release_sha256 | default('') }}"
+      magento_host: "{{ magento_host }}"
 
 - name: Back up when this release requires it
   ansible.builtin.import_tasks: tasks/backup/run.yml
@@ -181,15 +176,28 @@
   vars:
     outgoing_release: "{{ outgoing_link.stat.lnk_source | default('') if outgoing_link.stat.islnk | default(false) else '' }}"
 
-- name: Flush magento cache
-  ansible.builtin.command: "php bin/magento cache:flush"
-  args:
-    chdir: '{{ releases.current }}'
-  become_user: '{{ system.user }}'
-  become: true
-  run_once: true
-  delegate_to: "{{ item }}"
-  loop: "{{ groups.admin }}"
+# From here every web host serves the new release. Each step has a decided
+# response to failing (after-switch-failed.yml): the deploy stops, records which
+# step and why, releases the lock and says what is left to run. setup:upgrade,
+# between the two blocks, keeps its own, since it may leave the database part
+# migrated. A step that runs on every web host ignores its own failure and a
+# check after it fails once for all of them, so no host carries on alone.
+- name: Flush the cache before setup:upgrade, and stop cleanly when it fails
+  block:
+    - name: Flush magento cache
+      ansible.builtin.command: "php bin/magento cache:flush"
+      args:
+        chdir: '{{ releases.current }}'
+      become_user: '{{ system.user }}'
+      become: true
+      run_once: true
+      delegate_to: "{{ item }}"
+      loop: "{{ [magento_host] }}"
+  rescue:
+    - name: Stop, and say what is left
+      ansible.builtin.include_tasks: tasks/magento-deploy/after-switch-failed.yml
+      vars:
+        after_switch_from: before-upgrade
 
 # --no-interaction answers the config import's questions yes, which is safe only
 # because config-import-check.yml read those questions before the cutover and
@@ -205,7 +213,7 @@
       become: true
       run_once: true
       delegate_to: "{{ item }}"
-      loop: "{{ groups.admin }}"
+      loop: "{{ [magento_host] }}"
       when: upgrade_needed | bool
   rescue:
     - name: "Audit: record the failed setup:upgrade"
@@ -214,7 +222,9 @@
         audit_event: upgrade.failed
         audit_detail:
           error: "{{ (ansible_failed_result.results | default([ansible_failed_result]) | selectattr('failed', 'defined')
-                      | selectattr('failed') | map(attribute='stderr') | first | default('', true))[-500:] }}"
+                      | selectattr('failed') | map(attribute='stderr') | first | default('', true)
+                      or ansible_failed_result.msg | default(''))[-500:] }}"
+          magento_host: "{{ magento_host }}"
           backup_id: "{{ backup_id | default('') }}"
 
     # The run ends here, so the prune play that normally drops the lock never runs.
@@ -228,69 +238,108 @@
     - name: Stop in maintenance, and say how to recover
       ansible.builtin.fail:
         msg: >-
-          setup:upgrade failed after the cutover, so the database may be part
-          migrated. The site is in maintenance on {{ release_id }} and stays
-          there. A code rollback is no answer: the rollback guard refuses one
-          after a partial migration. Either restore the database
+          setup:upgrade failed after the cutover on {{ magento_host }}, so the
+          database may be part migrated. The site is in maintenance on
+          {{ release_id }} and stays there. A code rollback is no answer: the
+          rollback guard refuses one after a partial migration. Either restore
+          the database
           {{ ('from the backup this deploy took, ' ~ backup_id ~ ',')
              if backup_id | default('') | length > 0 else '(this deploy took no backup)' }}
           and then make rollback, or fix the cause and run
           php bin/magento setup:upgrade --keep-generated --no-interaction in
-          {{ releases.current }} on {{ groups.admin | first }}, then
-          php bin/magento maint:disable. The build lock is released.
+          {{ releases.current }} on {{ magento_host }}, or on another host in
+          magento_hosts if it is gone, then php bin/magento maint:disable.
+          The build lock is released.
       run_once: true
 
-- name: Flush and enforce cache
-  ansible.builtin.command: "php bin/magento {{ item }}"
-  args:
-    chdir: '{{ releases.current }}'
-  become_user: '{{ system.user }}'
-  become: true
-  loop:
-    - "cache:flush"
-    - "cache:enable"
-  notify:
-    # - Flush the Yottaa edge cache    # a lower environment is not behind it
-    - Notify Slack
-    - Create the New Relic deployment marker
-    - Post the Noibu release webhook
-    - Report which notifications landed
+- name: Finish the cutover, and stop cleanly when a step fails
+  block:
+    - name: Flush and enforce cache
+      ansible.builtin.command: "php bin/magento {{ item }}"
+      args:
+        chdir: '{{ releases.current }}'
+      become_user: '{{ system.user }}'
+      become: true
+      loop:
+        - "cache:flush"
+        - "cache:enable"
+      register: cache_enforced
+      ignore_errors: true
+      notify:
+        # - Flush the Yottaa edge cache    # a lower environment is not behind it
+        - Notify Slack
+        - Create the New Relic deployment marker
+        - Post the Noibu release webhook
+        - Report which notifications landed
 
-# The ban Magento's own full-page purge sends. Only its pages go: static files
-# move to new versioned URLs and media is shared, so both stay cached.
-- name: Invalidate Magento's pages in Varnish
-  ansible.builtin.command:
-    argv: [varnishadm, ban, obj.http.X-Magento-Tags, "~", "."]
-    # Otherwise `~` expands to the become user's home directory.
-    expand_argument_vars: false
-  become: true
-  run_once: true
-  delegate_to: "{{ item }}"
-  loop: "{{ groups.varnish }}"
+    - name: Stop if the cache failed on any web host
+      ansible.builtin.fail:
+        msg: "cache:flush or cache:enable failed on {{ failed_hosts | join(', ') }}."
+      vars:
+        failed_hosts: >-
+          {{ ansible_play_hosts | zip(ansible_play_hosts | map('extract', hostvars, 'cache_enforced'))
+             | selectattr('1.failed', 'defined') | selectattr('1.failed') | map('first') | list }}
+      run_once: true
+      when: failed_hosts | length > 0
+
+    # The ban Magento's own full-page purge sends. Only its pages go: static files
+    # move to new versioned URLs and media is shared, so both stay cached.
+    - name: Invalidate Magento's pages in Varnish
+      ansible.builtin.command:
+        argv: [varnishadm, ban, obj.http.X-Magento-Tags, "~", "."]
+        # Otherwise `~` expands to the become user's home directory.
+        expand_argument_vars: false
+      become: true
+      run_once: true
+      delegate_to: "{{ item }}"
+      loop: "{{ groups.varnish }}"
+      when: releases.complete | bool
+
+    # Unconditional: it also clears a flag a failed attempt left in this release.
+    - name: Disable maintenance mode
+      ansible.builtin.command: "php bin/magento maint:disable"
+      args:
+        chdir: '{{ releases.current }}'
+      become_user: '{{ system.user }}'
+      become: true
+      register: maintenance_off
+      ignore_errors: true
+      notify: Warm the caches
+
+    - name: Stop if maintenance could not be turned off on any web host
+      ansible.builtin.fail:
+        msg: "maint:disable failed on {{ failed_hosts | join(', ') }}, which stay in maintenance."
+      vars:
+        failed_hosts: >-
+          {{ ansible_play_hosts | zip(ansible_play_hosts | map('extract', hostvars, 'maintenance_off'))
+             | selectattr('1.failed', 'defined') | selectattr('1.failed') | map('first') | list }}
+      run_once: true
+      when: failed_hosts | length > 0
+
+    - name: Reset the indexers, which killing PHP leaves marked running
+      ansible.builtin.command: "php bin/magento ind:reset"
+      args:
+        chdir: '{{ releases.current }}'
+      become_user: '{{ system.user }}'
+      become: true
+      notify: Reset the indexers
+      delegate_to: "{{ item }}"
+      loop: "{{ [magento_host] }}"
+      run_once: true
+      when:
+        - releases.kill_php | bool
+        - releases.complete | bool
+  rescue:
+    - name: Stop, and say what is left
+      ansible.builtin.include_tasks: tasks/magento-deploy/after-switch-failed.yml
+      vars:
+        after_switch_from: after-upgrade
+
+- name: Stop if a web host dropped out after the switch
+  ansible.builtin.include_tasks: tasks/fleet/intact.yml
+  vars:
+    fleet_phase: after-switch
   when: releases.complete | bool
-
-# Unconditional: it also clears a flag a failed attempt left in this release.
-- name: Disable maintenance mode
-  ansible.builtin.command: "php bin/magento maint:disable"
-  args:
-    chdir: '{{ releases.current }}'
-  become_user: '{{ system.user }}'
-  become: true
-  notify: Warm the caches
-
-- name: Reset the indexers, which killing PHP leaves marked running
-  ansible.builtin.command: "php bin/magento ind:reset"
-  args:
-    chdir: '{{ releases.current }}'
-  become_user: '{{ system.user }}'
-  become: true
-  notify: Reset the indexers
-  delegate_to: "{{ item }}"
-  loop: "{{ groups.admin }}"
-  run_once: true
-  when:
-    - releases.kill_php | bool
-    - releases.complete | bool
 
 - name: Check the new release, and put the old one back when it fails
   ansible.builtin.include_tasks: tasks/magento-deploy/health.yml
@@ -308,7 +357,7 @@
   become: true
   run_once: true
   delegate_to: "{{ item }}"
-  loop: "{{ groups.admin }}"
+  loop: "{{ [magento_host] }}"
   register: db_mark_live
   changed_when: false
   failed_when: false

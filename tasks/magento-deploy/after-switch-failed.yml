@@ -1,0 +1,61 @@
+---
+###
+# The decided response when a step after the switch fails. Every web host serves
+# the new release by then, so the deploy stops instead of guessing: it records
+# deploy.failed naming the step, the host that runs Magento's commands and the
+# error, releases the build lock, and says which steps are left to run by hand.
+# Maintenance stays as the failed step left it.
+#
+#   after_switch_from   before-upgrade or after-upgrade: which side of
+#                       setup:upgrade the failed step was on.
+#   ansible_failed_task, ansible_failed_result   set by the rescue.
+###
+- name: Read what failed
+  ansible.builtin.set_fact:
+    after_switch_step: "{{ ansible_failed_task.name }}"
+    after_switch_error: >-
+      {% set r = ansible_failed_result.results | default([ansible_failed_result])
+                 | selectattr('failed', 'defined') | selectattr('failed') | list | first
+                 | default(ansible_failed_result, true) %}{{ (r.stderr | default('', true)
+                 or r.msg | default('', true)) | trim | replace('\n', ' ') | truncate(300) }}
+    after_switch_upgraded: "{{ after_switch_from == 'after-upgrade' and upgrade_needed | bool }}"
+    after_switch_left: >-
+      {{ ((['php bin/magento cache:flush, on ' ~ magento_host] if after_switch_from == 'before-upgrade' else [])
+          + (['php bin/magento setup:upgrade --keep-generated --no-interaction, on ' ~ magento_host]
+             if after_switch_from == 'before-upgrade' and upgrade_needed | bool else [])
+          + ['php bin/magento cache:flush and cache:enable, on every web host',
+             'varnishadm ban obj.http.X-Magento-Tags ~ ., on ' ~ (groups.varnish | default([]) | join(', ')),
+             'php bin/magento maint:disable, on every web host']
+          + (['php bin/magento ind:reset, on ' ~ magento_host] if releases.kill_php | bool else [])) }}
+  run_once: true
+
+- name: "Audit: record the failed deploy"
+  ansible.builtin.include_tasks: tasks/audit/record.yml
+  vars:
+    audit_event: deploy.failed
+    audit_detail:
+      phase: after-switch
+      step: "{{ after_switch_step }}"
+      magento_host: "{{ magento_host }}"
+      error: "{{ after_switch_error }}"
+
+# The run ends here, so the prune play that normally drops the lock never runs.
+- name: Drop the build lock, since the run ends here
+  ansible.builtin.file:
+    path: "{{ release_lock_file }}"
+    state: absent
+  delegate_to: "{{ groups.builder | first }}"
+  run_once: true
+
+- name: Stop, and say what is left to run
+  ansible.builtin.fail:
+    msg: >-
+      "{{ after_switch_step }}" failed after the switch: {{ after_switch_error }}.
+      Every web host serves {{ release_id }}{{ ', in maintenance' if upgrade_needed | bool else '' }}.
+      {{ 'setup:upgrade has run, so the database has moved and the rollback guard would refuse a code rollback.'
+         if after_switch_upgraded | bool else
+         'The database is as the old release left it, so make rollback can put the old release back.' }}
+      To finish instead, run these in {{ releases.current }}, from the step that
+      failed onward: {{ after_switch_left | join('; ') }}. If {{ magento_host }}
+      is gone, use another host in magento_hosts. The build lock is released.
+  run_once: true

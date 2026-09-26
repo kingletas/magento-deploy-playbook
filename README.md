@@ -83,6 +83,7 @@ and what isn't.
 - [Environments](#environments)
 - [Controls, approvals and the audit log](#controls-approvals-and-the-audit-log)
 - [Warming the storefront](#warming-the-storefront)
+- [Which host runs Magento's commands](#which-host-runs-magentos-commands)
 - [After the cutover: the health check and rollback](#after-the-cutover-the-health-check-and-rollback)
 - [Rehearsing setup:upgrade](#rehearsing-setupupgrade)
 - [Proving the zero-downtime assumptions](#proving-the-zero-downtime-assumptions)
@@ -245,7 +246,7 @@ they set themselves. The signature is the control; the deployer check only stops
 a release being approved by the person shipping it.
 
 **The backup runs before maintenance goes on and before the symlink moves**, on
-the first admin host. Its last line of output is recorded as the backup's name,
+the host that runs Magento's commands. Its last line of output is recorded as the backup's name,
 and a backup that fails or names nothing stops the deploy with the old release
 still serving.
 
@@ -289,6 +290,37 @@ window there is no moment before customers reach the new release, and during a
 window Magento's maintenance page blocks the warm-up's requests too. Warming a
 node before it takes traffic needs a rolling deploy, which this playbook does
 not do.
+
+## Which host runs Magento's commands
+
+**One host runs every Magento command in a deploy**: the status checks, the
+backup, the rehearsal, the cache flush, `setup:upgrade` and the indexer reset.
+It is chosen before anything goes live, from `magento_hosts` in the inventory,
+which is the admin group when an environment does not set it:
+
+```yaml
+magento_hosts: [admin1, web1]   # admin1 first; web1 only when admin1 cannot
+```
+
+A host is chosen when it is still in the deploy and its `setup:db:status`
+answers, which means it can run `bin/magento` against the database. The first
+that does is used, and the deploy says when it passed over one. When none can,
+the deploy stops there: nothing has gone live, maintenance is off, the build lock
+is released, and `deploy.failed` records `phase: magento-host` with what each
+host answered.
+
+**A web host that drops out stops the deploy** wherever it happens: before the
+cutover, during the upload, before and during the switch, and after it. The
+record names the host and the phase, and no success is written.
+
+**Every step after the switch has a decided response.** By then every web host
+serves the new release, so when the cache flush, the Varnish ban,
+`maint:disable` or the indexer reset fails, the deploy stops rather than guess:
+it records `deploy.failed` with `phase: after-switch`, the step and the error,
+releases the build lock, and prints the steps left to run by hand, with whether
+`make rollback` is still possible. A step that runs on every web host fails once
+for all of them, so no host carries on alone. `setup:upgrade` keeps its own
+response, described below.
 
 ## After the cutover: the health check and rollback
 
@@ -444,9 +476,9 @@ metadata lock that waits for every open transaction on the table, which no
 rehearsal can size.
 
 The dump holds the configuration table, secrets included. It is written 0600
-and deleted from the admin host and the builder when the rehearsal ends,
-whatever happened. The builder needs Docker and Python 3, and the admin host
-`mariadb-dump` or `mysqldump`.
+and deleted from the host that runs Magento's commands and the builder when the
+rehearsal ends, whatever happened. The builder needs Docker and Python 3, and that
+host `mariadb-dump` or `mysqldump`.
 
 ## Proving the zero-downtime assumptions
 
@@ -703,7 +735,7 @@ tasks/
     magento-deploy/         the cutover, the upgrade gate, the health check
     health/ rollback/       the health check, and the guarded rollback
     forecast/               the setup:upgrade rehearsal
-    helpers/                puts files/helpers/ on the admin host
+    helpers/                puts files/helpers/ where Magento's commands run
     release-lock/           acquire, release
     release-prune.yml  dora-event.yml
 handlers/main.yml       every handler; each play imports it

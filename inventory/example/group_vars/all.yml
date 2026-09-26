@@ -92,7 +92,8 @@ health:
 # production's schema and the rows setup:upgrade reads, then asks that server
 # how it would run every schema statement: instantly, online, or as a table
 # copy that blocks writes. Each is sized with production's row counts. The
-# builder needs Docker and Python 3, the admin host mariadb-dump or mysqldump.
+# builder needs Docker and Python 3, and the host that runs Magento's commands
+# mariadb-dump or mysqldump.
 #   enabled       true or false
 #   image         the MariaDB image, whose major.minor must be production's
 #   stop_on_rows  stop before the cutover when a blocking copy touches a table
@@ -127,8 +128,15 @@ approval:
   allowed_signers: /etc/magento-deploy/allowed_signers
   tag_pattern: "approved/*"
 
-# backup - a command run on the first admin host before maintenance goes on and
-# the symlink flips. Its last line of output is recorded as the backup id.
+# magento_hosts - the hosts that may run Magento's commands (the status checks,
+# the backup, the cache, setup:upgrade, the indexers), in order of preference.
+# The deploy uses the first that can read the database, chosen before anything
+# goes live; a host after it is a fallback. Unset, it is the admin group.
+# magento_hosts: [admin.example.com, web1.example.com]
+
+# backup - a command run on the host that runs Magento's commands, before
+# maintenance goes on and the symlink flips. Its last line of output is recorded
+# as the backup id.
 #   run      never, window (only when the release takes a maintenance window)
 #            or always
 #   command  runs with bash; it must print the snapshot or dump name last

@@ -1,0 +1,107 @@
+---
+###
+# Chooses the one host that runs Magento's commands for this deploy, before
+# anything goes live: the status checks, the backup, the cache, setup:upgrade
+# and the indexers. A host qualifies when it is still in the deploy and can run
+# bin/magento against the database, read as setup:db:status answering 0 (up to
+# date) or 2 (work to do). The first that qualifies in magento_hosts is chosen,
+# so a host after it is used only when every one before it cannot. When none
+# can, the deploy stops here with nothing live and maintenance off.
+#
+#   magento_hosts      the candidates, in order of preference, from the
+#                      inventory; the admin group when unset.
+#   incoming_release   the release the status is read from.
+#
+# setup:db:status is the probe, so the chosen host's answer is the one the
+# upgrade gate reads, as db_config.
+###
+- name: Name the hosts that may run Magento's commands
+  ansible.builtin.set_fact:
+    magento_host_candidates: "{{ magento_hosts | default(groups.admin) | intersect(ansible_play_hosts) }}"
+  run_once: true
+
+- name: Put the deploy's PHP helpers on each of them
+  ansible.builtin.import_tasks: tasks/helpers/install.yml
+  vars:
+    helpers_hosts: "{{ magento_host_candidates }}"
+    helpers_best_effort: true
+
+# Through magento-isolated.php, because the incoming code would otherwise store
+# its merged configuration in the cache the live release is still reading.
+- name: Ask each whether it can read the database
+  ansible.builtin.command: "php {{ deploy_helpers }}magento-isolated.php {{ incoming_release }} -- setup:db:status"
+  args:
+    chdir: '{{ incoming_release }}'
+  become: true
+  become_user: '{{ system.user }}'
+  run_once: true
+  delegate_to: "{{ item }}"
+  loop: "{{ magento_host_candidates }}"
+  register: magento_host_probe
+  changed_when: false
+  failed_when: false
+  ignore_unreachable: true
+
+- name: Choose the first that can, and keep its answer for the upgrade gate
+  ansible.builtin.set_fact:
+    magento_host: >-
+      {{ magento_host_probe.results | default([]) | rejectattr('unreachable', 'defined')
+         | selectattr('rc', 'defined') | selectattr('rc', 'in', [0, 2])
+         | map(attribute='item') | first | default('') }}
+    magento_host_answers: >-
+      {% set answers = [] %}{% for r in magento_host_probe.results | default([]) %}{% set _ = answers.append(r.item ~ ': '
+      ~ ('unreachable' if r.unreachable | default(false) else 'exit ' ~ (r.rc | default('none')))
+      ~ ((', ' ~ (r.stderr | trim | split('\n') | last)[-160:]) if r.stderr | default('') | trim | length > 0 else '')) %}{% endfor %}{{ answers }}
+  run_once: true
+
+- name: Keep the chosen host's status answer for the upgrade gate
+  ansible.builtin.set_fact:
+    db_config:
+      results: "{{ magento_host_probe.results | selectattr('item', 'equalto', magento_host) | list }}"
+  run_once: true
+  when: magento_host | length > 0
+
+- name: Say when a fallback host was chosen
+  ansible.builtin.debug:
+    msg: >-
+      {{ magento_host }} runs Magento's commands for this deploy, because
+      {{ passed_over | join(', ') }} could not read the database:
+      {{ magento_host_answers | join('; ') }}.
+  vars:
+    passed_over: "{{ magento_host_candidates[: magento_host_candidates.index(magento_host)] }}"
+  run_once: true
+  when:
+    - magento_host | length > 0
+    - magento_host != magento_host_candidates | first
+
+- name: Stop when no host can run Magento's commands
+  when: magento_host | length == 0
+  block:
+    - name: "Audit: record the failed deploy"
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: deploy.failed
+        audit_detail:
+          phase: magento-host
+          tried: "{{ magento_host_answers }}"
+
+    - name: Drop the build lock, since the run ends here
+      ansible.builtin.file:
+        path: "{{ release_lock_file }}"
+        state: absent
+      delegate_to: "{{ groups.builder | first }}"
+      run_once: true
+
+    - name: Stop, before anything goes live
+      ansible.builtin.fail:
+        msg: >-
+          No host could run Magento's commands against the database:
+          {{ magento_host_answers | join('; ') if magento_host_answers | length > 0
+             else 'none of ' ~ (magento_hosts | default(groups.admin) | join(', ')) ~ ' is still in the deploy' }}.
+          Nothing has gone live and maintenance is off.
+          {{ 'Under --check the release is not unpacked and the commands do not run,
+          so no host can answer; see Known limitations in the README.'
+             if ansible_check_mode else
+             'Fix the host, or name another in magento_hosts for this environment,
+          and deploy again. The build lock is released.' }}
+      run_once: true

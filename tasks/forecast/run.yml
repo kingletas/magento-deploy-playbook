@@ -4,7 +4,7 @@
 # the deploy when what it would lock is more than lock_forecast allows. Runs
 # only when the upgrade gate decided setup:upgrade will run.
 #
-#   1. The admin host writes production's table sizes, and a dump of its schema
+#   1. magento_host writes production's table sizes, and a dump of its schema
 #      with the rows setup:upgrade reads (files/helpers/magento-db-snapshot.php).
 #   2. The builder pulls both, and files/helpers/lock-rehearsal.py runs the
 #      built release's real setup:upgrade against a throwaway MariaDB of the
@@ -17,7 +17,7 @@
 ###
 - name: Rehearse, and always delete the dump
   block:
-    - name: Make a private directory for the snapshot on the admin host
+    - name: Make a private directory for the snapshot on the host that runs Magento's commands
       ansible.builtin.tempfile:
         state: directory
         prefix: lock-forecast-
@@ -25,7 +25,7 @@
       become_user: "{{ system.user }}"
       register: forecast_admin_dir
       run_once: true
-      delegate_to: "{{ groups.admin | first }}"
+      delegate_to: "{{ magento_host }}"
 
     - name: Write production's table sizes and the schema dump
       ansible.builtin.command:
@@ -37,7 +37,7 @@
       register: forecast_snapshot
       changed_when: false
       run_once: true
-      delegate_to: "{{ groups.admin | first }}"
+      delegate_to: "{{ magento_host }}"
 
     # To the connecting user, whom the builder's rsync logs in as below.
     - name: Hand the snapshot to the user the builder pulls as
@@ -48,7 +48,7 @@
         recurse: true
       become: true
       run_once: true
-      delegate_to: "{{ groups.admin | first }}"
+      delegate_to: "{{ magento_host }}"
 
     - name: Make a private directory for the rehearsal on the builder
       ansible.builtin.tempfile:
@@ -72,7 +72,7 @@
         set_remote_user: true
       become: false
       delegate_to: "{{ groups.builder | first }}"
-      when: inventory_hostname == groups.admin | first
+      when: inventory_hostname == magento_host
 
     - name: Put the rehearsal on the builder
       ansible.builtin.copy:
@@ -104,13 +104,13 @@
       delegate_to: "{{ groups.builder | first }}"
 
   always:
-    - name: Delete the snapshot on the admin host
+    - name: Delete the snapshot on the host that runs Magento's commands
       ansible.builtin.file:
         path: "{{ forecast_admin_dir.path }}"
         state: absent
       become: true
       run_once: true
-      delegate_to: "{{ groups.admin | first }}"
+      delegate_to: "{{ magento_host }}"
       when: forecast_admin_dir.path is defined
 
     - name: Delete the snapshot and the rehearsal on the builder

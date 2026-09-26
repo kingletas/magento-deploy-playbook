@@ -53,19 +53,19 @@ Seventeen event names, in the order a deploy writes them, then the two only `mak
 | `deploy.started` | the deploy begins, once the release id exists | `branch`, `reused_release`, `goes_live`, `playbook_commit` |
 | `approval.verified` | a signed tag on the built commit checks out, and `approval.required` is on | `commit`, `tag`, `signer`, `signing_key` |
 | `build.succeeded` | the release archive is built and checksummed | `commit`, `artefact_sha256`, `builder` |
-| `cutover.started` | the hosts begin switching over | `maintenance_window`, `artefact_sha256` |
+| `cutover.started` | the hosts begin switching over | `maintenance_window`, `artefact_sha256`, `magento_host` |
 | `forecast.completed` | the `setup:upgrade` rehearsal ran, which it does only when `lock_forecast.enabled` is on and the release has database work | `finished`, `statements`, `blocking`, `narrowing`, `patches` |
 | `backup.succeeded` | the backup command exits 0 and names something | `backup_id`, `reason` |
 | `backup.failed` | the backup command fails, and the deploy stops | `reason`, `error` |
 | `maintenance.enabled` | the maintenance page goes up in the incoming release | none |
-| `upgrade.failed` | `setup:upgrade` failed after the cutover; the site stays in maintenance and the lock is released | `error`, `backup_id` |
+| `upgrade.failed` | `setup:upgrade` failed after the cutover; the site stays in maintenance and the lock is released | `error`, `magento_host`, `backup_id` |
 | `health.failed` | an app host did not answer 2xx on a health check path after the cutover | `hosts`, `paths`, `rollback` |
 | `rollback.refused` | the release being rolled back to does not fit the database, so it was not put back | `from_release`, `to_release`, `reasons`, and `backup_id` after a deploy |
 | `deploy.rolled_back` | the release before is live again, after a failed health check or by `make rollback` | `from_release`, `to_release`, `trigger`, `recovered`, `notes` |
 | `cutover.succeeded` | the new release is the one serving and passed its health check | `maintenance_window`, `setup_upgrade_ran`, `backup_id` |
 | `warmup.completed` | the warm-up finishes, whatever it achieved | `requested`, `ok`, `percent` |
 | `deploy.finished` | the playbook reaches its end | `outcome` |
-| `deploy.failed` | a web host the deploy began with dropped out, during the upload, before the switch or during it; the deploy stops and no success is recorded | `phase`, `lost_hosts` |
+| `deploy.failed` | the deploy stopped and no success is recorded: a web host it began with dropped out (`phase` upload, before-cutover, before-switch, switch or after-switch, with `lost_hosts`); no host could run Magento's commands (`phase: magento-host`, with what each answered in `tried`); or a step after the switch failed (`phase: after-switch`, with `step`, `magento_host` and `error`), which also releases the lock | `phase`, and `lost_hosts`, `tried` or `step`, `magento_host`, `error` |
 | `deploy.verified` | `make verify` passes, which is a separate run | `outcome`, `upgrade_expected` |
 | `rollback.started` | `make rollback` has chosen the release to go back to | `from_release`, `to_release`, `has_mark` |
 

@@ -1,6 +1,6 @@
 ---
 ###
-# Runs backup.command on the first admin host before maintenance goes on and the
+# Runs backup.command on magento_host before maintenance goes on and the
 # symlink flips, when backup.run asks for it. The last line of its output is
 # recorded as the backup's identifier. A failed or silent backup stops the deploy
 # while the old release is still serving.
@@ -16,13 +16,13 @@
       ansible.builtin.shell:
         cmd: "{{ backup.command }}"
         executable: /bin/bash
-      delegate_to: "{{ groups.admin[0] }}"
+      delegate_to: "{{ magento_host }}"
       run_once: true
       async: "{{ backup.timeout }}"
       poll: 5
       register: backup_result
       changed_when: true
-      # The command can carry credentials. Run it on the admin host to see its output.
+      # The command can carry credentials. Run it on magento_host to see its output.
       no_log: true
 
     - name: Refuse a backup that named nothing

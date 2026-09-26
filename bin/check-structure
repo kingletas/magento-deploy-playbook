@@ -348,7 +348,7 @@ def check_nothing_needed_is_ignored() -> None:
     try:
         out = subprocess.run(
             ["git", "status", "--porcelain", "--ignored=matching", "."],
-            cwd=str(PB), capture_output=True, text=True, timeout=60,
+            cwd=str(PB), capture_output=True, text=True, timeout=60, check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return
@@ -385,7 +385,7 @@ def check_ordane_allows_only_tracked() -> None:
     config = PB / ".ordane.yml"
     if not config.exists():
         return
-    match = re.search(r"^\s*allow:\s*\[([^\]]*)\]", config.read_text(), re.M)
+    match = re.search(r"^\s*allow:\s*\[([^\]]*)\]", config.read_text(), re.MULTILINE)
     if not match:
         return
     allowed = [name.strip() for name in match.group(1).split(",") if name.strip()]
@@ -404,8 +404,8 @@ def check_ordane_allows_only_tracked() -> None:
             )
 
 
-SECRET_NAME = re.compile(r"\b[\w.]*(?:token|password|passwd|secret|api_key|apikey|private_key)\w*\b", re.I)
-JINJA = re.compile(r"\{\{(.*?)\}\}", re.S)
+SECRET_NAME = re.compile(r"\b[\w.]*(?:token|password|passwd|secret|api_key|apikey|private_key)\w*\b", re.IGNORECASE)
+JINJA = re.compile(r"\{\{(.*?)\}\}", re.DOTALL)
 
 
 def _task_text(task: dict) -> str:
@@ -462,10 +462,10 @@ def check_no_plaintext_secrets() -> None:
 def check_host_keys_are_checked() -> None:
     """Fail when anything turns off SSH host key checking."""
     cfg = PB / "ansible.cfg"
-    if cfg.exists() and not re.search(r"^\s*host_key_checking\s*=\s*True\s*$", cfg.read_text(), re.M | re.I):
+    if cfg.exists() and not re.search(r"^\s*host_key_checking\s*=\s*True\s*$", cfg.read_text(), re.MULTILINE | re.IGNORECASE):
         errors.append("ansible.cfg must set host_key_checking = True. Without it any host answering "
                       "at the address receives the deploy and its credentials.")
-    off = re.compile(r"verify_host:\s*false|StrictHostKeyChecking[= ]+(no|off)|UserKnownHostsFile[= ]+/dev/null", re.I)
+    off = re.compile(r"verify_host:\s*false|StrictHostKeyChecking[= ]+(no|off)|UserKnownHostsFile[= ]+/dev/null", re.IGNORECASE)
     candidates = list(functional_files()) + [PB / "bin" / "docker-suite", PB / "docker" / "Dockerfile"]
     for path in candidates:
         if not path.exists():

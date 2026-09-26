@@ -17,9 +17,13 @@
 # MYSQL_PWD so it also stays out of ps output.
 #
 #   ZDT_PRIMARY_HOST  ZDT_PRIMARY_PORT (default 3306)  ZDT_PRIMARY_USER
-#   ZDT_PRIMARY_PASSWORD  ZDT_PRIMARY_DATABASE (optional, for checksums)
+#   ZDT_PRIMARY_PASSWORD  ZDT_PRIMARY_DATABASE
 #   ZDT_REPLICA_HOST  ZDT_REPLICA_PORT (default 3306)  ZDT_REPLICA_USER
-#   ZDT_REPLICA_PASSWORD  ZDT_REPLICA_DATABASE (optional, for checksums)
+#   ZDT_REPLICA_PASSWORD  ZDT_REPLICA_DATABASE
+#
+# The database is where the tables live: CHECKSUM TABLE and COUNT(*) with no
+# default database answered error 1046, so the database is part of the
+# connection, not an afterthought. table-checksums requires it on both sides.
 #
 # replica-check refuses to pass unless the replica is live: IO thread Yes, SQL
 # thread Yes, Last_SQL_Errno 0, and the lag a number rather than NULL. Every
@@ -43,17 +47,23 @@
 # differing checksum makes that falsifier false.
 #
 # Exit codes: 0 all good; 1 a check failed; 2 the tool could not run (missing
-# settings, bad name, no client) -- so a run can tell "the fleet is wrong"
-# from "the check never happened".
+# settings, bad name, no client, a query that failed outright) -- so a run can
+# tell "the fleet is wrong" from "the check never happened".
 
 set -euo pipefail
 
-if [[ ${1:-} == -h || ${1:-} == --help || $# -eq 0 ]]; then
+die() { echo "zdt-fleet: $*" >&2; exit 2; }
+
+if [[ ${1:-} == -h || ${1:-} == --help ]]; then
     sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"
     exit 0
 fi
-
-die() { echo "zdt-fleet: $*" >&2; exit 2; }
+if [[ $# -eq 0 ]]; then
+    # A gate called without arguments is a mistake, not a request for help:
+    # exit 2 ("the check never happened"), never the 0 a script would log as ok.
+    sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0" >&2
+    die "usage: bin/zdt-fleet replica-check | table-checksums TABLE..."
+fi
 
 command -v mysql >/dev/null || die "the mysql client is not on PATH"
 
@@ -80,34 +90,57 @@ conn() {
 }
 
 connect_fields() {
+    # DB_USER, not USER: USER is an exported environment variable and every
+    # later child process (the mysql client, the fakes in tests) inherits it.
     local which="$1" line i=0
-    HOST=""; PORT=""; USER=""; PASSWORD=""; DATABASE=""
-    # shellcheck disable=SC2034  # DATABASE is read by run_sql's dynamic scope, not in this loop.
+    DB_HOST=""; DB_PORT=""; DB_USER=""; DB_PASSWORD=""; DB_DATABASE=""
+    # shellcheck disable=SC2034  # DB_DATABASE is read by run_sql's dynamic scope, not in this loop.
     while IFS= read -r line; do
         case $i in
-            0) HOST="$line" ;;
-            1) PORT="$line" ;;
-            2) USER="$line" ;;
-            3) PASSWORD="$line" ;;
-            4) DATABASE="$line" ;;
+            0) DB_HOST="$line" ;;
+            1) DB_PORT="$line" ;;
+            2) DB_USER="$line" ;;
+            3) DB_PASSWORD="$line" ;;
+            4) DB_DATABASE="$line" ;;
         esac
         i=$((i + 1))
     done < <(conn "$which")
-    [[ -n $HOST && -n $USER ]] \
+    [[ -n $DB_HOST && -n $DB_USER ]] \
         || die "set ZDT_${which^^}_HOST and ZDT_${which^^}_USER (see bin/zdt-fleet --help)"
 }
 
 run_sql() {
-    # run_sql WHICH SQL [with-headers] -- rows in batch mode. A server error
-    # is NOT fatal here: the caller decides what it means, and replica-check
-    # must report "no such command" as an empty answer rather than die inside
-    # a client (that is how the old SHOW SLAVE STATUS fallback works).
+    # run_sql WHICH SQL [with-headers] -- rows in batch mode, with
+    # --database so CHECKSUM TABLE and COUNT(*) resolve (error 1046 otherwise
+    # under --no-defaults). A failed query is NOT swallowed here: the client's
+    # exit status is returned and its error text reaches the operator's
+    # stderr. Only the SHOW REPLICA/SLAVE STATUS fallback ignores the status,
+    # because "unknown command" there is a server-generation question, not a
+    # failure. Everywhere else a dead server must not look like an empty
+    # answer: callers go through query_or_die, which exits 2.
     connect_fields "$1"
-    local sql="$2" dbargs=() opts=(--batch)
+    local sql="$2" dbargs=()
+    [[ -z $DB_DATABASE ]] || dbargs=(--database="$DB_DATABASE")
+    local opts=(--batch)
     [[ ${3:-} == with-headers ]] || opts+=(--skip-column-names)
-    MYSQL_PWD="$PASSWORD" mysql --no-defaults --connect-timeout=10 \
+    MYSQL_PWD="$DB_PASSWORD" mysql --no-defaults --connect-timeout=10 \
         "${opts[@]}" "${dbargs[@]+"${dbargs[@]}"}" \
-        -h "$HOST" -P "$PORT" -u "$USER" -e "$sql" 2>/dev/null || true
+        -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -e "$sql"
+}
+
+query_or_die() {
+    # query_or_die WHICH SQL [require-database]: rows on stdout, or exit 2
+    # naming the server and the SQL. A failed or unconfigured query means the
+    # check never happened (2), never a plausible-looking empty answer.
+    # Callers must assign this directly (x=$(query_or_die ...)), with no pipe
+    # inside $(): a pipe would hide the exit status set -e relies on.
+    local which="$1" sql="$2" out
+    connect_fields "$which"
+    [[ ${3:-} != require-database || -n $DB_DATABASE ]] \
+        || die "no database for $which: set ZDT_${which^^}_DATABASE"
+    out=$(run_sql "$which" "$sql") \
+        || die "$which query failed on $DB_HOST: $sql"
+    printf '%s\n' "$out"
 }
 
 # ---------------------------------------------------------------- replica-check
@@ -115,11 +148,20 @@ run_sql() {
 if [[ $subcommand == replica-check ]]; then
     status=""
     for cmd in "SHOW REPLICA STATUS" "SHOW SLAVE STATUS"; do
-        status=$(run_sql replica "$cmd" with-headers)
+        # The one place a client failure is not fatal: an unknown command on
+        # an old server is how the fallback loop knows to try the next one.
+        status=$(run_sql replica "$cmd" with-headers 2>/dev/null) || status=""
         [[ -z $status ]] || break
     done
     [[ -n $status ]] \
         || die "the replica answered neither SHOW REPLICA STATUS nor SHOW SLAVE STATUS; is ZDT_REPLICA_HOST configured as a replica?"
+
+    # Only one status row can be judged here. Multi-source replication (one
+    # row per channel) would let a dead second channel pass this gate, so it
+    # is refused rather than partially read.
+    row_count=$(printf '%s\n' "$status" | tail -n +2 | grep -c . || true)
+    [[ $row_count -le 1 ]] \
+        || die "the replica returned $row_count status rows (multi-source?); this gate judges a single-channel replica"
 
     declare -A F=()
     headers=$(printf '%s\n' "$status" | head -n 1)
@@ -168,9 +210,13 @@ if [[ $subcommand == replica-check ]]; then
     get_column Last_SQL_Error Last_SQL_Error; sql_error="$value"
     get_column Last_IO_Error Last_IO_Error; io_error="$value"
 
-    binlog_format=$(run_sql primary "SELECT @@binlog_format" | head -n 1)
-    catalogue_size=$(run_sql primary "SELECT COUNT(*) FROM catalog_product_entity" | head -n 1)
-    binlog_bytes=$(run_sql primary "SHOW BINARY LOGS" | awk '{ total += $2 } END { printf "%d", total + 0 }')
+    # No pipeline inside $(): a pipeline's status is the last command's, which
+    # would let a died-in-the-subshell query_or_die slip past set -e. Query
+    # first, then shape the kept rows.
+    rows=$(query_or_die primary "SELECT @@binlog_format"); binlog_format="${rows%%$'\n'*}"
+    rows=$(query_or_die primary "SELECT COUNT(*) FROM catalog_product_entity" require-database); catalogue_size="${rows%%$'\n'*}"
+    rows=$(query_or_die primary "SHOW BINARY LOGS")
+    binlog_bytes=$(printf '%s\n' "$rows" | awk '{ total += $2 } END { printf "%d", total + 0 }')
 
     json_escape() { printf '%s' "$1" | tr -d '\n' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
@@ -196,9 +242,15 @@ done
 
 differs=0
 for table in "$@"; do
-    primary=$(run_sql primary "CHECKSUM TABLE $table" | head -n 1 | awk '{print $2}')
-    replica=$(run_sql replica "CHECKSUM TABLE $table" | head -n 1 | awk '{print $2}')
-    if [[ -n $primary && $primary == "$replica" ]]; then
+    # CHECKSUM TABLE on a server for a table that does not exist is not an
+    # error: it returns a row with a NULL checksum. NULL must never count as
+    # a match — a typo'd or wrong-database table missing on BOTH sides has to
+    # read as DIFFER, not MATCH.
+    rows=$(query_or_die primary "CHECKSUM TABLE $table" require-database) || exit $?
+    primary=$(printf '%s\n' "$rows" | head -n 1 | awk '{print $2}')
+    rows=$(query_or_die replica "CHECKSUM TABLE $table" require-database) || exit $?
+    replica=$(printf '%s\n' "$rows" | head -n 1 | awk '{print $2}')
+    if [[ -n $primary && $primary != NULL && $primary == "$replica" ]]; then
         printf 'MATCH  %s primary=%s replica=%s\n' "$table" "$primary" "$replica"
     else
         printf 'DIFFER %s primary=%s replica=%s\n' "$table" "${primary:-<none>}" "${replica:-<none>}"

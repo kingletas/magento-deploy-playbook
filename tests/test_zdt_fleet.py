@@ -19,16 +19,17 @@ ROOT = Path(__file__).resolve().parent.parent
 TOOL = ROOT / "bin" / "zdt-fleet"
 
 FAKE_MYSQL = """#!/usr/bin/env bash
-host="" ; sql=""
+host="" ; sql="" ; db=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h) host="$2"; shift 2 ;;
         -e) sql="$2"; shift 2 ;;
+        --database=*) db="${1#--database=}"; shift ;;
         *) shift ;;
     esac
 done
 printf '%s|%s|pwd=%s\\n' "$host" "$sql" "${MYSQL_PWD:-unset}" >> "$FAKE_CALLS"
-key="${host}|${sql}"
+key="${host}|${db}|${sql}"
 file="$FAKE_DIR/$(printf '%s' "$key" | sha256sum | cut -d' ' -f1)"
 if [[ -f $file ]]; then cat "$file"; exit 0; fi
 echo "ERROR 1064 (42000): fake has no canned reply for [$sql] on $host" >&2
@@ -84,9 +85,9 @@ class ZdtFleetTest(unittest.TestCase):
         self.env["FAKE_CALLS"] = str(self.calls)
         self.env.update({
             "ZDT_PRIMARY_HOST": "primary.db", "ZDT_PRIMARY_USER": "u1",
-            "ZDT_PRIMARY_PASSWORD": "secret1",
+            "ZDT_PRIMARY_PASSWORD": "secret1", "ZDT_PRIMARY_DATABASE": "magento",
             "ZDT_REPLICA_HOST": "replica.db", "ZDT_REPLICA_USER": "u2",
-            "ZDT_REPLICA_PASSWORD": "secret2",
+            "ZDT_REPLICA_PASSWORD": "secret2", "ZDT_REPLICA_DATABASE": "magento",
         })
         for sql, out in PRIMARY_SQL.items():
             self.canned("primary.db", sql, out)
@@ -94,9 +95,13 @@ class ZdtFleetTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def canned(self, host: str, sql: str, output: str) -> None:
-        name = hashlib.sha256(f"{host}|{sql}".encode()).hexdigest()
+    def canned(self, host: str, sql: str, output: str, db: str = "magento") -> None:
+        name = hashlib.sha256(f"{host}|{db}|{sql}".encode()).hexdigest()
         (self.fake_dir / name).write_text(output)
+
+    def remove_canned(self, host: str, sql: str, db: str = "magento") -> None:
+        name = hashlib.sha256(f"{host}|{db}|{sql}".encode()).hexdigest()
+        (self.fake_dir / name).unlink()
 
     def run_tool(self, *argv: str, **extra_env: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run([str(TOOL), *argv], env={**self.env, **extra_env},
@@ -217,12 +222,97 @@ class ZdtFleetTest(unittest.TestCase):
         self.assertIn(f"DIFFER {table} primary=111222 replica=999888", result.stdout)
 
     def test_a_missing_checksum_on_one_side_is_a_differ(self) -> None:
-        # The replica lacks the table the migration touched: no row at all.
+        # The replica lacks the table the migration touched. A real server
+        # does not error on CHECKSUM TABLE for a missing table: it answers the
+        # row with a NULL checksum.
         table = "zdt_marker"
         self.canned("primary.db", f"CHECKSUM TABLE {table}", f"magento.{table}\t55\n")
+        self.canned("replica.db", f"CHECKSUM TABLE {table}", f"magento.{table}\tNULL\n")
         result = self.run_tool("table-checksums", table)
         self.assertEqual(result.returncode, 1)
-        self.assertIn(f"DIFFER {table} primary=55 replica=<none>", result.stdout)
+        self.assertIn(f"DIFFER {table} primary=55 replica=NULL", result.stdout)
+
+    def test_a_table_missing_on_both_sides_is_a_differ_not_a_match(self) -> None:
+        # NULL == NULL must never read as MATCH: a typo'd name or the wrong
+        # database is missing on both servers and CHECKSUM TABLE answers NULL
+        # on both. That is a DIFFER (the fleet's tables are not what was
+        # named), never a green light.
+        table = "nosuch"
+        self.canned("primary.db", f"CHECKSUM TABLE {table}", f"magento.{table}\tNULL\n")
+        self.canned("replica.db", f"CHECKSUM TABLE {table}", f"magento.{table}\tNULL\n")
+        result = self.run_tool("table-checksums", table)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"DIFFER {table} primary=NULL replica=NULL", result.stdout)
+
+    def test_a_failed_query_in_table_checksums_is_exit_2_not_differ(self) -> None:
+        # No canned reply means the client fails: the replica never answered,
+        # so this is "the check never happened" (2), not "the fleet is wrong"
+        # (1).
+        table = "t"
+        self.canned("primary.db", f"CHECKSUM TABLE {table}", f"magento.{table}\t7\n")
+        # deliberately no canned reply on replica.db
+        result = self.run_tool("table-checksums", table)
+        self.assertEqual(result.returncode, 2, f"{result.stdout}{result.stderr}")
+        self.assertIn("replica query failed on replica.db", result.stderr)
+
+    def test_a_failed_primary_query_in_replica_check_is_exit_2(self) -> None:
+        # Live replica, but the primary cannot answer SHOW BINARY LOGS: a
+        # zero binlog_bytes would read as "the upgrade wrote nothing", so the
+        # whole check refuses instead of printing facts it never gathered.
+        self.canned("replica.db", "SHOW REPLICA STATUS",
+                    MYSQL8_HEADERS + "\n" + status_row() + "\n")
+        self.remove_canned("primary.db", "SHOW BINARY LOGS")
+        result = self.run_tool("replica-check")
+        self.assertEqual(result.returncode, 2, f"{result.stdout}{result.stderr}")
+        self.assertIn("primary query failed on primary.db: SHOW BINARY LOGS", result.stderr)
+        self.assertNotIn("binlog_bytes", result.stdout)
+
+    def test_checksums_without_a_database_configured_are_refused(self) -> None:
+        # CHECKSUM TABLE with no default database is error 1046; the tool must
+        # refuse (2) before reaching the servers, not smuggle a DIFFER.
+        table = "catalog_product_entity"
+        self.canned("primary.db", f"CHECKSUM TABLE {table}", f"magento.{table}\t1\n", db="")
+        self.canned("replica.db", f"CHECKSUM TABLE {table}", f"magento.{table}\t1\n", db="")
+        result = self.run_tool("table-checksums", table,
+                               ZDT_PRIMARY_DATABASE="", ZDT_REPLICA_DATABASE="")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("ZDT_PRIMARY_DATABASE", result.stderr)
+
+    def test_the_database_reaches_the_client(self) -> None:
+        # --database must be on the wire: with --no-defaults, a server without
+        # a default database answers CHECKSUM TABLE with error 1046.
+        self.canned("replica.db", "SHOW REPLICA STATUS",
+                    MYSQL8_HEADERS + "\n" + status_row() + "\n")
+        self.run_tool("replica-check")
+        # replica-check's own queries ran; the checksum path proves the flag:
+        table = "catalog_product_entity"
+        self.canned("primary.db", f"CHECKSUM TABLE {table}", f"magento.{table}\t42\n")
+        self.canned("replica.db", f"CHECKSUM TABLE {table}", f"magento.{table}\t42\n")
+        result = self.run_tool("table-checksums", table)
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+
+    def test_multi_source_replication_is_refused(self) -> None:
+        # Two status rows (two channels): reading only the first would let a
+        # dead second channel pass the gate. Refuse with exit 2.
+        rows = (MYSQL8_HEADERS + "\n" + status_row() + "\n"
+                + status_row(io_running="No") + "\n")
+        self.canned("replica.db", "SHOW REPLICA STATUS", rows)
+        result = self.run_tool("replica-check")
+        self.assertEqual(result.returncode, 2, f"{result.stdout}{result.stderr}")
+        self.assertIn("multi-source", result.stderr)
+
+    def test_no_arguments_exits_2_not_help_0(self) -> None:
+        # A script calling the gate with no arguments must not read its
+        # usage text as success.
+        result = subprocess.run([str(TOOL)], env=self.env,
+                                capture_output=True, text=True, timeout=60, check=False)
+        self.assertEqual(result.returncode, 2)
+
+    def test_explicit_help_exits_0(self) -> None:
+        result = self.run_tool("--help")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("replica-check", result.stdout)
+
 
     def test_a_table_name_is_never_a_query(self) -> None:
         for name in ("catalog; DROP TABLE x", "a b", "-h"):

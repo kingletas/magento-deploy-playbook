@@ -152,6 +152,10 @@ image's fakes, so no real inventory can reach them:
 - **Mid-switch.** `docker/fakes/initd-nginx` stops its own container on a reload
   while `/tmp/mdp-die-on-reload` exists. The reload comes right after the
   `current` symlink flips, so the other hosts have switched and this one is gone.
+- **The admin host, mid-command.** `docker/fakes/magento-fake` waits while
+  `/tmp/mdp-hold-magento` names its subcommand, so `test-admin-lost` can stop the
+  admin host during `cache:flush`, the step before setup:upgrade, or during
+  setup:upgrade itself.
 
 ## What this doesn't cover
 

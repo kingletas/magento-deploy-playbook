@@ -9,6 +9,7 @@
 #   bin/docker-suite audit     check the audit chain and write an evidence bundle
 #   bin/docker-suite test      up + deploy + verify (what `make docker-test` runs)
 #   bin/docker-suite test-lost-host  lose web3 mid-upload and mid-switch; the deploy must fail and say so
+#   bin/docker-suite test-admin-lost lose the admin host before and during setup:upgrade, and grade each criterion
 #   bin/docker-suite logs      show the fake tools' call log per container
 #   bin/docker-suite reset     clear locks and releases, to repeat a run
 #   bin/docker-suite shell <name>
@@ -415,6 +416,53 @@ cmd_test_upgrade_fails() {
     echo "Upgrade failure: maintenance kept on both app hosts, the lock released, upgrade.failed recorded."
 }
 
+# The admin host is where setup:upgrade runs. Lose it at the step before
+# (cache:flush, outside the rescue) and during setup:upgrade (inside it), and
+# check each criterion rather than stopping at the first, so one run shows all.
+cmd_test_admin_lost() {
+    local step tag lines rc ok failures=0 host
+    verdict() { if [ "$1" = 0 ]; then echo "  PASS $2"; else echo "  FAIL $2"; failures=$((failures + 1)); fi; }
+    for step in cache:flush setup:upgrade; do
+        tag="${step//:/-}"
+        echo "########## the admin host lost during ${step}: the deploy fails, says so, stays in maintenance ##########"
+        lines="$(wc -l < "${AUDIT_LOG_PATH}")"
+        set_needs_upgrade touch
+        docker exec mdp-admin sh -c "echo ${step} > /tmp/mdp-hold-magento"
+        cmd_deploy > "${PLAYBOOK_DIR}/local.d/admin-lost-${tag}.log" 2>&1 &
+        local pid=$!
+        for _ in $(seq 1 600); do docker exec mdp-admin test -e /tmp/mdp-magento-holding 2>/dev/null && break; sleep 0.2; done
+        docker exec mdp-admin test -e /tmp/mdp-magento-holding || die "${step} on the admin host was never held."
+        docker stop -t 1 mdp-admin >/dev/null
+        wait "${pid}"; rc=$?
+        echo "  exit ${rc}; audit events since: $(tail -n +"$(( lines + 1 ))" "${AUDIT_LOG_PATH}" | grep -o '"event": "[a-z.]*"' | cut -d'"' -f4 | paste -sd' ')"
+        verdict "$(( rc == 0 ))" "the deploy exits non-zero"
+        tail -n +"$(( lines + 1 ))" "${AUDIT_LOG_PATH}" | grep -E '"event": "(deploy|upgrade)\.failed"' | grep -q admin
+        verdict $? "a failure record names the admin host"
+        ! has_event_since "${lines}" cutover.succeeded && ! has_event_since "${lines}" deploy.finished
+        verdict $? "no cutover.succeeded or deploy.finished is recorded"
+        for host in "${APP_CONTAINERS[@]}"; do
+            ok=1; [ "$(storefront_status "${host}")" = 503 ] && ok=0
+            verdict "${ok}" "${host} is in maintenance"
+        done
+        ! grep -E 'lost (mdp-)?web[0-9]' "${PLAYBOOK_DIR}/local.d/admin-lost-${tag}.log" >/dev/null
+        verdict $? "no healthy app host is named lost"
+        grep -E '"msg": .*(maint:disable|make unlock)' "${PLAYBOOK_DIR}/local.d/admin-lost-${tag}.log" >/dev/null
+        verdict $? "the output says how to recover"
+        sed -n '/PLAY RECAP/,$p' "${PLAYBOOK_DIR}/local.d/admin-lost-${tag}.log" | grep -E '^(mdp-|web|admin|cron|builder|varnish|localhost)' | sed 's/^/  recap: /'
+
+        docker start mdp-admin >/dev/null
+        cmd_inventory >/dev/null
+        docker exec mdp-admin sh -c 'rm -f /tmp/mdp-hold-magento /tmp/mdp-magento-holding; /etc/init.d/nginx start' >/dev/null
+        set_needs_upgrade "rm -f"
+        ( cd "${PLAYBOOK_DIR}" && ansible-playbook -i inventory/docker unlock.yml >/dev/null ) || die "could not drop the lock the lost admin host left held."
+        cmd_deploy > "${PLAYBOOK_DIR}/local.d/admin-lost-${tag}-after.log" 2>&1
+        verdict $? "with the admin host back, a clean deploy passes"
+        echo ""
+    done
+    [ "${failures}" = 0 ] || die "${failures} criteria failed with the admin host lost."
+    echo "Admin host lost: every criterion held at both steps."
+}
+
 # The guarded rollback, both ways and from both entry points. Runs after the
 # audit check, because a rolled-back deploy rightly lacks cutover.succeeded.
 cmd_test_rollback() {
@@ -547,6 +595,7 @@ case "${1:-}" in
     audit)   shift; cmd_audit "$@" ;;
     test)    shift; cmd_test "$@" ;;
     test-lost-host) shift; cmd_test_lost_host "$@" ;;
+    test-admin-lost) shift; cmd_test_admin_lost "$@" ;;
     logs)    shift; cmd_logs "$@" ;;
     shell)   shift; cmd_shell "$@" ;;
     reset)   shift; cmd_reset "$@" ;;

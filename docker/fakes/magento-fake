@@ -18,6 +18,14 @@ case "$1" in
     echo "[fake-magento] $*" >> /tmp/build-log 2>/dev/null || true ;;
 esac
 
+# Test-only: while /tmp/mdp-hold-magento names this subcommand, it waits until the
+# file is removed, so the suite can stop this host with the command in flight.
+if [ "$(cat /tmp/mdp-hold-magento 2>/dev/null)" = "$1" ]; then
+  touch /tmp/mdp-magento-holding
+  for _ in $(seq 1 600); do [ -e /tmp/mdp-hold-magento ] || break; sleep 0.1; done
+  rm -f /tmp/mdp-magento-holding
+fi
+
 case "$1" in
   maint:enable)
     mkdir -p var && touch var/.maintenance.flag

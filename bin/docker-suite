@@ -48,6 +48,11 @@ AUDIT_LOG_PATH="${PLAYBOOK_DIR}/local.d/audit/docker.audit.jsonl"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# The pinned Ansible from `make venv`, when it is there, as the Makefile uses it.
+# Behaviour differs between versions: a system Ansible can pass a scenario that
+# fails on the version CI and requirements.txt pin.
+[ -x "${PLAYBOOK_DIR}/venv/bin/ansible-playbook" ] && export PATH="${PLAYBOOK_DIR}/venv/bin:${PATH}"
+
 cmd_up() {
     command -v docker >/dev/null || die "docker is not installed."
     docker ps >/dev/null 2>&1 || die "the docker daemon is not reachable."

@@ -11,12 +11,16 @@
 ###
 - name: Read why it stopped
   ansible.builtin.set_fact:
-    stopped_step: "{{ ansible_failed_task.name }}"
+    # A host sent here because another host's run_once step failed has no
+    # failure of its own to read, and neither does one whose host went
+    # unreachable, so both fall back to saying that much.
+    stopped_step: "{{ (ansible_failed_task | default({})).name | default('a step on another host') }}"
     stopped_message: >-
-      {% set r = ansible_failed_result.results | default([ansible_failed_result])
+      {% set f = ansible_failed_result | default({}) %}{% set r = f.results | default([f])
                  | selectattr('failed', 'defined') | selectattr('failed') | list | first
-                 | default(ansible_failed_result, true) %}{{ (r.msg | default('', true)
-                 or r.stderr | default('', true)) | trim }}
+                 | default(f, true) %}{{ ((r.msg | default('', true)
+                 or r.stderr | default('', true)) | trim)
+                 or 'A host this step needed could not be reached.' }}
   run_once: true
 
 - name: "Audit: record the failed deploy"
@@ -38,5 +42,7 @@
 
 - name: Stop with the step's own message
   ansible.builtin.fail:
-    msg: "{{ stopped_message }} Nothing went live, and the build lock is released."
+    msg: >-
+      {{ stopped_message }}{{ '' if stopped_message is search('lock is released')
+      else ' Nothing went live, and the build lock is released.' }}
   run_once: true

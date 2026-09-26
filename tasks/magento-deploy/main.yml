@@ -203,6 +203,18 @@
       run_once: true
       delegate_to: "{{ item }}"
       loop: "{{ [magento_host] }}"
+      register: magento_cache_flushed
+      ignore_unreachable: true
+
+    # Gone mid-command: newer Ansible would mark the host running this unreachable
+    # instead, and the failure response would never learn which host it was.
+    - name: Stop if the host that runs Magento's commands could not be reached for that
+      ansible.builtin.fail:
+        msg: >-
+          {{ magento_cache_flushed.results | default([]) | selectattr('unreachable', 'defined') | selectattr('unreachable')
+             | map(attribute='item') | join(', ') }} could not be reached during "Flush magento cache".
+      run_once: true
+      when: magento_cache_flushed.results | default([]) | selectattr('unreachable', 'defined') | selectattr('unreachable') | list | length > 0
   rescue:
     - name: Stop, and say what is left
       ansible.builtin.include_tasks: tasks/magento-deploy/after-switch-failed.yml
@@ -224,7 +236,19 @@
       run_once: true
       delegate_to: "{{ item }}"
       loop: "{{ [magento_host] }}"
+      register: magento_upgraded
+      ignore_unreachable: true
       when: upgrade_needed | bool
+
+    # Gone mid-command: newer Ansible would mark the host running this unreachable
+    # instead, and the failure response would never learn which host it was.
+    - name: Stop if the host that runs Magento's commands could not be reached for that
+      ansible.builtin.fail:
+        msg: >-
+          {{ magento_upgraded.results | default([]) | selectattr('unreachable', 'defined') | selectattr('unreachable')
+             | map(attribute='item') | join(', ') }} could not be reached during "Magento's setup upgrade".
+      run_once: true
+      when: magento_upgraded.results | default([]) | selectattr('unreachable', 'defined') | selectattr('unreachable') | list | length > 0
   rescue:
     - name: "Audit: record the failed setup:upgrade"
       ansible.builtin.include_tasks: tasks/audit/record.yml
@@ -303,7 +327,19 @@
       run_once: true
       delegate_to: "{{ item }}"
       loop: "{{ groups.varnish }}"
+      register: varnish_banned
+      ignore_unreachable: true
       when: releases.complete | bool
+
+    # Gone mid-command: newer Ansible would mark the host running this unreachable
+    # instead, and the failure response would never learn which host it was.
+    - name: Stop if a varnish host could not be reached for that
+      ansible.builtin.fail:
+        msg: >-
+          {{ varnish_banned.results | default([]) | selectattr('unreachable', 'defined') | selectattr('unreachable')
+             | map(attribute='item') | join(', ') }} could not be reached during "Invalidate Magento's pages in Varnish".
+      run_once: true
+      when: varnish_banned.results | default([]) | selectattr('unreachable', 'defined') | selectattr('unreachable') | list | length > 0
 
     # Unconditional: it also clears a flag a failed attempt left in this release.
     - name: Disable maintenance mode
@@ -335,10 +371,22 @@
       notify: Reset the indexers
       delegate_to: "{{ item }}"
       loop: "{{ [magento_host] }}"
+      register: indexers_reset
+      ignore_unreachable: true
       run_once: true
       when:
         - releases.kill_php | bool
         - releases.complete | bool
+
+    # Gone mid-command: newer Ansible would mark the host running this unreachable
+    # instead, and the failure response would never learn which host it was.
+    - name: Stop if the host that runs Magento's commands could not be reached for that
+      ansible.builtin.fail:
+        msg: >-
+          {{ indexers_reset.results | default([]) | selectattr('unreachable', 'defined') | selectattr('unreachable')
+             | map(attribute='item') | join(', ') }} could not be reached during "Reset the indexers".
+      run_once: true
+      when: indexers_reset.results | default([]) | selectattr('unreachable', 'defined') | selectattr('unreachable') | list | length > 0
   rescue:
     - name: Stop, and say what is left
       ansible.builtin.include_tasks: tasks/magento-deploy/after-switch-failed.yml

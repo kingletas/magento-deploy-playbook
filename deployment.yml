@@ -143,25 +143,20 @@
     - name: Playbook handlers
       ansible.builtin.import_tasks: handlers/main.yml
   tasks:
-    - name: Upload and unpack, and stop cleanly when it fails
-      block:
-        - name: Upload the release archive to the host
-          ansible.builtin.import_tasks: tasks/deploy/upload.yml
-          when: releases.upload
+    # No block here: a host that fails its upload drops out of the play, and the
+    # fleet check below names it and releases the lock, as for a lost host.
+    - name: Upload the release archive to the host
+      ansible.builtin.import_tasks: tasks/deploy/upload.yml
+      when: releases.upload
 
-        - name: Unarchive the release on the host
-          ansible.builtin.import_tasks: tasks/deploy/unarchive.yml
-          when: releases.unarchive
+    - name: Unarchive the release on the host
+      ansible.builtin.import_tasks: tasks/deploy/unarchive.yml
+      when: releases.unarchive
 
-        - name: Stop if a web host dropped out during the upload
-          ansible.builtin.include_tasks: tasks/fleet/intact.yml
-          vars:
-            fleet_phase: upload
-      rescue:
-        - name: Stop, releasing the lock
-          ansible.builtin.include_tasks: tasks/release-lock/stopped-before-live.yml
-          vars:
-            stopped_phase: upload
+    - name: Stop if a web host dropped out during the upload
+      ansible.builtin.include_tasks: tasks/fleet/intact.yml
+      vars:
+        fleet_phase: upload
 
 - name: Deploy Magento to the web hosts (includes admin & cron)
   hosts: "web"
@@ -193,11 +188,25 @@
           backup_id: "{{ backup_id | default('') }}"
       when: not deploy_rolled_back | default(false) | bool
 
+    # What the prune play checks before it prunes or records the deploy as
+    # finished, so a Magento play that ended with no web host left cannot be
+    # followed by a builder recording success on its own.
+    - name: Record that the Magento play reached its end
+      ansible.builtin.set_fact:
+        magento_play_completed: true
+      delegate_to: localhost
+      delegate_facts: true
+      run_once: true
+
 - name: Clean old releases on the web hosts and the builder
   hosts: "web builder"
   become: true
   gather_facts: true
   tasks:
+    - name: Stop here unless the Magento play reached its end
+      ansible.builtin.meta: end_play
+      when: not hostvars['localhost'].magento_play_completed | default(false) | bool
+
     # The release is live by here, so a prune that fails still lets the lock go:
     # old releases left on disk need no one before the next deploy.
     - name: Prune, and drop the build lock whatever the prune does

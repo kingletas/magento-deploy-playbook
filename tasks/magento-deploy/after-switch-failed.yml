@@ -12,12 +12,15 @@
 ###
 - name: Read what failed
   ansible.builtin.set_fact:
-    after_switch_step: "{{ ansible_failed_task.name }}"
+    # Defaults for a host sent here by another host's failed run_once step,
+    # which has no failure of its own to read.
+    after_switch_step: "{{ (ansible_failed_task | default({})).name | default('a step on another host') }}"
     after_switch_error: >-
-      {% set r = ansible_failed_result.results | default([ansible_failed_result])
+      {% set f = ansible_failed_result | default({}) %}{% set r = f.results | default([f])
                  | selectattr('failed', 'defined') | selectattr('failed') | list | first
-                 | default(ansible_failed_result, true) %}{{ (r.stderr | default('', true)
-                 or r.msg | default('', true)) | trim | replace('\n', ' ') | truncate(300) }}
+                 | default(f, true) %}{{ ((r.stderr | default('', true)
+                 or r.msg | default('', true)) | trim | replace('\n', ' ') | truncate(300))
+                 or 'a host this step needed could not be reached' }}
     after_switch_upgraded: "{{ after_switch_from == 'after-upgrade' and upgrade_needed | bool }}"
     after_switch_left: >-
       {{ ((['php bin/magento cache:flush, on ' ~ magento_host] if after_switch_from == 'before-upgrade' else [])

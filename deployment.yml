@@ -74,8 +74,13 @@
         - name: Record what this build was made from, for the next one
           ansible.builtin.import_tasks: tasks/packaging/stamp.yml
       rescue:
+        # As root, like the play that took the lock: this play does not become,
+        # and /tmp's sticky bit refuses anyone else the unlink.
         - name: Stop, releasing the lock
-          ansible.builtin.include_tasks: tasks/release-lock/stopped-before-live.yml
+          ansible.builtin.include_tasks:
+            file: tasks/release-lock/stopped-before-live.yml
+            apply:
+              become: true
           vars:
             stopped_phase: build
 
@@ -118,8 +123,13 @@
               artefact_sha256: "{{ release_sha256 }}"
               builder: "{{ inventory_hostname }}"
       rescue:
+        # As root, like the play that took the lock: this play does not become,
+        # and /tmp's sticky bit refuses anyone else the unlink.
         - name: Stop, releasing the lock
-          ansible.builtin.include_tasks: tasks/release-lock/stopped-before-live.yml
+          ansible.builtin.include_tasks:
+            file: tasks/release-lock/stopped-before-live.yml
+            apply:
+              become: true
           vars:
             stopped_phase: build
 

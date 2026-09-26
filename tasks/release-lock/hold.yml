@@ -1,0 +1,18 @@
+---
+###
+# Keeps the build lock held and writes why into it, for a deploy that stops in
+# a state a person must look at before anyone deploys again: a fleet split
+# between two releases, or a live release that failed its health check. The
+# next deploy is refused with this text.
+#
+#   lock_hold_reason   what happened and what to look at, in one sentence.
+###
+- name: Keep the build lock, and write why it is held
+  ansible.builtin.copy:
+    content: >-
+      held since {{ now(utc=true).strftime('%Y-%m-%dT%H:%M:%SZ') }} by the deploy of
+      {{ release_id | default('?') }}, because {{ lock_hold_reason }}
+    dest: "{{ release_lock_file }}"
+    mode: "0644"
+  delegate_to: "{{ groups.builder | first }}"
+  run_once: true

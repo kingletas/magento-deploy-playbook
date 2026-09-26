@@ -262,6 +262,17 @@ has_event_since() {  # has_event_since <line count before> <event>
     tail -n +"$(( $1 + 1 ))" "${AUDIT_LOG_PATH}" | grep -q "\"event\": \"$2\""
 }
 
+# The build lock, and what it says. A deploy that stops before anything goes
+# live releases it; one that stops where a person must look keeps it with why.
+lock_text() { docker exec mdp-builder sh -c 'cat /tmp/*.lock 2>/dev/null'; }
+lock_released() {  # lock_released <what stopped>
+    docker exec mdp-builder sh -c 'ls /tmp/*.lock 2>/dev/null' >/dev/null && die "$1 left the build lock behind: $(lock_text)"
+    return 0
+}
+lock_held_for() {  # lock_held_for <text the lock must contain> <what stopped>
+    lock_text | grep -q "$1" || die "$2 did not keep the build lock with its reason; it says: $(lock_text)"
+}
+
 # Every build here is of the same commit, so from the second on both phases are
 # reused. A scenario whose fake misbehaves at static deploy has to rebuild it.
 REBUILD_STATIC=(-e '{"build_skip": {"compile": true, "static": false, "max_age_days": 7}}')
@@ -278,7 +289,9 @@ cmd_test_static_verify() {
     docker exec mdp-builder rm -f /tmp/magento-fake-break-static
     [ "$(live_release)" = "${before}" ] || die "the incomplete build went live anyway."
     has_event_since "${lines}" build.succeeded && die "an incomplete build was recorded as build.succeeded."
-    ( cd "${PLAYBOOK_DIR}" && ansible-playbook -i inventory/docker unlock.yml >/dev/null ) || die "could not drop the lock the stopped build held."
+    tail -n +"$(( lines + 1 ))" "${AUDIT_LOG_PATH}" | grep '"event": "deploy.failed"' | grep -q '"phase": "build"' \
+        || die "the stopped build left no deploy.failed record at build."
+    lock_released "the stopped build"
     echo "Static content: an incomplete theme behind an exit 0 stopped the build before anything left the builder."
 }
 
@@ -306,7 +319,9 @@ cmd_test_forecast() {
     has_event_since "${lines}" cutover.started && die "the deploy started a cutover after its rehearsal said stop."
     docker exec mdp-admin sh -c 'ls -d /tmp/lock-forecast-* 2>/dev/null' && die "the snapshot was left on the admin host."
     docker exec mdp-builder sh -c 'ls -d /tmp/lock-forecast-* 2>/dev/null' && die "the snapshot was left on the builder."
-    ( cd "${PLAYBOOK_DIR}" && ansible-playbook -i inventory/docker unlock.yml >/dev/null ) || die "could not drop the lock the stopped deploy held."
+    tail -n +"$(( lines + 1 ))" "${AUDIT_LOG_PATH}" | grep '"event": "deploy.failed"' | grep -q '"phase": "before-switch"' \
+        || die "the stopped deploy left no deploy.failed record before the switch."
+    lock_released "the deploy the rehearsal stopped"
     echo "Forecast: a blocking copy over the limit stopped the deploy before the cutover, and the snapshot was deleted."
 }
 
@@ -338,7 +353,7 @@ cmd_test_config_import() {
     docker exec mdp-admin sh -c 'echo "{\"warnings\": [{\"section\": \"scopes\", \"message\": \"These Stores will be deleted: Second\"}], \"destructive\": [{\"section\": \"scopes\", \"message\": \"These Stores will be deleted: Second\"}]}" > /tmp/magento-fake-config-warnings'
     cmd_deploy && die "a release that deletes a store went ahead unaccepted."
     has_event_since "${lines}" cutover.started && die "the deploy started a cutover before the deletion was accepted."
-    ( cd "${PLAYBOOK_DIR}" && ansible-playbook -i inventory/docker unlock.yml >/dev/null ) || die "could not drop the lock."
+    lock_released "the deploy the config import stopped"
     cmd_deploy -e '{"config_import_accept": "These Stores will be deleted: Second"}' \
         || die "the deploy failed with the deletion accepted by name."
     set_marker "rm -f" magento-fake-config-change
@@ -384,6 +399,7 @@ cmd_test_lost_host() {
     docker exec mdp-builder rm -f /tmp/mdp-hold-upload
     wait "${pid}" && die "a deploy that lost web3 mid-upload reported success."
     lost_host_assert "${lines}" upload
+    lock_released "a deploy that lost web3 before anything went live"
     lost_host_restore
     echo "Lost mid-upload: the deploy failed, deploy.failed names web3 at upload, no success recorded."
     echo ""
@@ -392,6 +408,10 @@ cmd_test_lost_host() {
     docker exec mdp-web3 touch /tmp/mdp-die-on-reload
     cmd_deploy > "${PLAYBOOK_DIR}/local.d/lost-switch.log" 2>&1 && die "a deploy that lost web3 mid-switch reported success."
     lost_host_assert "${lines}" switch
+    lock_held_for "lost web3 at switch" "a deploy that lost web3 mid-switch"
+    cmd_deploy > "${PLAYBOOK_DIR}/local.d/lost-switch-refused.log" 2>&1 && die "a deploy ran while the lock held a split fleet's reason."
+    grep -q "lost web3 at switch" "${PLAYBOOK_DIR}/local.d/lost-switch-refused.log" \
+        || die "the refused deploy did not say why the lock was held."
     lost_host_restore
     echo "Lost mid-switch: the deploy failed, deploy.failed names web3 at switch, no success recorded."
     echo ""
@@ -578,6 +598,7 @@ cmd_test_rollback() {
         [ "$(storefront_status "${host}")" = 503 ] || die "the release that could not go back is not in maintenance on ${host}."
     done
     has_event_since "${lines}" rollback.refused || die "the refused rollback left no rollback.refused record."
+    lock_held_for "could not go back, so the site is in maintenance" "the deploy whose rollback was refused"
     "${PLAYBOOK_DIR}/bin/audit-log" verify --path "${AUDIT_LOG_PATH}" || die "the audit chain broke during the rollback runs."
     echo "Rollback: refused over an unlisted patch, accepted with it named, automatic on a broken release, refused and in maintenance when the database moved."
 }

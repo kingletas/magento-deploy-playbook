@@ -33,6 +33,16 @@
       rollback: "{{ health.rollback }}"
   when: health_failed_after_cutover | length > 0
 
+- name: Keep the build lock, and write why
+  ansible.builtin.include_tasks: tasks/release-lock/hold.yml
+  vars:
+    lock_hold_reason: >-
+      it failed its health check on {{ health_failed_after_cutover | join(', ') }}
+      and is still live, since health.rollback is never
+  when:
+    - health_failed_after_cutover | length > 0
+    - health.rollback == 'never'
+
 - name: Stop with the new release live, because rollback is off
   ansible.builtin.fail:
     msg: >-
@@ -40,10 +50,22 @@
       {{ health_failed_after_cutover | join(', ') }} and health.rollback is
       "never", so it is still live. Roll back with
       make rollback environment={{ env_name }} once you have looked.
+      The build lock stays held with this reason: run
+      make unlock environment={{ env_name }} once that is dealt with.
   run_once: true
   when:
     - health_failed_after_cutover | length > 0
     - health.rollback == 'never'
+
+- name: Keep the build lock, and write why
+  ansible.builtin.include_tasks: tasks/release-lock/hold.yml
+  vars:
+    lock_hold_reason: >-
+      it failed its health check on {{ health_failed_after_cutover | join(', ') }}
+      and replaced no release to go back to
+  when:
+    - health_failed_after_cutover | length > 0
+    - rollback_target | length == 0
 
 - name: Stop with the new release live, because there is nothing to go back to
   ansible.builtin.fail:
@@ -51,6 +73,8 @@
       The new release failed its health check on
       {{ health_failed_after_cutover | join(', ') }}, and it replaced no
       earlier release, so there is none to roll back to.
+      The build lock stays held with this reason: run
+      make unlock environment={{ env_name }} once that is dealt with.
   run_once: true
   when:
     - health_failed_after_cutover | length > 0
@@ -86,6 +110,16 @@
     - health_failed_after_cutover | length > 0
     - not rollback_allowed | bool
 
+- name: Keep the build lock, and write why
+  ansible.builtin.include_tasks: tasks/release-lock/hold.yml
+  vars:
+    lock_hold_reason: >-
+      it failed its health check on {{ health_failed_after_cutover | join(', ') }}
+      and could not go back, so the site is in maintenance
+  when:
+    - health_failed_after_cutover | length > 0
+    - not rollback_allowed | bool
+
 - name: Stop in maintenance, because rolling back would be worse
   ansible.builtin.fail:
     msg: >-
@@ -95,6 +129,8 @@
       {{ ('The backup taken before this deploy is ' ~ backup_id ~ '.')
          if backup_id | default('') | length > 0 else
          'This deploy took no backup.' }}
+      The build lock stays held with this reason: run
+      make unlock environment={{ env_name }} once that is dealt with.
   run_once: true
   when:
     - health_failed_after_cutover | length > 0
@@ -124,6 +160,16 @@
       notes: "{{ rollback_notes }}"
   when: deploy_rolled_back | bool
 
+- name: Keep the build lock, and write why
+  ansible.builtin.include_tasks: tasks/release-lock/hold.yml
+  vars:
+    lock_hold_reason: >-
+      the release it put back, {{ rollback_target | basename }}, also fails on
+      {{ health_failed_hosts | join(', ') }}
+  when:
+    - deploy_rolled_back | bool
+    - health_failed_hosts | length > 0
+
 - name: Stop when the release put back fails too
   ansible.builtin.fail:
     msg: >-
@@ -131,6 +177,8 @@
       {{ rollback_target | basename }}, which ALSO fails on
       {{ health_failed_hosts | join(', ') }}. The fault is probably not in
       the release: check the web servers, the database and the cache.
+      The build lock stays held with this reason: run
+      make unlock environment={{ env_name }} once that is dealt with.
   run_once: true
   when:
     - deploy_rolled_back | bool

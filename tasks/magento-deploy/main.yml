@@ -15,130 +15,140 @@
 # only when the release has database or config work to do.
 ###
 
-- name: Name the incoming release
-  ansible.builtin.set_fact:
-    incoming_release: "{{ releases.path }}{{ release_id }}"
+# Everything before the symlink flips leaves nothing live, so a stop anywhere
+# in it has one response (release-lock/stopped-before-live.yml): record why,
+# release the build lock, and stop with the step's own message.
+- name: Prepare the cutover, and stop cleanly when a gate refuses
+  block:
+    - name: Name the incoming release
+      ansible.builtin.set_fact:
+        incoming_release: "{{ releases.path }}{{ release_id }}"
 
-# Read before the flip: afterwards `current` resolves to the new release.
-- name: Record which release is live before the cutover
-  ansible.builtin.stat:
-    path: '{{ releases.current }}'
-    follow: false
-  register: outgoing_link
+    # Read before the flip: afterwards `current` resolves to the new release.
+    - name: Record which release is live before the cutover
+      ansible.builtin.stat:
+        path: '{{ releases.current }}'
+        follow: false
+      register: outgoing_link
 
-- name: Stop if a web host dropped out before the cutover
-  ansible.builtin.include_tasks: tasks/fleet/intact.yml
-  vars:
-    fleet_phase: before-cutover
-  when: releases.complete | bool
+    - name: Stop if a web host dropped out before the cutover
+      ansible.builtin.include_tasks: tasks/fleet/intact.yml
+      vars:
+        fleet_phase: before-cutover
+      when: releases.complete | bool
 
-# Its setup:db:status is the first bin/magento call on the release. `var` is not
-# in the archive, so Magento creates var/log on it, owned by whoever runs it, and
-# every later step runs as system.user, which must be able to write there.
-- name: Choose the host that runs Magento's commands, and stop if none can
-  ansible.builtin.import_tasks: tasks/magento-deploy/magento-host.yml
+    # Its setup:db:status is the first bin/magento call on the release. `var` is not
+    # in the archive, so Magento creates var/log on it, owned by whoever runs it, and
+    # every later step runs as system.user, which must be able to write there.
+    - name: Choose the host that runs Magento's commands, and stop if none can
+      ansible.builtin.import_tasks: tasks/magento-deploy/magento-host.yml
 
-- name: "Check for app config status"
-  ansible.builtin.command: "php {{ deploy_helpers }}magento-isolated.php {{ incoming_release }} -- app:config:status"
-  args:
-    chdir: '{{ incoming_release }}'
-  become_user: '{{ system.user }}'
-  become: true
-  run_once: true
-  delegate_to: "{{ item }}"
-  loop: "{{ [magento_host] }}"
-  register: app_config
-  changed_when: false
-  failed_when: false
+    - name: "Check for app config status"
+      ansible.builtin.command: "php {{ deploy_helpers }}magento-isolated.php {{ incoming_release }} -- app:config:status"
+      args:
+        chdir: '{{ incoming_release }}'
+      become_user: '{{ system.user }}'
+      become: true
+      run_once: true
+      delegate_to: "{{ item }}"
+      loop: "{{ [magento_host] }}"
+      register: app_config
+      changed_when: false
+      failed_when: false
 
-# Neither status command reads the theme table, so a release that only adds a
-# theme passes both and would never be registered.
-- name: Check for themes the database has not registered
-  ansible.builtin.command: "php {{ deploy_helpers }}magento-db-guard.php themes {{ incoming_release }}"
-  become_user: '{{ system.user }}'
-  become: true
-  run_once: true
-  delegate_to: "{{ item }}"
-  loop: "{{ [magento_host] }}"
-  register: theme_config
-  changed_when: false
-  failed_when: false
+    # Neither status command reads the theme table, so a release that only adds a
+    # theme passes both and would never be registered.
+    - name: Check for themes the database has not registered
+      ansible.builtin.command: "php {{ deploy_helpers }}magento-db-guard.php themes {{ incoming_release }}"
+      become_user: '{{ system.user }}'
+      become: true
+      run_once: true
+      delegate_to: "{{ item }}"
+      loop: "{{ [magento_host] }}"
+      register: theme_config
+      changed_when: false
+      failed_when: false
 
-- name: Decide whether this release needs a maintenance window
-  ansible.builtin.import_tasks: tasks/magento-deploy/upgrade-gate.yml
+    - name: Decide whether this release needs a maintenance window
+      ansible.builtin.import_tasks: tasks/magento-deploy/upgrade-gate.yml
 
-- name: Stop before the cutover on a configuration import that deletes
-  ansible.builtin.import_tasks: tasks/magento-deploy/config-import-check.yml
+    - name: Stop before the cutover on a configuration import that deletes
+      ansible.builtin.import_tasks: tasks/magento-deploy/config-import-check.yml
 
-# The database as the outgoing release left it, read before anything changes
-# so a database that cannot be read stops the deploy with nothing live. What
-# setup:upgrade applies after this is what a rollback cannot take back.
-- name: Mark the database before the cutover
-  ansible.builtin.command: "php {{ deploy_helpers }}magento-db-guard.php mark {{ incoming_release }}"
-  become_user: '{{ system.user }}'
-  become: true
-  run_once: true
-  delegate_to: "{{ item }}"
-  loop: "{{ [magento_host] }}"
-  register: db_mark_before
-  changed_when: false
+    # The database as the outgoing release left it, read before anything changes
+    # so a database that cannot be read stops the deploy with nothing live. What
+    # setup:upgrade applies after this is what a rollback cannot take back.
+    - name: Mark the database before the cutover
+      ansible.builtin.command: "php {{ deploy_helpers }}magento-db-guard.php mark {{ incoming_release }}"
+      become_user: '{{ system.user }}'
+      become: true
+      run_once: true
+      delegate_to: "{{ item }}"
+      loop: "{{ [magento_host] }}"
+      register: db_mark_before
+      changed_when: false
 
-- name: Keep the mark taken before the cutover
-  ansible.builtin.set_fact:
-    db_mark_before_upgrade: "{{ (db_mark_before.results | first).stdout | from_json }}"
-  run_once: true
+    - name: Keep the mark taken before the cutover
+      ansible.builtin.set_fact:
+        db_mark_before_upgrade: "{{ (db_mark_before.results | first).stdout | from_json }}"
+      run_once: true
 
-- name: Rehearse setup:upgrade, and stop here if it would lock too much
-  ansible.builtin.include_tasks: tasks/forecast/run.yml
-  when:
-    - lock_forecast.enabled | bool
-    - upgrade_needed | bool
+    - name: Rehearse setup:upgrade, and stop here if it would lock too much
+      ansible.builtin.include_tasks: tasks/forecast/run.yml
+      when:
+        - lock_forecast.enabled | bool
+        - upgrade_needed | bool
 
-- name: "DORA: record the cutover start"
-  ansible.builtin.include_tasks: tasks/dora-event.yml
-  vars:
-    dora_phase: cutover.started
-    dora_extra:
-      maintenance: "{{ upgrade_needed | bool }}"
+    - name: "DORA: record the cutover start"
+      ansible.builtin.include_tasks: tasks/dora-event.yml
+      vars:
+        dora_phase: cutover.started
+        dora_extra:
+          maintenance: "{{ upgrade_needed | bool }}"
 
-- name: "Audit: record the cutover start"
-  ansible.builtin.include_tasks: tasks/audit/record.yml
-  vars:
-    audit_event: cutover.started
-    audit_detail:
-      maintenance_window: "{{ upgrade_needed | bool }}"
-      artefact_sha256: "{{ release_sha256 | default('') }}"
-      magento_host: "{{ magento_host }}"
+    - name: "Audit: record the cutover start"
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: cutover.started
+        audit_detail:
+          maintenance_window: "{{ upgrade_needed | bool }}"
+          artefact_sha256: "{{ release_sha256 | default('') }}"
+          magento_host: "{{ magento_host }}"
 
-- name: Back up when this release requires it
-  ansible.builtin.import_tasks: tasks/backup/run.yml
+    - name: Back up when this release requires it
+      ansible.builtin.import_tasks: tasks/backup/run.yml
 
-- name: Enable maintenance mode in the incoming release
-  ansible.builtin.command: "php bin/magento maint:enable"
-  args:
-    chdir: '{{ incoming_release }}'
-  become: true
-  become_user: '{{ system.user }}'
-  when: upgrade_needed | bool
-  notify: Open the PagerDuty maintenance window
+    - name: Enable maintenance mode in the incoming release
+      ansible.builtin.command: "php bin/magento maint:enable"
+      args:
+        chdir: '{{ incoming_release }}'
+      become: true
+      become_user: '{{ system.user }}'
+      when: upgrade_needed | bool
+      notify: Open the PagerDuty maintenance window
 
-- name: "DORA: record maintenance mode on"
-  ansible.builtin.include_tasks: tasks/dora-event.yml
-  vars:
-    dora_phase: maintenance.enabled
-  when: upgrade_needed | bool
+    - name: "DORA: record maintenance mode on"
+      ansible.builtin.include_tasks: tasks/dora-event.yml
+      vars:
+        dora_phase: maintenance.enabled
+      when: upgrade_needed | bool
 
-- name: "Audit: record maintenance mode on"
-  ansible.builtin.include_tasks: tasks/audit/record.yml
-  vars:
-    audit_event: maintenance.enabled
-  when: upgrade_needed | bool
+    - name: "Audit: record maintenance mode on"
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: maintenance.enabled
+      when: upgrade_needed | bool
 
-- name: Stop if a web host dropped out before the switch
-  ansible.builtin.include_tasks: tasks/fleet/intact.yml
-  vars:
-    fleet_phase: before-switch
-  when: releases.complete | bool
+    - name: Stop if a web host dropped out before the switch
+      ansible.builtin.include_tasks: tasks/fleet/intact.yml
+      vars:
+        fleet_phase: before-switch
+      when: releases.complete | bool
+  rescue:
+    - name: Stop, releasing the lock
+      ansible.builtin.include_tasks: tasks/release-lock/stopped-before-live.yml
+      vars:
+        stopped_phase: before-switch
 
 - name: Reset the current symlink
   ansible.builtin.file:

@@ -23,11 +23,27 @@
           lost_hosts: "{{ fleet_lost }}"
       when: fleet_lost | length > 0
 
+    # After the switch the fleet may be split between two releases, which a
+    # person should see before anyone deploys again, so the lock stays held and
+    # says why. Before it, nothing is live and the play's response releases it.
+    - name: Keep the build lock, and write why
+      ansible.builtin.include_tasks: tasks/release-lock/hold.yml
+      vars:
+        lock_hold_reason: >-
+          it lost {{ fleet_lost | join(', ') }} at {{ fleet_phase }} and the web hosts
+          may serve different releases
+      when:
+        - fleet_lost | length > 0
+        - fleet_phase in ['switch', 'after-switch']
+
     - name: Stop the deploy, naming the hosts it lost
       ansible.builtin.fail:
         msg: >-
-          The deploy lost {{ fleet_lost | join(', ') }} at {{ fleet_phase }}, so the web
-          hosts may now serve different releases. The deploy is recorded as failed.
-          Bring the host back and deploy again; the build lock is still held, so run
-          make unlock environment=<env> first.
+          {% if fleet_phase in ['switch', 'after-switch'] %}The deploy lost
+          {{ fleet_lost | join(', ') }} at {{ fleet_phase }}, so the web hosts may now
+          serve different releases. The deploy is recorded as failed, and the build
+          lock stays held with that reason. Bring the host back, then run
+          make unlock environment=<env> and deploy again.{% else %}The deploy lost
+          {{ fleet_lost | join(', ') }} at {{ fleet_phase }} and is recorded as
+          failed. Bring the host back and deploy again.{% endif %}
       when: fleet_lost | length > 0

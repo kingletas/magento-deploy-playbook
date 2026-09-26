@@ -52,6 +52,8 @@
             that:
               - ansible_failed_result.msg is search('lock file')
               - ansible_failed_result.msg is search('make unlock')
+              # The refusal quotes the lock, so it says who took it and for what.
+              - ansible_failed_result.msg is search('taken .* for release')
             fail_msg: >-
               The second acquire failed, but not with the documented recovery
               message. Got: {{ ansible_failed_result.msg | default('(none)') }}
@@ -72,3 +74,32 @@
         fail_msg: >-
           release.yml left {{ expected_lock }} behind. Every later deploy for
           this environment would refuse to start.
+
+    # A deploy that stops where a person must look keeps the lock and writes
+    # why; the next acquire must refuse with that reason, not a bare path.
+    - name: Take the lock again
+      ansible.builtin.import_tasks: tasks/release-lock/acquire.yml
+
+    - name: Hold it with a reason
+      ansible.builtin.import_tasks: tasks/release-lock/hold.yml
+      vars:
+        lock_hold_reason: it lost web9 at switch and the web hosts may serve different releases
+
+    - name: A held lock's reason reaches the refusal
+      block:
+        - name: Try to acquire the held lock
+          ansible.builtin.import_tasks: tasks/release-lock/acquire.yml
+        - name: Should not reach here either
+          ansible.builtin.fail:
+            msg: acquire.yml took a lock that was held with a reason.
+      rescue:
+        - name: Confirm the refusal carries the reason
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search('held since .* because it lost web9 at switch')
+            fail_msg: >-
+              The refusal did not quote why the lock was held. Got:
+              {{ ansible_failed_result.msg | default('(none)') }}
+
+    - name: Release the held lock
+      ansible.builtin.import_tasks: tasks/release-lock/release.yml

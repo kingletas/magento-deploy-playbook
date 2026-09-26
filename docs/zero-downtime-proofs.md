@@ -452,8 +452,8 @@ read. Note that MariaDB answers `SHOW REPLICA STATUS` with only the default
 connection — named channels appear only under `SHOW ALL SLAVES STATUS` — so a
 MariaDB fleet with named multi-source channels is out of scope for this gate;
 the lab fleet is single-source by design. When neither status command answers,
-the refusal quotes both attempts' errors, so a wrong password or an
-unreachable host reads as itself.
+the refusal quotes each failed attempt's error, labelled with its command, so a
+wrong password or an unreachable host reads as itself.
 
 When the replica is live, it prints one JSON object on standard output:
 

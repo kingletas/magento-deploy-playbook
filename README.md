@@ -768,6 +768,7 @@ bin/check-structure     the five structural checks
 bin/docker-suite        the local fleet
 bin/zdt-proof           the zero-downtime proofs, run against a Kapelos store
 bin/zdt-proof.d/        its library, proofs, PHP payloads and fixture module
+bin/zdt-fleet           the fleet checks: replica health and table checksums
 docker/                 the local fleet's image, fakes and fixtures
 docs/                   from-nothing.md, design.md, ledger.md, compliance.md,
                         zero-downtime-proofs.md
@@ -850,8 +851,8 @@ make docker-down   # afterwards
 | Inventories × 4 | A hosts file where `builder`/`apps`/`admin`/`cron`/`varnish`/`web` don't all resolve. A deploy against a broken one reports "no hosts matched" and exits **0** |
 | `bin/check-structure` | A reintroduced `roles:`; a `notify` with no handler; an include path that only resolves at run time; **a parent-path reference**; **a stray `lookup('env', ...)`** |
 | `test.yml` | Nine suites: the variable contract and the precedence guard, the disk pre-flight, the `bundler_steps` table, the build lock, the prune against a real temporary filesystem, the replaced release's maintenance flag against another, and which status exit codes and unregistered themes open a maintenance window or stop the cutover, which file changes move which build fingerprint against a real git repository, and the warm-up against a local web server, and the audit, integrity, backup and approval controls against a real git repository and real signing keys |
-| `tests/test_*.py` | `bin/audit-log`'s chain and evidence; `bin/zdt-proof` listing every proof and refusing to start without a Kapelos checkout, using stand-ins for Docker and Kapelos |
-| yamllint / ansible-lint / shellcheck | Formatting, and shellcheck over `bin/zdt-proof`. A broken tool reads as **SKIP**, never as a failure |
+| `tests/test_*.py` | `bin/audit-log`'s chain and evidence; `bin/zdt-proof` listing every proof and refusing to start without a Kapelos checkout, using stand-ins for Docker and Kapelos; `bin/zdt-fleet`'s replica gate and checksum pairs, using a fake mysql client and canned replies |
+| yamllint / ansible-lint / shellcheck | Formatting, and shellcheck over `bin/zdt-proof` and `bin/zdt-fleet`. A broken tool reads as **SKIP**, never as a failure |
 
 Every structural check has been negative-tested -- a deliberate fault introduced
 and confirmed caught.

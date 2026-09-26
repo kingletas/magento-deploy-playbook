@@ -85,6 +85,7 @@ and what isn't.
 - [Warming the storefront](#warming-the-storefront)
 - [After the cutover: the health check and rollback](#after-the-cutover-the-health-check-and-rollback)
 - [Rehearsing setup:upgrade](#rehearsing-setupupgrade)
+- [Proving the zero-downtime assumptions](#proving-the-zero-downtime-assumptions)
 - [Building only what changed](#building-only-what-changed)
 - [Bundling the JavaScript](#bundling-the-javascript)
 - [Running it from a console](#running-it-from-a-console)
@@ -447,6 +448,28 @@ and deleted from the admin host and the builder when the rehearsal ends,
 whatever happened. The builder needs Docker and Python 3, and the admin host
 `mariadb-dump` or `mysqldump`.
 
+## Proving the zero-downtime assumptions
+
+A deploy that keeps the old release serving while the new one comes up rests
+on claims about Magento: that the previous release keeps working on a schema
+one step ahead of it, that two releases sharing a cache do not read each
+other's configuration, that a php-fpm reload is what makes a symlink flip take
+effect. `bin/zdt-proof` tests each claim against a real store, showing the
+failure first and then the fix, and prints one PASS or FAIL line per falsifier.
+
+```bash
+export KAPELOS_HOME=/path/to/kapelos   # the store runs under Kapelos
+bin/zdt-proof list                     # the eight proofs and two wrappers
+bin/zdt-proof p0-2                     # one proof, against the active site
+```
+
+The stores come from [Kapelos](https://github.com/kingletas/kapelos), which
+gives each one its own containers and database snapshots. **Run them on an
+empty or generated store only**: they change its schema, code and settings, and
+restore snapshots over its database.
+[docs/zero-downtime-proofs.md](docs/zero-downtime-proofs.md) says what each
+proof claims, how it shows the failure and the fix, and every line it prints.
+
 ## Building only what changed
 
 The compiled code and the static content are each reused from the previous
@@ -658,6 +681,7 @@ tests/                  the suites, plus four symlinks -- see below
     test-warmup.yml               test-controls.yml
     test-build-skip.yml           build-skip-case.yml
     test_audit_log.py             (python, run by bin/check)
+    test_zdt_proof.py             (python, run by bin/check)
     group_vars -> ../group_vars   tasks -> ../tasks
     handlers   -> ../handlers     inventory -> ../inventory
 
@@ -691,8 +715,11 @@ files/helpers/          what runs on the hosts: the cache-isolated status
 bin/check               make check
 bin/check-structure     the five structural checks
 bin/docker-suite        the local fleet
+bin/zdt-proof           the zero-downtime proofs, run against a Kapelos store
+bin/zdt-proof.d/        its library, proofs, PHP payloads and fixture module
 docker/                 the local fleet's image, fakes and fixtures
-docs/                   from-nothing.md, design.md, ledger.md, compliance.md
+docs/                   from-nothing.md, design.md, ledger.md, compliance.md,
+                        zero-downtime-proofs.md
 ```
 
 ### Why tests/ contains four symlinks
@@ -758,13 +785,13 @@ evaluating it templates the values. Every suite imports preflight first.
 ## What the checks cover, and what they don't
 
 ```bash
-make check         # syntax, inventories, structure, the audit tool, nine offline suites, lint
+make check         # syntax, inventories, structure, the audit tool, the proof runner, nine offline suites, lint
 make docker-test   # the real thing, against six containers
 make docker-demo   # the same, building real Magento from GitHub
 make docker-down   # afterwards
 ```
 
-`make check` has five layers:
+`make check` has six layers:
 
 | Layer | Catches |
 |---|---|
@@ -772,7 +799,8 @@ make docker-down   # afterwards
 | Inventories × 4 | A hosts file where `builder`/`apps`/`admin`/`cron`/`varnish`/`web` don't all resolve. A deploy against a broken one reports "no hosts matched" and exits **0** |
 | `bin/check-structure` | A reintroduced `roles:`; a `notify` with no handler; an include path that only resolves at run time; **a parent-path reference**; **a stray `lookup('env', ...)`** |
 | `test.yml` | Nine suites: the variable contract and the precedence guard, the disk pre-flight, the `bundler_steps` table, the build lock, the prune against a real temporary filesystem, the replaced release's maintenance flag against another, and which status exit codes and unregistered themes open a maintenance window or stop the cutover, which file changes move which build fingerprint against a real git repository, and the warm-up against a local web server, and the audit, integrity, backup and approval controls against a real git repository and real signing keys |
-| yamllint / ansible-lint | Formatting. A broken tool reads as **SKIP**, never as a failure |
+| `tests/test_*.py` | `bin/audit-log`'s chain and evidence; `bin/zdt-proof` listing every proof and refusing to start without a Kapelos checkout, using stand-ins for Docker and Kapelos |
+| yamllint / ansible-lint / shellcheck | Formatting, and shellcheck over `bin/zdt-proof`. A broken tool reads as **SKIP**, never as a failure |
 
 Every structural check has been negative-tested -- a deliberate fault introduced
 and confirmed caught.

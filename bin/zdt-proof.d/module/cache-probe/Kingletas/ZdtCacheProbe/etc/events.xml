@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:Event/etc/events.xsd">
+    <event name="zdt_cache_probe">
+        <observer name="zdt_cache_probe_observer" instance="Kingletas\ZdtCacheProbe\Observer\Probe"/>
+    </event>
+</config>

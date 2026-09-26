@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+#
+# zdt-proof: run the Magento zero-downtime proofs against a Kapelos store, one
+# proof at a time, and leave the evidence on disk.
+#
+# Usage:
+#   KAPELOS_HOME=/path/to/kapelos bin/zdt-proof <proof> [args...]
+#   bin/zdt-proof list
+#
+# Each proof is a script in bin/zdt-proof.d/proofs/<proof>.sh. It shows the
+# failure first and then the fix, and prints one "PASS" or "FAIL" line per
+# falsifier, so the transcript of a run is the evidence. A run with any FAIL
+# exits 1. docs/zero-downtime-proofs.md says what each proof shows and lists
+# its falsifiers.
+#
+# How it reaches the store:
+#   The PHP payloads have to run inside the store's PHP container, which only
+#   mounts the store's own tree. So every run first copies zdt-proof.d/php/ and
+#   zdt-proof.d/module/ into <store>/local.d/zdt-proof/ and runs them from
+#   there. Output lands in <store>/local.d/zdt-proof/out/<proof>/, readable
+#   from the host at the same place. Nothing is written anywhere else in the
+#   store except by the proofs that exist to change it, and each of those
+#   says so in its own header.
+#
+# Proofs never use a real store database. Run them against an empty or
+# generated store. Take `kapelos snapshot save clean` before the first run;
+# the proofs that change the schema restore it when they finish.
+#
+# Needs: bash, Docker, curl, rsync, python3 and GNU coreutils on the host, and
+# a running Kapelos site (https://github.com/kingletas/kapelos).
+#
+# Options:
+#   -h     this help
+#
+# Environment:
+#   KAPELOS_HOME     the Kapelos checkout; required, and a proof refuses to
+#                    start without it
+#   ZDT_SITE         the Kapelos site to use (default: the active one)
+#   ZDT_ROOT         the Magento root inside the container, for a store laid
+#                    out as releases (default: where the container mounts it)
+#   ZDT_EXEC_USER    run PHP in the container as this user (default: the
+#                    container's own), e.g. www-data on a release layout
+#   ZDT_BASE_URL     the storefront URL (default: MAGENTO_BASE_URL from the
+#                    site's settings)
+
+set -euo pipefail
+
+# The payloads sit beside this script, wherever it was installed or linked from.
+here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+export ZDT_PROOF_DIR="$here/zdt-proof.d"
+
+if [[ ${1:-} == -h || ${1:-} == --help || $# -eq 0 ]]; then
+    sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"
+    exit 0
+fi
+
+if [[ $1 == list ]]; then
+    for f in "$ZDT_PROOF_DIR"/proofs/*.sh; do
+        name=$(basename "$f" .sh)
+        printf '%-20s %s\n' "$name" "$(sed -n 's/^# summary: //p' "$f")"
+    done
+    exit 0
+fi
+
+proof="$1"
+shift
+# A proof name is a file name, never a path.
+[[ $proof =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "zdt-proof: '$proof' is not a proof name; see zdt-proof list" >&2; exit 2; }
+script="$ZDT_PROOF_DIR/proofs/$proof.sh"
+[[ -f $script ]] || { echo "zdt-proof: no proof named $proof; see zdt-proof list" >&2; exit 2; }
+
+exec bash "$script" "$@"

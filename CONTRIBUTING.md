@@ -9,7 +9,8 @@ make check
 ```
 
 That's everything verifiable without touching a host: syntax, every inventory,
-nine structural checks, the audit tool's tests, nine offline suites and lint. It takes seconds.
+nine structural checks, the audit tool's tests, the proof runner's tests, nine
+offline suites and lint. It takes seconds.
 
 ```bash
 make docker-test

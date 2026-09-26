@@ -1,0 +1,14 @@
+{
+    "zdt_proof_item": {
+        "column": {
+            "item_id": true,
+            "sku": true,
+            "qty": true,
+            "note": true,
+            "colour": true
+        },
+        "constraint": {
+            "PRIMARY": true
+        }
+    }
+}

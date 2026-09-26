@@ -131,6 +131,16 @@ changed, because there's nothing before it.
 
 ### Added
 
+- `bin/zdt-proof` runs eight proofs of the assumptions a zero-downtime deploy
+  rests on, against a Magento store running under Kapelos: which schema
+  mismatches a live release survives, whether two releases sharing a cache read
+  each other's configuration, which asset URLs break at the flip, whether a
+  php-fpm reload makes the flip take effect, and three more. Each shows the
+  failure first and then the fix, and prints one PASS or FAIL line per
+  falsifier. Set `KAPELOS_HOME` to your Kapelos checkout; a proof refuses to
+  start without it. [docs/zero-downtime-proofs.md](docs/zero-downtime-proofs.md)
+  says what each proof claims and every line it prints. `make check` now runs
+  the runner's tests and shellcheck.
 - Two guards on the inventory, in the playbook rather than in `make`, so they
   apply however it is invoked: an inventory with no hosts in it is refused
   rather than reporting success having deployed nothing, and one still naming

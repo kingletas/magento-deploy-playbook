@@ -153,7 +153,11 @@ changed, because there's nothing before it.
   last errors and a timestamp, so a later arm can take it before and after a
   migration and say what the upgrade wrote. `bin/zdt-fleet table-checksums
   TABLE…` compares `CHECKSUM TABLE` between the two servers, `MATCH` or
-  `DIFFER` per table. Connection details come from the environment, never from
+  `DIFFER` per table; a `NULL` checksum (a table a server does not have) is
+  never a match. The `ZDT_*_DATABASE` variables are required: every query
+  carries `--database`, and a checksum or catalogue count without one is
+  refused rather than answered with server error 1046. Connection details
+  come from the environment, never from
   arguments, so no password lands in a history or a transcript. Its tests run
   against a fake `mysql` client: no database, and no live replica, was used.
   [docs/zero-downtime-proofs.md](docs/zero-downtime-proofs.md) lists the

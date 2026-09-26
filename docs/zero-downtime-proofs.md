@@ -432,9 +432,9 @@ password lands in a shell history or in a run transcript. The client is
 | Variable | Meaning |
 |---|---|
 | `ZDT_PRIMARY_HOST` / `ZDT_PRIMARY_PORT` / `ZDT_PRIMARY_USER` / `ZDT_PRIMARY_PASSWORD` | the primary's connection (port defaults to 3306) |
-| `ZDT_PRIMARY_DATABASE` | optional; `table-checksums` needs it unless the tables are fully qualified |
+| `ZDT_PRIMARY_DATABASE` | required; where the tables live (`CHECKSUM TABLE` with no default database is error 1046) |
 | `ZDT_REPLICA_HOST` / `ZDT_REPLICA_PORT` / `ZDT_REPLICA_USER` / `ZDT_REPLICA_PASSWORD` | the replica's connection (port defaults to 3306) |
-| `ZDT_REPLICA_DATABASE` | optional; as on the primary |
+| `ZDT_REPLICA_DATABASE` | required; as on the primary |
 
 ### `bin/zdt-fleet replica-check`
 
@@ -469,13 +469,26 @@ checksum pair is judged against.
 Runs `CHECKSUM TABLE` for each named table on both servers and prints one
 line per table, `MATCH` or `DIFFER` with both values; exit 1 if any pair
 differs. Falsifier 1 uses it once `seconds_behind` has returned to zero; a
-differing checksum makes that falsifier false.
+differing checksum makes that falsifier false. A `NULL` checksum — what a
+server answers for a table it does not have — never counts as a match, even
+when both sides answer `NULL`: a typo'd or wrong-database table is a failure
+of the check, not an agreement. A query that fails outright (unreachable
+server, missing privileges) exits 2, the "the check never happened" code, so
+it cannot masquerade as a DIFFER.
+
+A caveat for the arms that subtract: `binlog_bytes` is the sum of the binary
+log files that exist at the moment of the call. If a log is purged during the
+migration (`PURGE BINARY LOGS`, `binlog_expire_logs_seconds`), "after minus
+before" undercounts what the upgrade wrote and can even go negative. A run
+that needs an exact figure should disable expiry for its window or account
+for purges.
 
 ### Exit codes
 
 0 is all good; 1 is a failed check — the fleet is not live, or a checksum
 differs; 2 is the tool could not run at all: no settings, a bad name, no
-client. A run records them differently: 1 is a FAIL of a falsifier, 2 means
+client, or a query that failed outright (unreachable server, no privileges).
+A run records them differently: 1 is a FAIL of a falsifier, 2 means
 the run did not happen.
 
 The tests (`tests/test_zdt_fleet.py`, run by `make check`) use a fake `mysql`

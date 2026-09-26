@@ -833,7 +833,7 @@ make docker-down   # afterwards
 | `bin/check-structure` | A reintroduced `roles:`; a `notify` with no handler; an include path that only resolves at run time; **a parent-path reference**; **a stray `lookup('env', ...)`** |
 | `test.yml` | Nine suites: the variable contract and the precedence guard, the disk pre-flight, the `bundler_steps` table, the build lock, the prune against a real temporary filesystem, the replaced release's maintenance flag against another, and which status exit codes and unregistered themes open a maintenance window or stop the cutover, which file changes move which build fingerprint against a real git repository, and the warm-up against a local web server, and the audit, integrity, backup and approval controls against a real git repository and real signing keys |
 | `tests/test_*.py` | `bin/audit-log`'s chain and evidence; `bin/zdt-proof` listing every proof and refusing to start without a Kapelos checkout, using stand-ins for Docker and Kapelos; `bin/zdt-fleet`'s replica gate and checksum pairs, using a fake mysql client and canned replies |
-| yamllint / ansible-lint / shellcheck | Formatting, and shellcheck over `bin/zdt-proof`. A broken tool reads as **SKIP**, never as a failure |
+| yamllint / ansible-lint / shellcheck | Formatting, and shellcheck over `bin/zdt-proof` and `bin/zdt-fleet`. A broken tool reads as **SKIP**, never as a failure |
 
 Every structural check has been negative-tested -- a deliberate fault introduced
 and confirmed caught.

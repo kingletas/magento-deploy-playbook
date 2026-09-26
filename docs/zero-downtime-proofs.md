@@ -25,6 +25,7 @@ them and keep the transcript.
 - [P1-4: a substituted schema writer emits exactly the stock SQL](#p1-4-a-substituted-schema-writer-emits-exactly-the-stock-sql)
 - [P1-5: a patch_list row written out of band marks a patch applied](#p1-5-a-patch_list-row-written-out-of-band-marks-a-patch-applied)
 - [Running the framework proofs on a production store](#running-the-framework-proofs-on-a-production-store)
+- [The fleet checks: `bin/zdt-fleet`](#the-fleet-checks-binzdt-fleet)
 
 ## Running the proofs
 
@@ -414,3 +415,69 @@ against it as the web server's user (`ZDT_EXEC_USER`, default `www-data`).
 Afterwards it flips back, reloads php-fpm, deletes the copy and the `fixture`
 snapshot, and restores the named snapshot. Each proof's output is kept in the
 site's `local.d/zdt-proof/out/fw-<proof>/`.
+
+## The fleet checks: `bin/zdt-fleet`
+
+`bin/zdt-proof` proves claims about one Magento install. The fleet arms of
+issue #5 need something narrower first: a standing check that the shape a run
+is performed on — a primary with a replica, replicating — is real, and the
+facts the falsifiers judge against, recorded. `bin/zdt-fleet` is that check.
+It deploys nothing and changes nothing; it verifies and records.
+
+Connection details come from the environment, never from arguments, so no
+password lands in a shell history or in a run transcript. The client is
+`mysql`, which speaks to MariaDB servers too, and the password travels in
+`MYSQL_PWD`, which keeps it out of `ps` output as well.
+
+| Variable | Meaning |
+|---|---|
+| `ZDT_PRIMARY_HOST` / `ZDT_PRIMARY_PORT` / `ZDT_PRIMARY_USER` / `ZDT_PRIMARY_PASSWORD` | the primary's connection (port defaults to 3306) |
+| `ZDT_PRIMARY_DATABASE` | optional; `table-checksums` needs it unless the tables are fully qualified |
+| `ZDT_REPLICA_HOST` / `ZDT_REPLICA_PORT` / `ZDT_REPLICA_USER` / `ZDT_REPLICA_PASSWORD` | the replica's connection (port defaults to 3306) |
+| `ZDT_REPLICA_DATABASE` | optional; as on the primary |
+
+### `bin/zdt-fleet replica-check`
+
+Asks the replica for its status and refuses to pass unless it is live: the IO
+thread `Yes`, the SQL thread `Yes`, `Last_SQL_Errno` 0, and the lag a number
+rather than `NULL`. Every failed condition prints with its value and the exit
+is 1. Column names depend on the server: MySQL 8.0.22+ answers with
+`Replica_…` and `Seconds_Behind_Source`; MariaDB keeps `Slave_…` and
+`Seconds_Behind_Master` in every version, including under `SHOW REPLICA
+STATUS`; and a server older than either only answers `SHOW SLAVE STATUS`, so
+the older command is tried when the newer returns nothing. Both spellings are
+read.
+
+When the replica is live, it prints one JSON object on standard output:
+
+```bash
+ZDT_PRIMARY_HOST=primary.db ZDT_PRIMARY_USER=root ZDT_PRIMARY_PASSWORD=… \
+ZDT_REPLICA_HOST=replica.db ZDT_REPLICA_USER=root ZDT_REPLICA_PASSWORD=… \
+bin/zdt-fleet replica-check
+```
+
+```json
+{"timestamp": "2026-09-26T18:00:00Z", "binlog_format": "ROW", "catalogue_size": 1984, "binlog_bytes": 490, "seconds_behind": 0, "last_sql_errno": 0, "last_io_errno": 0, "last_sql_error": "", "last_io_error": ""}
+```
+
+A later arm takes this before and after a migration; the difference in
+`binlog_bytes` is what the upgrade wrote, and `catalogue_size` is what a
+checksum pair is judged against.
+
+### `bin/zdt-fleet table-checksums TABLE…`
+
+Runs `CHECKSUM TABLE` for each named table on both servers and prints one
+line per table, `MATCH` or `DIFFER` with both values; exit 1 if any pair
+differs. Falsifier 1 uses it once `seconds_behind` has returned to zero; a
+differing checksum makes that falsifier false.
+
+### Exit codes
+
+0 is all good; 1 is a failed check — the fleet is not live, or a checksum
+differs; 2 is the tool could not run at all: no settings, a bad name, no
+client. A run records them differently: 1 is a FAIL of a falsifier, 2 means
+the run did not happen.
+
+The tests (`tests/test_zdt_fleet.py`, run by `make check`) use a fake `mysql`
+client returning canned output, so no database is touched; no live replica
+was used to write or test this.

@@ -143,6 +143,22 @@ changed, because there's nothing before it.
 
 ### Added
 
+- `bin/zdt-fleet`, the fleet checks the multi-database runs stand on.
+  `bin/zdt-fleet replica-check` refuses to pass unless a replica is really
+  replicating — IO thread, SQL thread, no SQL error, lag a number rather than
+  NULL — reading both MySQL's `Replica_…` names and MariaDB's `Slave_…` ones,
+  and falling back to `SHOW SLAVE STATUS` on a server old enough to answer
+  only that. When the replica is live it records, as one JSON object, the
+  primary's `binlog_format`, catalogue size and binary-log bytes, the lag, the
+  last errors and a timestamp, so a later arm can take it before and after a
+  migration and say what the upgrade wrote. `bin/zdt-fleet table-checksums
+  TABLE…` compares `CHECKSUM TABLE` between the two servers, `MATCH` or
+  `DIFFER` per table. Connection details come from the environment, never from
+  arguments, so no password lands in a history or a transcript. Its tests run
+  against a fake `mysql` client: no database, and no live replica, was used.
+  [docs/zero-downtime-proofs.md](docs/zero-downtime-proofs.md) lists the
+  variables and both subcommands. `make check` runs its tests and holds it to
+  shellcheck.
 - `bin/zdt-proof` runs eight proofs of the assumptions a zero-downtime deploy
   rests on, against a Magento store running under Kapelos: which schema
   mismatches a live release survives, whether two releases sharing a cache read

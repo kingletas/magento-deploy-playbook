@@ -177,9 +177,14 @@ class ZdtFleetTest(unittest.TestCase):
     def test_a_server_answering_neither_status_command_is_refused(self) -> None:
         # No canned reply for either command: not a replica at all -> exit 2,
         # the "the check never happened" code, not the "fleet is wrong" code.
+        # The failure carries the server's own last error text, so a wrong
+        # password or an unreachable host reads as itself, not only as
+        # "is this configured as a replica?".
         result = self.run_tool("replica-check")
         self.assertEqual(result.returncode, 2)
         self.assertIn("neither SHOW REPLICA STATUS nor SHOW SLAVE STATUS", result.stderr)
+        self.assertIn("no canned reply", result.stderr)
+        self.assertIn("replica.db", result.stderr)
 
     def test_missing_connection_settings_refuse_before_any_call(self) -> None:
         env = {k: v for k, v in self.env.items() if not k.startswith("ZDT_REPLICA")}
@@ -283,8 +288,8 @@ class ZdtFleetTest(unittest.TestCase):
         # a default database answers CHECKSUM TABLE with error 1046.
         self.canned("replica.db", "SHOW REPLICA STATUS",
                     MYSQL8_HEADERS + "\n" + status_row() + "\n")
-        self.run_tool("replica-check")
-        # replica-check's own queries ran; the checksum path proves the flag:
+        status = self.run_tool("replica-check")
+        self.assertEqual(status.returncode, 0, f"{status.stdout}{status.stderr}")
         table = "catalog_product_entity"
         self.canned("primary.db", f"CHECKSUM TABLE {table}", f"magento.{table}\t42\n")
         self.canned("replica.db", f"CHECKSUM TABLE {table}", f"magento.{table}\t42\n")

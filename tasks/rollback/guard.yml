@@ -48,8 +48,10 @@
          | list }}
   run_once: true
 
-- name: Put the deploy's PHP helpers on the admin host
+- name: Put the deploy's PHP helpers on the host that runs Magento's commands
   ansible.builtin.import_tasks: tasks/helpers/install.yml
+  vars:
+    helpers_hosts: "{{ [magento_host | default(groups.admin | first)] }}"
 
 # --require-isolation: on a Magento too old to keep this command out of the live
 # cache it exits 3, which refuses.
@@ -61,7 +63,7 @@
   become_user: "{{ system.user }}"
   run_once: true
   delegate_to: "{{ item }}"
-  loop: "{{ groups.admin }}"
+  loop: "{{ [magento_host | default(groups.admin | first)] }}"
   register: rollback_db_status
   changed_when: false
   failed_when: false
@@ -80,7 +82,7 @@
   become_user: "{{ system.user }}"
   run_once: true
   delegate_to: "{{ item }}"
-  loop: "{{ groups.admin }}"
+  loop: "{{ [magento_host | default(groups.admin | first)] }}"
   register: rollback_db_guard
   changed_when: false
   failed_when: false

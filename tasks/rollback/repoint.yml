@@ -39,7 +39,7 @@
   become_user: "{{ system.user }}"
   run_once: true
   delegate_to: "{{ item }}"
-  loop: "{{ groups.admin }}"
+  loop: "{{ [magento_host | default(groups.admin | first)] }}"
 
 - name: Invalidate Magento's pages in Varnish
   ansible.builtin.command:

@@ -10,6 +10,8 @@
 #   bin/docker-suite test      up + deploy + verify (what `make docker-test` runs)
 #   bin/docker-suite test-lost-host  lose web3 mid-upload and mid-switch; the deploy must fail and say so
 #   bin/docker-suite test-admin-lost lose the admin host before and during setup:upgrade, and grade each criterion
+#   bin/docker-suite test-magento-host  no host can read the database, then a fallback can
+#   bin/docker-suite test-after-switch  a step after the switch fails on one host
 #   bin/docker-suite logs      show the fake tools' call log per container
 #   bin/docker-suite reset     clear locks and releases, to repeat a run
 #   bin/docker-suite shell <name>
@@ -463,6 +465,70 @@ cmd_test_admin_lost() {
     echo "Admin host lost: every criterion held at both steps."
 }
 
+# The host that runs Magento's commands is chosen before anything goes live:
+# with none able to read the database the deploy stops there, and with a
+# fallback named it uses the fallback.
+cmd_test_magento_host() {
+    local lines before log
+    echo "########## no host can read the database: the deploy stops before anything goes live ##########"
+    lines="$(wc -l < "${AUDIT_LOG_PATH}")"
+    before="$(live_release)"
+    docker exec mdp-admin touch /tmp/magento-fake-no-database
+    log="${PLAYBOOK_DIR}/local.d/magento-host-none.log"
+    cmd_deploy > "${log}" 2>&1 && die "a deploy no host could run Magento's commands for reported success."
+    tail -n +"$(( lines + 1 ))" "${AUDIT_LOG_PATH}" | grep '"event": "deploy.failed"' | grep '"phase": "magento-host"' \
+        | grep -q 'admin: exit 1' || die "the stopped deploy left no deploy.failed record with what admin answered."
+    has_event_since "${lines}" cutover.started && die "a deploy no host could run Magento's commands for still began the cutover."
+    [ "$(live_release)" = "${before}" ] || die "the live release changed, although nothing should have gone live."
+    for host in "${APP_CONTAINERS[@]}"; do
+        [ "$(storefront_status "${host}")" = 200 ] || die "${host} is not serving after a deploy that stopped before the cutover."
+    done
+    docker exec mdp-builder sh -c 'ls /tmp/*.lock 2>/dev/null' && die "the stopped deploy left the build lock behind."
+    echo "No host: the deploy stopped before the cutover, recorded what admin answered, and released the lock."
+    echo ""
+    echo "########## the admin host cannot, a fallback can: the deploy uses the fallback ##########"
+    lines="$(wc -l < "${AUDIT_LOG_PATH}")"
+    log="${PLAYBOOK_DIR}/local.d/magento-host-fallback.log"
+    cmd_deploy -e '{"magento_hosts": ["admin", "web1"]}' > "${log}" 2>&1 || die "a deploy with a working fallback host failed."
+    docker exec mdp-admin rm -f /tmp/magento-fake-no-database
+    grep -q "web1 runs Magento's commands for this deploy, because admin could not read the database" "${log}" \
+        || die "the deploy did not say it passed over admin."
+    tail -n +"$(( lines + 1 ))" "${AUDIT_LOG_PATH}" | grep '"event": "cutover.started"' | grep -q '"magento_host": "web1"' \
+        || die "cutover.started does not name web1 as the host that ran Magento's commands."
+    live_release >/dev/null
+    echo "Fallback: admin passed over, web1 ran Magento's commands, and the deploy passed."
+}
+
+# A step after the switch fails on one host: the deploy stops for every host,
+# records the step, releases the lock and says what is left to run by hand.
+cmd_test_after_switch() {
+    local lines log record host
+    echo "########## maint:disable fails on web2 after setup:upgrade: the deploy stops and says what is left ##########"
+    lines="$(wc -l < "${AUDIT_LOG_PATH}")"
+    log="${PLAYBOOK_DIR}/local.d/after-switch.log"
+    set_needs_upgrade touch
+    docker exec mdp-web2 sh -c 'echo maint:disable > /tmp/magento-fake-fail-on'
+    cmd_deploy > "${log}" 2>&1 && die "a deploy whose maint:disable failed on web2 reported success."
+    docker exec mdp-web2 rm -f /tmp/magento-fake-fail-on
+    set_needs_upgrade "rm -f"
+    record="$(tail -n +"$(( lines + 1 ))" "${AUDIT_LOG_PATH}" | grep '"event": "deploy.failed"')"
+    grep -q '"phase": "after-switch"' <<< "${record}" || die "the failed step left no deploy.failed record at after-switch."
+    grep -q 'web2' <<< "${record}" || die "the deploy.failed record does not name web2."
+    for event in cutover.succeeded deploy.finished; do
+        has_event_since "${lines}" "${event}" && die "a deploy whose maint:disable failed still recorded ${event}."
+    done
+    docker exec mdp-builder sh -c 'ls /tmp/*.lock 2>/dev/null' && die "the failed step left the build lock behind."
+    [ "$(storefront_status mdp-web2)" = 503 ] || die "web2 is not left in maintenance, although its maint:disable failed."
+    for host in mdp-web1 mdp-web3; do
+        [ "$(storefront_status "${host}")" = 200 ] || die "${host} is not serving, although its maint:disable ran."
+    done
+    grep -q 'the rollback guard would refuse a code rollback' "${log}" || die "the message does not say a code rollback is refused after setup:upgrade."
+    grep -q 'maint:disable, on every web host' "${log}" || die "the message does not list maint:disable among the steps left."
+    docker exec mdp-web2 sh -c 'cd /var/www/html/magento_current && php bin/magento maint:disable' >/dev/null
+    [ "$(storefront_status mdp-web2)" = 200 ] || die "web2 does not serve after maint:disable was run by hand, as the message says."
+    echo "After the switch: the deploy stopped for every host, named the step and web2, released the lock, and the step left ran by hand."
+}
+
 # The guarded rollback, both ways and from both entry points. Runs after the
 # audit check, because a rolled-back deploy rightly lacks cutover.succeeded.
 cmd_test_rollback() {
@@ -583,6 +649,12 @@ cmd_test() {
     echo ""
     cmd_test_lost_host
     echo ""
+    cmd_test_admin_lost
+    echo ""
+    cmd_test_magento_host
+    echo ""
+    cmd_test_after_switch
+    echo ""
     echo "All good. Tear down with: bin/docker-suite down"
 }
 
@@ -596,6 +668,8 @@ case "${1:-}" in
     test)    shift; cmd_test "$@" ;;
     test-lost-host) shift; cmd_test_lost_host "$@" ;;
     test-admin-lost) shift; cmd_test_admin_lost "$@" ;;
+    test-magento-host) shift; cmd_test_magento_host "$@" ;;
+    test-after-switch) shift; cmd_test_after_switch "$@" ;;
     logs)    shift; cmd_logs "$@" ;;
     shell)   shift; cmd_shell "$@" ;;
     reset)   shift; cmd_reset "$@" ;;

@@ -26,6 +26,18 @@ if [ "$(cat /tmp/mdp-hold-magento 2>/dev/null)" = "$1" ]; then
   rm -f /tmp/mdp-magento-holding
 fi
 
+# Test-only: /tmp/magento-fake-fail-on names one subcommand that fails here, so
+# the suite can fail one step on one host. /tmp/magento-fake-no-database makes
+# setup:db:status fail the way it does when this host cannot reach the database.
+if [ "$(cat /tmp/magento-fake-fail-on 2>/dev/null)" = "$1" ]; then
+  echo "[fake-magento] $1 failed on purpose" >&2
+  exit 1
+fi
+if [ "$1" = setup:db:status ] && [ -e /tmp/magento-fake-no-database ]; then
+  echo "SQLSTATE[HY000] [2002] Connection refused" >&2
+  exit 1
+fi
+
 case "$1" in
   maint:enable)
     mkdir -p var && touch var/.maintenance.flag

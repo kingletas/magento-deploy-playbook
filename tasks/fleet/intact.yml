@@ -3,8 +3,8 @@
 # Stops the whole deploy when a web host it began with has dropped out, so a
 # fleet split between two releases is recorded as a failure, never a success.
 #
-#   fleet_phase   where in the deploy this is checked: upload, before-switch
-#                 or switch.
+#   fleet_phase   where in the deploy this is checked: upload, before-cutover,
+#                 before-switch, switch or after-switch.
 ###
 - name: "Fleet: every web host that began the deploy is still in it, at {{ fleet_phase }}"
   any_errors_fatal: true

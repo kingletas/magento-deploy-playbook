@@ -1,7 +1,11 @@
 ---
 ###
-# Copies the deploy's PHP helpers to every admin host, where the Magento CLI
-# steps run. They sit beside the releases, outside any web root.
+# Copies the deploy's PHP helpers to the hosts where the Magento CLI steps run,
+# beside the releases and outside any web root.
+#
+#   helpers_hosts         where to copy them; the admin group when unset.
+#   helpers_best_effort   true lets a host that cannot take them pass, so the
+#                         deploy's choice of host can try the next one.
 ###
 - name: Create the helpers directory
   ansible.builtin.file:
@@ -13,7 +17,10 @@
   become: true
   run_once: true
   delegate_to: "{{ item }}"
-  loop: "{{ groups.admin }}"
+  loop: "{{ helpers_hosts | default(groups.admin) }}"
+  register: helpers_dir
+  ignore_errors: "{{ helpers_best_effort | default(false) }}"
+  ignore_unreachable: "{{ helpers_best_effort | default(false) }}"
 
 - name: Copy the helpers
   ansible.builtin.copy:
@@ -25,4 +32,7 @@
   become: true
   run_once: true
   delegate_to: "{{ item.0 }}"
-  loop: "{{ groups.admin | product(['magento-isolated.php', 'magento-db-guard.php', 'magento-config-warnings.php']) | list }}"
+  loop: "{{ helpers_hosts | default(groups.admin) | product(['magento-isolated.php', 'magento-db-guard.php', 'magento-config-warnings.php']) | list }}"
+  register: helpers_copied
+  ignore_errors: "{{ helpers_best_effort | default(false) }}"
+  ignore_unreachable: "{{ helpers_best_effort | default(false) }}"

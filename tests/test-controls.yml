@@ -25,6 +25,7 @@
         env_name: test
         release_id: 20260101_1700000001_test
         builder: test-builder
+        magento_host: test-admin
         deployer_actor: {git_email: deployer@example.invalid, os_user: ci, remote_user: ci, control_host: test}
         audit: {path: "{{ root }}/audit.jsonl", forward: "", required: true}
 

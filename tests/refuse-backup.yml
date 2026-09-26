@@ -9,6 +9,7 @@
       ansible.builtin.include_tasks: tasks/backup/run.yml
       vars:
         releases: {complete: true}
+        magento_host: test-admin
         upgrade_needed: true
         backup: {run: always, command: "{{ bad.command }}", timeout: 30}
 

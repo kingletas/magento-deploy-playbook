@@ -9,6 +9,18 @@ changed, because there's nothing before it.
 
 ### Fixed
 
+- A failure after the switch no longer ends the run with the lock held and no
+  record. When the cache flush, the Varnish ban, `maint:disable` or the indexer
+  reset fails, the deploy stops for every host, records `deploy.failed` with
+  the step and the error, releases the build lock, and prints the steps left to
+  run and whether `make rollback` is still possible. A web host that drops out
+  after the switch, or before the cutover begins, now fails the deploy too.
+- The deploy now chooses one host to run Magento's commands before anything goes
+  live, from `magento_hosts` (the admin group by default), and uses it for every
+  one of them. A host that cannot read the database is passed over for the next;
+  when none can, the deploy stops with nothing live and the lock released. Before
+  this, `setup:upgrade` ran once on every admin host, and an admin host that had
+  gone away was found only mid-cutover.
 - A release whose `app/etc/config.php` changes its themes or scopes no longer
   fails in the middle of the maintenance window. The configuration import inside
   `setup:upgrade` asks for a yes before it registers them, and with nobody to

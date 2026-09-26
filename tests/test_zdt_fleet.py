@@ -30,8 +30,13 @@ while [[ $# -gt 0 ]]; do
 done
 printf '%s|%s|pwd=%s\\n' "$host" "$sql" "${MYSQL_PWD:-unset}" >> "$FAKE_CALLS"
 key="${host}|${db}|${sql}"
-file="$FAKE_DIR/$(printf '%s' "$key" | sha256sum | cut -d' ' -f1)"
+hash=$(printf '%s' "$key" | sha256sum | cut -d' ' -f1)
+file="$FAKE_DIR/$hash"
 if [[ -f $file ]]; then cat "$file"; exit 0; fi
+# A `<hash>.err` file stands for a server that answers with its own error
+# text and a failure status (access denied, unknown command, 1064 on 8.4 for
+# SHOW SLAVE STATUS), instead of an empty reply.
+if [[ -f "$file.err" ]]; then cat "$file.err" >&2; exit 1; fi
 echo "ERROR 1064 (42000): fake has no canned reply for [$sql] on $host" >&2
 exit 1
 """
@@ -102,6 +107,12 @@ class ZdtFleetTest(unittest.TestCase):
     def remove_canned(self, host: str, sql: str, db: str = "magento") -> None:
         name = hashlib.sha256(f"{host}|{db}|{sql}".encode()).hexdigest()
         (self.fake_dir / name).unlink()
+
+    def canned_err(self, host: str, sql: str, error: str, db: str = "magento") -> None:
+        # The server answers this query with its own error text and a failure
+        # status, not with an empty reply.
+        name = hashlib.sha256(f"{host}|{db}|{sql}".encode()).hexdigest()
+        (self.fake_dir / f"{name}.err").write_text(error)
 
     def run_tool(self, *argv: str, **extra_env: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run([str(TOOL), *argv], env={**self.env, **extra_env},
@@ -185,6 +196,32 @@ class ZdtFleetTest(unittest.TestCase):
         self.assertIn("neither SHOW REPLICA STATUS nor SHOW SLAVE STATUS", result.stderr)
         self.assertIn("no canned reply", result.stderr)
         self.assertIn("replica.db", result.stderr)
+
+    def test_both_status_attempts_errors_reach_the_refusal(self) -> None:
+        # MySQL 8.4, replica user without REPLICATION CLIENT: the first
+        # attempt fails with the access-denied error that explains the problem
+        # and the SHOW SLAVE STATUS fallback always fails 1064. If only the
+        # last attempt's text survived, the operator would read "syntax error"
+        # and never see the missing privilege. Both texts must be in stderr.
+        self.canned_err("replica.db", "SHOW REPLICA STATUS",
+                        "ERROR 1227 (42000): Access denied; you need (at least one of) the REPLICATION CLIENT privilege(s)\n")
+        self.canned_err("replica.db", "SHOW SLAVE STATUS",
+                        "ERROR 1064 (42000): You have an error in your SQL syntax near 'SHOW SLAVE STATUS'\n")
+        result = self.run_tool("replica-check")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("REPLICATION CLIENT", result.stderr)
+        self.assertIn("SHOW SLAVE STATUS", result.stderr)
+        self.assertIn("error in your SQL syntax", result.stderr)
+
+    def test_a_plain_non_replica_on_8_0_gets_the_no_error_output_fallback(self) -> None:
+        # MySQL 8.0.22-8.3, not a replica: both status commands answer with an
+        # empty result and exit 0, so there is no error text to carry and the
+        # message falls back to "no error output".
+        self.canned("replica.db", "SHOW REPLICA STATUS", "\n")
+        self.canned("replica.db", "SHOW SLAVE STATUS", "\n")
+        result = self.run_tool("replica-check")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no error output", result.stderr)
 
     def test_missing_connection_settings_refuse_before_any_call(self) -> None:
         env = {k: v for k, v in self.env.items() if not k.startswith("ZDT_REPLICA")}

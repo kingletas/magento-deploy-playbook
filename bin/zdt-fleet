@@ -150,14 +150,18 @@ if [[ $subcommand == replica-check ]]; then
     # stderr goes to a file, not /dev/null: when BOTH attempts come back
     # empty the operator needs to see why — a wrong password or an
     # unreachable host would otherwise read as "is ZDT_REPLICA_HOST
-    # configured as a replica?". The retry stays quiet per attempt; only the
-    # last attempt's error text reaches the die message.
+    # configured as a replica?". The retry stays quiet per attempt; BOTH
+    # attempts' error text reaches the die message. Truncating inside the
+    # loop would hide the real cause on MySQL 8.4, where SHOW SLAVE STATUS
+    # always fails 1064 and would overwrite e.g. an access-denied error from
+    # the first attempt.
     status_err=$(mktemp "${TMPDIR:-/tmp}/zdt-fleet-XXXXXX" 2>/dev/null) || status_err="/dev/null"
     trap '[[ -z ${status_err:-} || $status_err == /dev/null ]] || rm -f "$status_err"' EXIT
+    : > "$status_err"
     for cmd in "SHOW REPLICA STATUS" "SHOW SLAVE STATUS"; do
         # The one place a client failure is not fatal: an unknown command on
         # an old server is how the fallback loop knows to try the next one.
-        status=$(run_sql replica "$cmd" with-headers 2>"$status_err") || status=""
+        status=$(run_sql replica "$cmd" with-headers 2>>"$status_err") || status=""
         [[ -z $status ]] || break
     done
     if [[ -z $status ]]; then

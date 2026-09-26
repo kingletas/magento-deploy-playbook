@@ -210,8 +210,12 @@ class ZdtFleetTest(unittest.TestCase):
         result = self.run_tool("replica-check")
         self.assertEqual(result.returncode, 2)
         self.assertIn("REPLICATION CLIENT", result.stderr)
-        self.assertIn("SHOW SLAVE STATUS", result.stderr)
-        self.assertIn("error in your SQL syntax", result.stderr)
+        # Each attempt's text carries the label of the command that produced
+        # it, so "syntax error" and "access denied" are attributable. Assert
+        # the labelled pair, not bare substrings: the unlabelled die message
+        # already contains both command names.
+        self.assertIn("SHOW REPLICA STATUS: ERROR 1227", result.stderr)
+        self.assertIn("SHOW SLAVE STATUS: ERROR 1064", result.stderr)
 
     def test_a_plain_non_replica_on_8_0_gets_the_no_error_output_fallback(self) -> None:
         # MySQL 8.0.22-8.3, not a replica: both status commands answer with an

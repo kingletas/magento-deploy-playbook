@@ -156,20 +156,33 @@ if [[ $subcommand == replica-check ]]; then
     # always fails 1064 and would overwrite e.g. an access-denied error from
     # the first attempt.
     status_err=$(mktemp "${TMPDIR:-/tmp}/zdt-fleet-XXXXXX" 2>/dev/null) || status_err="/dev/null"
-    trap '[[ -z ${status_err:-} || $status_err == /dev/null ]] || rm -f "$status_err"' EXIT
-    : > "$status_err"
+    attempt_err=$(mktemp "${TMPDIR:-/tmp}/zdt-fleet-XXXXXX" 2>/dev/null) || attempt_err="/dev/null"
+    trap '[[ -z ${status_err:-} || $status_err == /dev/null ]] || rm -f "$status_err";
+          [[ -z ${attempt_err:-} || $attempt_err == /dev/null ]] || rm -f "$attempt_err"' EXIT
     for cmd in "SHOW REPLICA STATUS" "SHOW SLAVE STATUS"; do
         # The one place a client failure is not fatal: an unknown command on
         # an old server is how the fallback loop knows to try the next one.
-        status=$(run_sql replica "$cmd" with-headers 2>>"$status_err") || status=""
+        # A FAILED attempt's stderr joins the refusal under a label naming
+        # the command that produced it, so the operator can tell an
+        # access-denied on SHOW REPLICA STATUS from 8.4's blanket "unknown
+        # command" on SHOW SLAVE STATUS. Only failed attempts are labelled:
+        # labelling an empty-but-successful answer (MySQL 8.0.22-8.3 that is
+        # not a replica) would leave the "no error output" fallback unable to
+        # ever fire.
+        status=$(run_sql replica "$cmd" with-headers 2>"$attempt_err") || status=""
+        if [[ -z $status && -s $attempt_err ]]; then
+            printf '%s: %s\n' "$cmd" "$(<"$attempt_err")" >>"$status_err"
+        fi
         [[ -z $status ]] || break
     done
     if [[ -z $status ]]; then
         reason=$(<"$status_err")
         # DB_HOST is only set inside run_sql's subshell; bind it here so the
-        # message can name the server that failed.
+        # message can name the server that failed. The server's text follows
+        # on its own — a paren wrapped around two labelled lines would close
+        # them on a line holding nothing else.
         connect_fields replica
-        die "the replica answered neither SHOW REPLICA STATUS nor SHOW SLAVE STATUS; is ZDT_REPLICA_HOST configured as a replica? ($DB_HOST: ${reason:-no error output})"
+        die "the replica answered neither SHOW REPLICA STATUS nor SHOW SLAVE STATUS; is ZDT_REPLICA_HOST configured as a replica? server $DB_HOST said: ${reason:-no error output}"
     fi
 
     # Only one status row can be judged here. Multi-source replication (one

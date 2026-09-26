@@ -141,6 +141,23 @@
               - warmup_verdict.ok | int == 2
               - warmup_verdict.sitemap_status | int == 404
             fail_msg: "urls={{ warmup_urls }} verdict={{ warmup_verdict }}"
+        # A warm-up that breaks does not fail the play: it is recorded as nothing warmed.
+        - name: Set a warm-up whose timeout cannot be read
+          ansible.builtin.set_fact:
+            warmup: {enabled: true, base_url: "{{ base }}", paths: [/], sitemap: "",
+                     limit: 50, concurrency: 2, timeout: not-a-number, fail_below: 0}
+
+        - name: Warm with a setting that breaks it
+          ansible.builtin.include_tasks: tasks/warmup/main.yml
+
+        - name: Assert the play carried on and the verdict says nothing was warmed
+          ansible.builtin.assert:
+            that:
+              - warmup_verdict.requested | int == 0
+              - warmup_verdict.percent | float == 0.0
+              - warmup_verdict.error | length > 0
+            fail_msg: "verdict={{ warmup_verdict }}"
+
       always:
         - name: Stop the fixture web server
           ansible.builtin.command: "kill {{ server.stdout | int }}"

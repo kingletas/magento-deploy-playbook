@@ -188,6 +188,36 @@
           backup_id: "{{ backup_id | default('') }}"
       when: not deploy_rolled_back | default(false) | bool
 
+    # Handlers otherwise run when the play ends, after the flag below, so one that
+    # failed could not stop the deploy being recorded as finished. Run them here
+    # instead, where a failure gets the same response as a step after the switch.
+    - name: Run the handlers, and stop cleanly if one fails
+      block:
+        - name: Run the handlers now
+          ansible.builtin.meta: flush_handlers
+
+        - name: Stop if a handler could not reach the host it needed
+          ansible.builtin.fail:
+            msg: "{{ unreached | join('; ') }} could not be reached while the handlers ran."
+          vars:
+            unreached: >-
+              {{ (ansible_play_hosts | map('extract', hostvars) | map(attribute='php_stopped', default={})
+                  | map(attribute='results', default=[]) | flatten(levels=1)
+                  | selectattr('unreachable', 'defined') | selectattr('unreachable')
+                  | map(attribute='item') | list)
+                 + (ansible_play_hosts | zip(ansible_play_hosts | map('extract', hostvars)
+                      | map(attribute='indexers_sql_reset', default={}))
+                    | selectattr('1.unreachable', 'defined') | selectattr('1.unreachable')
+                    | map('first') | list)
+                 | unique | list }}
+          run_once: true
+          when: unreached | length > 0
+      rescue:
+        - name: Stop, and say what is left
+          ansible.builtin.include_tasks: tasks/magento-deploy/after-switch-failed.yml
+          vars:
+            after_switch_from: handlers
+
     # What the prune play checks before it prunes or records the deploy as
     # finished, so a Magento play that ended with no web host left cannot be
     # followed by a builder recording success on its own.

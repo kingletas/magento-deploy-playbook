@@ -12,6 +12,7 @@
 #   bin/docker-suite test-admin-lost lose the admin host before and during setup:upgrade, and grade each criterion
 #   bin/docker-suite test-magento-host  no host can read the database, then a fallback can
 #   bin/docker-suite test-after-switch  a step after the switch fails on one host
+#   bin/docker-suite test-handler-fails the indexer-reset handler fails at the end; the deploy must not record success
 #   bin/docker-suite logs      show the fake tools' call log per container
 #   bin/docker-suite reset     clear locks and releases, to repeat a run
 #   bin/docker-suite shell <name>
@@ -562,6 +563,38 @@ cmd_test_after_switch() {
     echo "After the switch: the deploy stopped for every host, named the step and web2, released the lock, and the step left ran by hand."
 }
 
+# The handlers run at the end of the Magento play. With kill_php on, a clean
+# deploy runs the indexer reset and passes; when that reset fails, the deploy
+# stops before it is recorded as finished, releases the lock and says what is left.
+cmd_test_handler_fails() {
+    local lines log host
+    echo "########## kill_php on, nothing fails: the handlers run and the deploy passes ##########"
+    lines="$(wc -l < "${AUDIT_LOG_PATH}")"
+    truncate_logs
+    cmd_deploy -e kill_php=true > "${PLAYBOOK_DIR}/local.d/handlers-clean.log" 2>&1 \
+        || die "a clean deploy with kill_php on failed. local.d/handlers-clean.log has the run."
+    has_event_since "${lines}" deploy.finished || die "a clean deploy with kill_php on recorded no deploy.finished."
+    docker exec mdp-web1 grep -q 'fake-mysql.*mview_state' /tmp/build-log \
+        || die "the indexer-reset handler did not run on web1."
+    echo "Clean: the handlers ran, the indexers were reset, and the deploy was recorded as finished."
+    echo ""
+    echo "########## the indexer reset fails: the deploy stops before it is recorded as finished ##########"
+    lines="$(wc -l < "${AUDIT_LOG_PATH}")"
+    log="${PLAYBOOK_DIR}/local.d/handlers-fail.log"
+    for host in "${APP_CONTAINERS[@]}"; do docker exec "${host}" touch /tmp/mysql-fake-fail; done
+    cmd_deploy -e kill_php=true > "${log}" 2>&1 && die "a deploy whose indexer reset failed reported success."
+    for host in "${APP_CONTAINERS[@]}"; do docker exec "${host}" rm -f /tmp/mysql-fake-fail; done
+    has_event_since "${lines}" deploy.finished && die "a deploy whose indexer reset failed still recorded deploy.finished."
+    tail -n +"$(( lines + 1 ))" "${AUDIT_LOG_PATH}" | tail -n 1 | grep '"event": "deploy.failed"' | grep -q 'Reset the indexers' \
+        || die "the run's last record is not a deploy.failed naming the indexer reset."
+    docker exec mdp-builder sh -c 'ls /tmp/*.lock 2>/dev/null' && die "the failed handler left the build lock behind."
+    for host in "${APP_CONTAINERS[@]}"; do
+        [ "$(storefront_status "${host}")" = 200 ] || die "${host} is not serving, although every step before the handlers ran."
+    done
+    grep -q 'mysql -e "use magento;.*mview_state' "${log}" || die "the message does not list the indexer reset among the steps left."
+    echo "Handler fails: no deploy.finished, the last record names the indexer reset, the lock is released, and the site still serves."
+}
+
 # The guarded rollback, both ways and from both entry points. Runs after the
 # audit check, because a rolled-back deploy rightly lacks cutover.succeeded.
 cmd_test_rollback() {
@@ -689,6 +722,8 @@ cmd_test() {
     echo ""
     cmd_test_after_switch
     echo ""
+    cmd_test_handler_fails
+    echo ""
     echo "All good. Tear down with: bin/docker-suite down"
 }
 
@@ -704,9 +739,10 @@ case "${1:-}" in
     test-admin-lost) shift; cmd_test_admin_lost "$@" ;;
     test-magento-host) shift; cmd_test_magento_host "$@" ;;
     test-after-switch) shift; cmd_test_after_switch "$@" ;;
+    test-handler-fails) shift; cmd_test_handler_fails "$@" ;;
     logs)    shift; cmd_logs "$@" ;;
     shell)   shift; cmd_shell "$@" ;;
     reset)   shift; cmd_reset "$@" ;;
     down)    shift; cmd_down "$@" ;;
-    *) sed -n '3,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *) sed -n '3,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

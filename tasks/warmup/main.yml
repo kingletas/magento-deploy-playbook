@@ -103,3 +103,26 @@
           requested: "{{ warmup_verdict.requested | int }}"
           ok: "{{ warmup_verdict.ok | int }}"
           percent: "{{ warmup_verdict.percent }}"
+  # The Magento play runs this as a handler inside a rescued block, where a
+  # failure would stop the deploy. A warm-up that breaks is recorded instead, as
+  # nothing warmed, and the last play judges it against its threshold.
+  rescue:
+    - name: Record that the warm-up could not run
+      ansible.builtin.set_fact:
+        warmup_verdict:
+          requested: 0
+          ok: 0
+          percent: 0.0
+          sitemap_status: not reached
+          failures: []
+          error: >-
+            {{ ((ansible_failed_result | default({})).msg | default('the warm-up stopped', true))
+               | string | truncate(300) }}
+      run_once: true
+
+    - name: Say the warm-up could not run
+      ansible.builtin.debug:
+        msg: >-
+          The warm-up could not run: {{ warmup_verdict.error }}. The release is
+          live; the last play reports this against warmup.fail_below.
+      run_once: true

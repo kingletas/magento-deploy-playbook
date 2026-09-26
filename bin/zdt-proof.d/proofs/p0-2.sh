@@ -20,6 +20,11 @@
 # Changes the store: creates one product, alters the fixture module and
 # app/etc/config.php, runs setup:upgrade, and restores snapshot 'fixture' and
 # config.php when it finishes.
+#
+# Environment overrides:
+#   ZDT_PRODUCT_SKU    an existing in-stock simple product to use instead of
+#                      creating one (default: creates zdt-simple)
+#   ZDT_PRODUCT_PATH   that product's URL path (default zdt-simple.html)
 
 # shellcheck source=/dev/null  # ZDT_PROOF_DIR is set by bin/zdt-proof at run time
 source "$ZDT_PROOF_DIR/lib.sh"

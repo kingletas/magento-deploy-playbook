@@ -48,7 +48,7 @@ static_fingerprint >"$HELD/static.md5"
 cp -a "$HOST_ROOT/generated" "$HELD/generated"
 rm -rf "$HOST_ROOT/generated/metadata"
 
-# shellcheck disable=SC2329  # run by the EXIT trap
+# shellcheck disable=SC2317,SC2329  # run by the EXIT trap; shellcheck before 0.10 calls it unreachable
 cleanup() {
     # Every step runs whatever the one before it did, and says so if it fails.
     set +e

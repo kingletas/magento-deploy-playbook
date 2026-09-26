@@ -446,13 +446,23 @@ is 1. Column names depend on the server: MySQL 8.0.22+ answers with
 `Seconds_Behind_Master` in every version, including under `SHOW REPLICA
 STATUS`; and a server older than either only answers `SHOW SLAVE STATUS`, so
 the older command is tried when the newer returns nothing. Both spellings are
-read.
+read. The gate judges a *single-channel* replica: several status rows from
+one server (MySQL multi-source) are refused with exit 2 rather than partially
+read. Note that MariaDB answers `SHOW REPLICA STATUS` with only the default
+connection — named channels appear only under `SHOW ALL SLAVES STATUS` — so a
+MariaDB fleet with named multi-source channels is out of scope for this gate;
+the lab fleet is single-source by design. When neither status command yields
+an answer, the failure carries the server's own last error text (a wrong
+password or an unreachable host reads as itself, not only as "is this
+configured as a replica?").
 
 When the replica is live, it prints one JSON object on standard output:
 
 ```bash
 ZDT_PRIMARY_HOST=primary.db ZDT_PRIMARY_USER=root ZDT_PRIMARY_PASSWORD=… \
+ZDT_PRIMARY_DATABASE=magento \
 ZDT_REPLICA_HOST=replica.db ZDT_REPLICA_USER=root ZDT_REPLICA_PASSWORD=… \
+ZDT_REPLICA_DATABASE=magento \
 bin/zdt-fleet replica-check
 ```
 
@@ -489,7 +499,9 @@ for purges.
 differs; 2 is the tool could not run at all: no settings, a bad name, no
 client, or a query that failed outright (unreachable server, no privileges).
 A run records them differently: 1 is a FAIL of a falsifier, 2 means
-the run did not happen.
+the run did not happen. On exit 2 stdout may hold partial output — a
+`table-checksums` that dies on a later table has already printed its earlier
+`MATCH` lines — so trust the exit code before parsing stdout.
 
 The tests (`tests/test_zdt_fleet.py`, run by `make check`) use a fake `mysql`
 client returning canned output, so no database is touched; no live replica

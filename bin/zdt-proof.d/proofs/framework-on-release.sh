@@ -32,13 +32,13 @@ snapshots=$(cd "$KAPELOS_HOME" && kapelos snapshot)
 grep -q "^  $SNAPSHOT " <<<"$snapshots" || { echo "framework-on-release: no snapshot '$SNAPSHOT' to restore afterwards; take one first" >&2; exit 2; }
 [[ $ORIGINAL != "$COPY" ]] || { echo "framework-on-release: magento_current already points at the copy; a previous run did not clean up" >&2; exit 2; }
 
-# shellcheck disable=SC2329  # run by the EXIT trap
+# shellcheck disable=SC2317,SC2329  # run by the EXIT trap; shellcheck before 0.10 calls it unreachable
 cleanup() {
     step "Putting the site back"
     flip "$ORIGINAL"
     reload_php
     docker exec "$PHP_CONTAINER" rm -rf "$COPY"
-    (cd "$KAPELOS_HOME" && kapelos snapshot delete fixture -y >/dev/null 2>&1 || true)
+    (cd "$KAPELOS_HOME" && kapelos snapshot delete fixture -y >/dev/null 2>&1) || true
     (restore_snapshot "$SNAPSHOT") || echo "framework-on-release: restoring snapshot $SNAPSHOT FAILED; restore it by hand" >&2
     flush_cache || echo "framework-on-release: cache:flush from $ORIGINAL failed" >&2
     [[ $(current_release) == "$ORIGINAL" ]] && echo "magento_current: $ORIGINAL"

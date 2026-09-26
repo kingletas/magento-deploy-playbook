@@ -16,9 +16,11 @@
 # setup:db:status is the probe, so the chosen host's answer is the one the
 # upgrade gate reads, as db_config.
 ###
+# `select('in', ...)` rather than `intersect`, which does not keep the first list's
+# order on newer Ansible, and the order is the preference.
 - name: Name the hosts that may run Magento's commands
   ansible.builtin.set_fact:
-    magento_host_candidates: "{{ magento_hosts | default(groups.admin) | intersect(ansible_play_hosts) }}"
+    magento_host_candidates: "{{ magento_hosts | default(groups.admin) | select('in', ansible_play_hosts) | list }}"
   run_once: true
 
 - name: Put the deploy's PHP helpers on each of them

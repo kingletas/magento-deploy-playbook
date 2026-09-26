@@ -170,9 +170,10 @@ cmd_known_hosts() {
     ssh-keyscan -T 10 -t ed25519,ecdsa,rsa "${ips[@]}" > "${known}" 2>/dev/null \
         || die "could not scan the containers' host keys."
     [ -s "${known}" ] || die "ssh-keyscan returned no host keys."
-    docker cp "${known}" mdp-builder:/home/ubuntu/.ssh/known_hosts \
-        && docker exec mdp-builder sh -c 'chown ubuntu:ubuntu /home/ubuntu/.ssh/known_hosts && chmod 600 /home/ubuntu/.ssh/known_hosts' \
-        || die "could not install known_hosts on the builder."
+    if ! docker cp "${known}" mdp-builder:/home/ubuntu/.ssh/known_hosts \
+       || ! docker exec mdp-builder sh -c 'chown ubuntu:ubuntu /home/ubuntu/.ssh/known_hosts && chmod 600 /home/ubuntu/.ssh/known_hosts'; then
+        die "could not install known_hosts on the builder."
+    fi
     echo "Scanned ${#ips[@]} host keys into ${known#"${PLAYBOOK_DIR}/"} and onto the builder."
 }
 

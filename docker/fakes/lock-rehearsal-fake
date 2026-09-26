@@ -18,6 +18,7 @@ except FileNotFoundError:
     pass
 with open("/tmp/build-log", "a") as log:
     log.write("[fake-lock-rehearsal] " + " ".join(sys.argv[1:]) + "\n")
-json.dump({"production_version": "11.4.10-MariaDB", "rehearsal_version": "11.4.10-MariaDB",
-           "upgrade_exit": 0, "statements": statements, "patches_applied": ["Fake\\Patch\\Data\\Next"],
-           "data_statements": 3, "data_statements_by_table": {}, "blind_spots": []}, open(out, "w"))
+with open(out, "w") as report:
+    json.dump({"production_version": "11.4.10-MariaDB", "rehearsal_version": "11.4.10-MariaDB",
+               "upgrade_exit": 0, "statements": statements, "patches_applied": ["Fake\\Patch\\Data\\Next"],
+               "data_statements": 3, "data_statements_by_table": {}, "blind_spots": []}, report)

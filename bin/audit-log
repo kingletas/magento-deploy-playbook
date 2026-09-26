@@ -149,8 +149,8 @@ def summary_markdown(release: str, selected: list[dict]) -> str:
     actor = started.get("actor", {})
     rows = [
         ("Environment", started.get("env_name", "not recorded")),
-        ("Deployed by", f"{actor.get('git_email', 'unknown')} as {actor.get('os_user', 'unknown')} "
-                        f"from {actor.get('control_host', 'unknown')}"),
+        ("Deployed by", (f"{actor.get('git_email', 'unknown')} as {actor.get('os_user', 'unknown')} "
+                         f"from {actor.get('control_host', 'unknown')}")),
         ("Started", started.get("recorded_at", "not recorded")),
         ("Commit", build.get("commit", "not recorded")),
         ("Artefact SHA-256", build.get("artefact_sha256", "not recorded")),

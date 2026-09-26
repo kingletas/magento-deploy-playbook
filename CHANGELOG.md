@@ -163,8 +163,9 @@ changed, because there's nothing before it.
   [docs/zero-downtime-proofs.md](docs/zero-downtime-proofs.md) lists the
   variables and both subcommands. `make check` runs its tests and holds it to
   shellcheck. When neither status command yields an answer, the refusal
-  carries the server's own last error text, so a wrong password or an
-  unreachable host reads as itself.
+  carries both status attempts' error text, so a wrong password, an
+  unreachable host or a missing privilege reads as itself even on MySQL 8.4,
+  where the `SHOW SLAVE STATUS` fallback always fails with a syntax error.
 - `bin/zdt-proof` runs eight proofs of the assumptions a zero-downtime deploy
   rests on, against a Magento store running under Kapelos: which schema
   mismatches a live release survives, whether two releases sharing a cache read

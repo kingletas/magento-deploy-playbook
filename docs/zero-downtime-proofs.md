@@ -452,9 +452,13 @@ read. Note that MariaDB answers `SHOW REPLICA STATUS` with only the default
 connection — named channels appear only under `SHOW ALL SLAVES STATUS` — so a
 MariaDB fleet with named multi-source channels is out of scope for this gate;
 the lab fleet is single-source by design. When neither status command yields
-an answer, the failure carries the server's own last error text (a wrong
+an answer, the failure carries **both** attempts' error text (a wrong
 password or an unreachable host reads as itself, not only as "is this
-configured as a replica?").
+configured as a replica?"; on MySQL 8.4, where `SHOW SLAVE STATUS` no longer
+exists, the first attempt's real error would otherwise hide behind the
+second's syntax error). A server that answers both commands with an empty
+result and no error — MySQL 8.0.22–8.3 that is not a replica — gets
+`no error output` in its place.
 
 When the replica is live, it prints one JSON object on standard output:
 

@@ -10,9 +10,11 @@
 #   rollout       — no maintenance mode: old servers serve while the
 #                   migration runs. What the customer sees when zero
 #                   downtime is attempted on a breaking release.
-#   maintenance   — maintenance:enable on every node before the rollout,
-#                   disabled after setup:upgrade. The outage maintenance
-#                   mode buys, same release, same migration.
+#   maintenance   — a real maintenance deploy: maintenance:enable on every
+#                   node before anything moves, the breaking release linked
+#                   on every web node under the page, the page down on every
+#                   node after setup:upgrade. The outage maintenance mode
+#                   buys, same release, same migration.
 #
 # Falsifier 4 is judged on the two legs' totals: the rollout must fail more
 # requests AND for more seconds than maintenance mode, or the claim

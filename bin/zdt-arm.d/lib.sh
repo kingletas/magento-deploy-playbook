@@ -42,6 +42,7 @@ SECRET_VALUES=()
 declare -A ENV_BACKED_UP=()
 ENV_BACKUP_HOSTS=()
 MAINT_ON_HOSTS=()
+MAINT_LINKED_HOSTS=()
 SNAPSHOT=""
 
 die() { echo "zdt-arm/$ARM_NAME: $*" >&2; exit 2; }
@@ -316,6 +317,46 @@ ln -sfn "$ZDT_RELEASES_DIR/$label" "$ZDT_CURRENT_LINK"
 REMOTE
 }
 
+link_release_on_hosts() {
+    # link_release_on_hosts TARBALL LABEL HOST... — place_new_release's shape
+    # (rsync, unpack, link) on every named host. Arm 4's maintenance leg uses
+    # it: the page must come down on a fleet actually running the new release.
+    # Each host that gets linked is remembered, so the relink after the leg
+    # (and the exit trap on a failed leg) puts every node back on old code.
+    local tarball="$1" label="$2"
+    shift 2
+    local h
+    for h in "$@"; do
+        [[ -f $tarball ]] || die "no release tarball at $tarball on the control machine"
+        rsync -a "$tarball" "$h:$ZDT_RELEASES_DIR/$label.tar.gz" || return 1
+        if ! remote_script "$h" "unpack and link release $label on $h" >/dev/null <<REMOTE
+set -euo pipefail
+mkdir -p "$ZDT_RELEASES_DIR/$label"
+tar -xzf "$ZDT_RELEASES_DIR/$label.tar.gz" -C "$ZDT_RELEASES_DIR/$label"
+ln -sfn "$ZDT_RELEASES_DIR/$label" "$ZDT_CURRENT_LINK"
+REMOTE
+        then return 1; fi
+        MAINT_LINKED_HOSTS+=("$h")
+    done
+}
+
+relink_linked_hosts_old() {
+    # After the maintenance leg's traffic stops: every linked node back on
+    # ZDT_LABEL_OLD, so the lab is left as it was found. Never while traffic
+    # still runs: old code against the migrated schema would add the rollout
+    # leg's failures on top of the window just measured. A relink that fails
+    # prints the exact command — the measurement itself is already done.
+    [[ ${#MAINT_LINKED_HOSTS[@]} -eq 0 ]] && return 0
+    local h
+    for h in "${MAINT_LINKED_HOSTS[@]}"; do
+        [[ -n $h ]] || continue
+        # shellcheck disable=SC2029  # client-side expansion is the point.
+        ssh "${ssh_opts[@]}" "$h" "ln -sfn $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD $ZDT_CURRENT_LINK" >/dev/null 2>&1 \
+            || echo "zdt-arm/$ARM_NAME: could not relink $h to $ZDT_LABEL_OLD; run: ssh -o BatchMode=yes $h 'ln -sfn $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD $ZDT_CURRENT_LINK'" >&2
+    done
+    MAINT_LINKED_HOSTS=()
+}
+
 run_setup_upgrade() {
     remote_script "$ZDT_ADMIN_NODE" "php bin/magento setup:upgrade --no-interaction" >/dev/null <<REMOTE
 set -euo pipefail
@@ -377,6 +418,10 @@ print_restores() {
     for h in "${MAINT_ON_HOSTS[@]:-}"; do
         [[ -n $h ]] || continue
         echo "  ssh -o BatchMode=yes $h 'cd $ZDT_CURRENT_LINK && php bin/magento maintenance:disable'"
+    done
+    for h in "${MAINT_LINKED_HOSTS[@]:-}"; do
+        [[ -n $h ]] || continue
+        echo "  ssh -o BatchMode=yes $h 'ln -sfn $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD $ZDT_CURRENT_LINK'"
     done
     for h in "${ENV_BACKUP_HOSTS[@]:-}"; do
         [[ -n $h ]] || continue
@@ -964,9 +1009,16 @@ falsifier4_verdict() {
 }
 
 outage_phase() {
-    # outage_phase LABEL TARBALL REL [MAINT] — one leg. With MAINT the nodes
-    # go behind maintenance mode before the rollout and come out of it after
-    # setup:upgrade; without, the window is exactly what a live rollout is.
+    # outage_phase LABEL TARBALL REL [MAINT] — one leg. With MAINT the leg is
+    # a real maintenance deploy: the page goes UP on every node before
+    # anything moves, the breaking release is linked on every web node right
+    # after the migration, and the page comes DOWN on every node in the same
+    # step — the outage maintenance mode actually buys, measured on a fleet
+    # that ends the window serving the new release. The linked nodes go back
+    # to the old release only after traffic stops, or the rollout leg's
+    # failures (old code on the migrated schema) would be added on top of the
+    # window just measured. Without MAINT the window is exactly what a live
+    # rollout is.
     local label="$1" tarball="$2" rel="$3" maint="${4:-}"
     TRAFFIC_LOG="$OUT/traffic-$label.log"
     EVIDENCE_DIR="$OUT/evidence-$label"
@@ -978,6 +1030,11 @@ outage_phase() {
     traffic_run &
     local traffic_pid=$!
     if [[ $maint == maint ]]; then
+        # The page goes up on every node before anything moves; a failed
+        # enable stops the leg, and the exit trap lifts it on the nodes that
+        # already went under. node1's link comes from place_new_release; it
+        # is recorded as linked here so the relink after the leg covers every
+        # node. The rest of the web fleet follows, under the page.
         local h
         for h in "${WEB_HOSTS[@]}"; do
             if ! maintenance_enable "$h"; then
@@ -985,6 +1042,15 @@ outage_phase() {
                 die "maintenance:enable failed on $h; the maintenance leg did not happen"
             fi
         done
+        MAINT_LINKED_HOSTS+=("$ZDT_NEW_NODE")
+        local other_hosts=()
+        for h in "${WEB_HOSTS[@]}"; do
+            [[ $h == "$ZDT_NEW_NODE" ]] || other_hosts+=("$h")
+        done
+        if ! link_release_on_hosts "$tarball" "$rel" "${other_hosts[@]}"; then
+            kill "$traffic_pid" 2>/dev/null || true
+            die "maintenance: link to $rel failed; the maintenance leg did not happen"
+        fi
     fi
     if ! place_new_release "$tarball" "$rel"; then
         kill "$traffic_pid" 2>/dev/null || true
@@ -995,9 +1061,20 @@ outage_phase() {
         die "setup:upgrade failed on $ZDT_ADMIN_NODE; the rollout did not happen"
     fi
     if [[ $maint == maint ]]; then
-        maintenance_disable "$ZDT_ADMIN_NODE"
+        # The page comes down on every node it went up on, in one step, right
+        # after the migration: the fleet is serving the new release the
+        # moment the outage ends. The exit trap covers every path here that
+        # die() takes, so no node is left behind the page.
+        for h in "${MAINT_ON_HOSTS[@]:-}"; do
+            [[ -n $h ]] || continue
+            maintenance_disable "$h"
+        done
+        MAINT_ON_HOSTS=()
     fi
     wait "$traffic_pid" 2>/dev/null || true
+    if [[ $maint == maint ]]; then
+        relink_linked_hosts_old
+    fi
     traffic_verdicts
     replica_after
 }
@@ -1040,11 +1117,23 @@ plan_phase_outage() {
     fi
     printf 'PLAN  %s\n' "$ZDT_NEW_NODE: rsync $tarball -> $ZDT_RELEASES_DIR/$rel.tar.gz"
     printf 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $rel"
+    if [[ $maint == maint ]]; then
+        for h in "${WEB_HOSTS[@]}"; do
+            [[ $h == "$ZDT_NEW_NODE" ]] && continue
+            printf 'PLAN  %s\n' "$h: rsync $tarball -> $ZDT_RELEASES_DIR/$rel.tar.gz, unpack and link release $rel (under the maintenance page)"
+        done
+    fi
     snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
     printf 'PLAN  control: traffic %ss at %s/s per target (%s web nodes + the load balancer)\n' "$DURATION" "$RATE" "${#WEB_HOSTS[@]}"
     printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
     if [[ $maint == maint ]]; then
-        printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento maintenance:disable (after the migration)"
+        for h in "${WEB_HOSTS[@]}"; do
+            printf 'PLAN  %s\n' "$h: php bin/magento maintenance:disable (after the migration, on every node, in one step)"
+        done
+        for h in "${WEB_HOSTS[@]}"; do
+            [[ $h == "$ZDT_NEW_NODE" ]] && continue
+            printf 'PLAN  %s\n' "$h: link release $ZDT_LABEL_OLD back in (after the traffic window)"
+        done
     fi
     printf 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1)\n'
 }
@@ -1062,7 +1151,7 @@ plan_all_outage() {
 arm_main() {
     require_env
     parse_common_flags "$@"
-    trap 'restore_env_files; restore_maintenance' EXIT
+    trap 'restore_env_files; restore_maintenance; relink_linked_hosts_old' EXIT
     if [[ ${ARM_CROSSING:-0} == 1 ]]; then
         TRAFFIC_TYPES+=(read)
         run_crossing

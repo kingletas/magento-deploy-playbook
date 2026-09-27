@@ -40,6 +40,22 @@ done
 body=""
 if [[ "${args[0]:-}" == bash && "${args[1]:-}" == "-s" ]]; then body=$(cat); fi
 printf 'SSH|%s|%s|%s\\n' "$host" "${args[*]:-}" "$(printf '%s' "$body" | tr '\\n' '~')" >> "$FAKE_SSH_CALLS"
+if [[ -n ${FAKE_MAINT_FLAGS:-} ]]; then
+    # Flag-file mode (arm4 blocker test): maintenance:enable raises a
+    # per-host flag, maintenance:disable removes it, so the fake curl can
+    # serve the maintenance page for exactly the hosts that are under it.
+    all="${args[*]:-}${body}"
+    if printf '%s' "$all" | grep -qF "maintenance:enable"; then touch "$FAKE_MAINT_FLAGS/$host"; fi
+    if printf '%s' "$all" | grep -qF "maintenance:disable"; then rm -f "$FAKE_MAINT_FLAGS/$host"; fi
+fi
+if [[ -n ${FAKE_MAINT_EVENTS:-} ]]; then
+    all="${args[*]:-}${body}"
+    for kw in "maintenance:enable" "maintenance:disable" "setup:upgrade"; do
+        if printf '%s' "$all" | grep -qF "$kw"; then
+            printf '%s|%s|%s\\n' "$(date +%s.%N)" "$host" "$kw" >> "$FAKE_MAINT_EVENTS"
+        fi
+    done
+fi
 if [[ -n ${FAKE_SSH_RUN:-} ]]; then
     # Execute mode: run the received command/body locally, each host rooted
     # under $FAKE_SSH_RUN/<host>/ (paths under /srv/magento/ are rewritten
@@ -102,7 +118,16 @@ fi
 if [[ -n ${FAKE_CURL_BREAK_READ2:-} && $url == *"$FAKE_CURL_BREAK_READ2"* && $url == *"$ZDT_READ_PATH"* ]]; then
     code=503; body="${FAKE_CURL_BREAK_BODY2:-SQLSTATE[HY000]: unrelated}"
 fi
-[[ -n $out && -n $body ]] && printf '%s\\n' "$body" > "$out"
+if [[ -n ${FAKE_MAINT_FLAGS:-} ]]; then
+    # Flag-file mode (arm4 blocker-1 test): a host under the maintenance
+    # page (its flag raised by fake maintenance:enable) answers 503 on every
+    # non-health request, exactly like maintenance_install would.
+    fh="${url#http://}"; fh="${fh%%/*}"; fh="${fh%%:*}"; fh="${fh%%.example}"
+    if [[ -e "$FAKE_MAINT_FLAGS/$fh" && $url != *health_check* ]]; then
+        code=503; body="Please refresh the page and try again"
+    fi
+fi
+[[ -n $out && -n $body ]] && printf '%s\n' "$body" > "$out"
 echo "$code"
 """
 
@@ -973,6 +998,49 @@ class ZdtArmTest(unittest.TestCase):
             {l.split("|")[1] for l in disabled}, {"node1", "node2"},
             "a failed maintenance leg must still lift maintenance everywhere it went in",
         )
+
+    def test_arm4_maintenance_leg_lifts_every_node_after_the_upgrade(self) -> None:
+        # Blocker 1 (Ed's flag-file test): the fake ssh raises a per-host
+        # flag on maintenance:enable and removes it on maintenance:disable;
+        # the fake curl answers 503 for a host while its flag exists. The
+        # maintenance leg must therefore show NO 503 from any node after the
+        # upgrade — not the admin node only. On the old code node2 and node3
+        # stayed behind the page until the exit trap, so this test fails
+        # there. Also pins the shape: exactly 3 disables (the leg's own,
+        # after the upgrade), the trap adds none.
+        flags = self.dir / "maint-flags"
+        flags.mkdir()
+        events = self.dir / "maint-events"
+        result = self.run_arm(
+            "arm4", "-y",
+            FAKE_MAINT_FLAGS=str(flags), FAKE_MAINT_EVENTS=str(events),
+            ZDT_DURATION="4", ZDT_RATE="1",
+        )
+        # Every node came out of maintenance: no flag survives the run.
+        self.assertEqual(list(flags.iterdir()), [], "no node may stay behind the page")
+        ev = [l.strip().split("|") for l in events.read_text().splitlines() if l.strip()]
+        upgrade_ts = [float(t) for t, h, kw in ev if kw == "setup:upgrade"]
+        self.assertEqual(len(upgrade_ts), 2)
+        maint_upgrade = max(upgrade_ts)  # the maintenance leg's migration
+        disables = [(float(t), h) for t, h, kw in ev if kw == "maintenance:disable"]
+        self.assertEqual({h for _, h in disables}, {"node1", "node2", "node3"},
+                         "the maintenance leg must disable every node it enabled")
+        self.assertTrue(all(t >= maint_upgrade for t, _ in disables),
+                        "the disables come after the migration, not before")
+        # No 503 from any node after the upgrade (one second of slack for
+        # request/response vs log timestamps). At least one request per old
+        # node lands after it, so the assertion has teeth.
+        seen = []
+        for line in (self.dir / "run" / "traffic-maintenance.log").read_text().splitlines():
+            ts, host, typ, status, _guard = line.split(" ")
+            if float(ts) >= maint_upgrade + 1.0:
+                seen.append(host.rstrip("/"))
+                self.assertNotIn(status, ("000",), line)
+                self.assertFalse(status.startswith("5"),
+                                 f"{line}: refused after the upgrade — a node stayed down")
+        self.assertIn("node2.example", seen)
+        self.assertIn("node3.example", seen)
+        self.assertEqual(result.returncode in (0, 1), True, result.stdout)
 
     def test_arm4_lists_and_help(self) -> None:
         listing = self.run_arm("list")

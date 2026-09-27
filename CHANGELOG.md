@@ -153,7 +153,11 @@ changed, because there's nothing before it.
   that failed: what the customer sees, second by second. Falsifier 4 then
   compares the legs — the rollout must fail more requests, and for more
   seconds, than maintenance mode, or "maintenance mode is the smaller
-  outage" is reported as disproved. Maintenance is lifted again on every
+  outage" is reported as disproved. The maintenance leg is a real
+  maintenance deploy: the breaking release is linked on every web node
+  under the page and the page comes down on every node in one step after
+  the migration, so the measured window is the outage maintenance mode
+  actually buys. Maintenance is lifted again on every
   exit path the arm can reach, and the exact commands for the paths it
   cannot are printed.
 - `bin/zdt-arm arm3`, the crossing arm of issue #5: two code versions against

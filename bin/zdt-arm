@@ -28,7 +28,10 @@
 # Environment:
 #   ZDT_WEB_HOSTS     comma-separated host names of the web nodes (>= 3)
 #   ZDT_NEW_NODE      the always-new node (one of ZDT_WEB_HOSTS)
-#   ZDT_ADMIN_NODE    the node that runs Magento's commands and the snapshot
+#   ZDT_ADMIN_NODE    the node that runs Magento's commands and the
+#                     snapshot; must be ZDT_NEW_NODE — the migration runs
+#                     from current, so it must run on the node that carries
+#                     the new release (a split is refused, naming both)
 #   ZDT_LB_URL        the load balancer's base URL (http://…)
 #   ZDT_NODE_URLS     comma-separated per-node base URLs, same order as
 #                     ZDT_WEB_HOSTS (traffic to a node directly, so a
@@ -48,6 +51,11 @@
 #   ZDT_GUARD_PATTERN extended regex; a response body matching it is logged
 #                     as a guard message (e.g. 'Please refresh|config was
 #                     changed|Setup must be run')
+#   ZDT_CATEGORY_PATH / ZDT_PRODUCT_PATH
+#                     paths of a real category and product page (e.g.
+#                     /mens.html, /products/gt.html). No default: a guessed
+#                     path a stock store does not serve would record every
+#                     target as refusing, so the arm asks for them by name
 #   ZDT_TOUCHED_TABLES  comma-separated tables to checksum after the lag
 #                     reaches zero (default catalog_product_entity)
 #   ZDT_RUN_DIR       where this run's evidence lands (default

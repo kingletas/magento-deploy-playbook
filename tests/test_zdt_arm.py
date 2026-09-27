@@ -40,6 +40,20 @@ done
 body=""
 if [[ "${args[0]:-}" == bash && "${args[1]:-}" == "-s" ]]; then body=$(cat); fi
 printf 'SSH|%s|%s|%s\\n' "$host" "${args[*]:-}" "$(printf '%s' "$body" | tr '\\n' '~')" >> "$FAKE_SSH_CALLS"
+if [[ -n ${FAKE_SSH_RUN:-} ]]; then
+    # Execute mode: run the received command/body locally, each host rooted
+    # under $FAKE_SSH_RUN/<host>/ (paths under /srv/magento/ are rewritten
+    # there), so a test can watch a backup, an edit and a restore touch real
+    # files without any lab.
+    root="$FAKE_SSH_RUN/$host"
+    if [[ -n $body ]]; then
+        mkdir -p "$root/current/app/etc"
+        printf '%s\n' "$body" | sed "s|/srv/magento/|$root/|g" | bash -s; exit $?
+    fi
+    cmd="${args[*]:-}"
+    cmd="${cmd//\\/srv\\/magento\\//$root\\/}"
+    bash -c "$cmd"; exit $?
+fi
 if [[ -n ${FAKE_SSH_FAIL:-} ]]; then
     while IFS= read -r rule; do
         [[ -z $rule ]] && continue
@@ -78,6 +92,9 @@ if [[ -n ${FAKE_CURL_DOWN:-} && $url == *"$FAKE_CURL_DOWN"* && $url != *health_c
 fi
 if [[ -n ${FAKE_CURL_HEALTH_DOWN:-} && $url == *"$FAKE_CURL_HEALTH_DOWN"* && $url == *health_check* ]]; then
     code=503
+fi
+if [[ -n ${FAKE_CURL_NOTFOUND:-} && $url == *"$FAKE_CURL_NOTFOUND"* && $url != *health_check* ]]; then
+    code=404
 fi
 [[ -n $out && -n $body ]] && printf '%s\\n' "$body" > "$out"
 echo "$code"
@@ -141,6 +158,8 @@ class ZdtArmTest(unittest.TestCase):
                 "ZDT_DB_PASSWORD": "Sup3rSecretPw",
                 "ZDT_DB_NAME": "magento",
                 "ZDT_GUARD_PATTERN": "Please refresh",
+                "ZDT_CATEGORY_PATH": "/mens.html",
+                "ZDT_PRODUCT_PATH": "/products/gt.html",
                 "ZDT_DURATION": "1",
                 "ZDT_RATE": "1",
                 "ZDT_RUN_DIR": str(self.dir / "run"),
@@ -221,6 +240,8 @@ class ZdtArmTest(unittest.TestCase):
             "ZDT_RATE",
             "ZDT_DURATION",
             "ZDT_GUARD_PATTERN",
+            "ZDT_CATEGORY_PATH",
+            "ZDT_PRODUCT_PATH",
             "ZDT_TOUCHED_TABLES",
             "ZDT_RUN_DIR",
             "ZDT_FLEET_BIN",
@@ -266,6 +287,36 @@ class ZdtArmTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("maximum", result.stderr)
 
+    def test_admin_node_split_from_new_node_is_refused(self) -> None:
+        # setup:upgrade runs on the admin node from current; the new release
+        # only lands on the new node. Split = the migration would run on the
+        # old code, so refuse, naming both variables, and touch nothing.
+        result = self.run_arm("arm1", "-y", ZDT_ADMIN_NODE="node2")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("ZDT_ADMIN_NODE", result.stderr)
+        self.assertIn("ZDT_NEW_NODE", result.stderr)
+        self.assertEqual(self.calls(), "")
+
+    def test_missing_traffic_paths_are_refused(self) -> None:
+        env = {
+            k: v
+            for k, v in self.env.items()
+            if k not in ("ZDT_CATEGORY_PATH", "ZDT_PRODUCT_PATH")
+        }
+        result = subprocess.run(
+            [str(RUNNER), "arm1", "-y"],
+            env=env,
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("ZDT_CATEGORY_PATH", result.stderr)
+        self.assertIn("ZDT_PRODUCT_PATH", result.stderr)
+        self.assertEqual(self.calls(), "")
+
     def test_fewer_than_three_hosts_is_refused(self) -> None:
         result = self.run_arm(
             "arm1",
@@ -286,17 +337,34 @@ class ZdtArmTest(unittest.TestCase):
         transcript = result.stdout + result.stderr
         self.assertIn("PLAN", transcript)
         self.assertNotIn("RUN ", transcript)
-        # The plan must name the destructive steps, so what -y would do is
-        # reviewable without running it.
+        # The plan must name every destructive step in run order — both
+        # phases and the restore and relink between them — so what -y would
+        # do is fully reviewable without running it.
+        self.assertIn("phase: shared-prefix", transcript)
+        self.assertIn("phase: per-release-prefix", transcript)
+        self.assertIn("restore database magento", transcript)
+        self.assertIn("link release rel-old back in", transcript)
+        self.assertIn("/var/www/magento/zdt-snapshots/zdt-snapshot-", transcript)
         self.assertIn("snapshot database magento", transcript)
-        self.assertIn("setup:upgrade", transcript)
-        self.assertIn("cp -a /srv/magento/current/app/etc/env.php", transcript)
+        self.assertEqual(transcript.count("setup:upgrade"), 2)
+        self.assertIn(
+            "cp -L --preserve=mode,ownership,timestamps "
+            "/srv/magento/current/app/etc/env.php",
+            transcript,
+        )
         self.assertIn("replica-check", transcript)
+        # The key Magento reads is id_prefix; backend_options is ignored.
+        self.assertIn("id_prefix", transcript)
+        self.assertNotIn("backend_options", transcript)
 
     def test_declined_prompt_runs_nothing(self) -> None:
         result = self.run_arm("arm1", stdin="n\n")
         self.assertEqual(result.returncode, 2)
         self.assertIn("plan declined", result.stderr)
+        # The prompt says "the plan above" — so the plan must be above it.
+        transcript = result.stdout + result.stderr
+        self.assertIn("PLAN", transcript)
+        self.assertIn("setup:upgrade", transcript)
         self.assertEqual(self.calls(), "", "a declined plan reaches no server")
 
     def test_no_terminal_is_a_refusal_not_a_guess(self) -> None:
@@ -345,22 +413,48 @@ class ZdtArmTest(unittest.TestCase):
         # — but no upgrade and no traffic: the run never happened.
         self.assertFalse(self.curl_calls.exists())
 
+    def _assert_arm_dies_on(self, rule: str) -> None:
+        # A step of the destructive core failing must stop the arm (2) with
+        # no PASS line: an arm that exits 0 after setup:upgrade never ran is
+        # worse than one that stops.
+        failfile = self.dir / "ssh-fail"
+        failfile.write_text(rule + "\n")
+        result = self.run_arm("arm1", "-y", FAKE_SSH_FAIL=str(failfile))
+        self.assertNotEqual(result.returncode, 0, f"{rule}: {result.stdout}")
+        self.assertNotIn("PASS", result.stdout, f"{rule}: a PASS line after a dead step")
+
+    def test_failed_setup_upgrade_stops_the_arm(self) -> None:
+        self._assert_arm_dies_on("node1|bin/magento setup:upgrade")
+
+    def test_failed_release_placement_stops_the_arm(self) -> None:
+        self._assert_arm_dies_on("node1|tar -xzf")  # the unpack step
+
+    def test_failed_env_edit_on_an_old_node_stops_the_arm(self) -> None:
+        self._assert_arm_dies_on("node2|id_prefix")
+
     # ------------------------------------------------------------ env backups
 
     def test_backup_happens_before_any_edit_on_every_node(self) -> None:
         result = self.run_arm("arm1", "-y")
         self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
         lines = [line for line in self.calls().splitlines() if line.startswith("SSH|")]
+        # backend_options.cache_prefix is a key Magento ignores; the prefix
+        # lives in id_prefix (the P1-1 proof reads it back from there).
+        for line in lines:
+            self.assertNotIn("backend_options", line)
         for node in ("node1", "node2", "node3"):
             host_lines = [l for l in lines if l.startswith(f"SSH|{node}|")]
             backs = [
-                i for i, l in enumerate(host_lines) if "cp -a " in l and ".bak-" in l
+                i for i, l in enumerate(host_lines) if "cp -L " in l and ".bak-" in l
             ]
             edits = [
                 i
                 for i, l in enumerate(host_lines)
-                if "cache_prefix" in l and "cp -a" not in l
+                if "id_prefix" in l and "cp -L" not in l
             ]
+            self.assertTrue(
+                edits, f"{node}: no cache-prefix edit on id_prefix"
+            )
             self.assertTrue(backs, f"{node}: no dated env.php backup")
             self.assertTrue(edits, f"{node}: env.php was never edited")
             self.assertLess(
@@ -372,7 +466,7 @@ class ZdtArmTest(unittest.TestCase):
         transcript = result.stdout + result.stderr
         for node in ("node1", "node2", "node3"):
             pattern = (
-                rf"ssh -o BatchMode=yes {node} cp -a "
+                rf"ssh -o BatchMode=yes {node} cp --preserve=mode,ownership,timestamps "
                 rf"/srv/magento/current/app/etc/env\.php\.bak-\d{{8}}T\d{{6}}Z "
                 rf"/srv/magento/current/app/etc/env\.php"
             )
@@ -380,6 +474,61 @@ class ZdtArmTest(unittest.TestCase):
         snap = re.search(r"bin/zdt-arm restore-snapshot (\S+)", transcript)
         self.assertIsNotNone(snap, "the snapshot restore command must be printed too")
         self.assertIn("zdt-snapshot-", snap.group(1))
+
+    def test_env_backup_and_restore_survive_the_env_php_symlink(self) -> None:
+        # env.php is deployed as a symlink to the shared copy. A backup that
+        # copies the symlink instead of its contents loses the original on
+        # every node: the edit changes what both names point to, and the
+        # restore would put the edited bytes back. The arm's own primitives
+        # — backup, set, restore — run against real files here (the fake
+        # ssh executes what it receives under a per-host root); afterwards
+        # the shared file's bytes must match the original, and the dated
+        # backup on disk must hold the original bytes too.
+        import shutil
+
+        php = shutil.which("php")
+        if php is None:
+            self.skipTest("needs php on PATH")
+        # The fake's execute mode roots each host at $FAKE_SSH_RUN/<host>/,
+        # so the tree it will edit lives there.
+        node = self.dir / "hosts" / "host"
+        etc = node / "current" / "app" / "etc"
+        shared = node / "shared"
+        etc.mkdir(parents=True)
+        shared.mkdir()
+        original = (
+            "<?php\nreturn ['cache' => ['frontend' => ['default' => "
+            "['backend' => 'file', 'id_prefix' => 'orig']]]];\n"
+        )
+        shared_file = shared / "env.php"
+        shared_file.write_text(original)
+        (etc / "env.php").symlink_to(shared_file)
+        snippet = (
+            'ARM_DIR="' + str(ROOT / "bin" / "zdt-arm.d") + '"; '
+            'source "$ARM_DIR/lib.sh"; '
+            'env_backup host && '
+            'env_set host cache.frontend.default.id_prefix "\\"zdt-edited\\"" && '
+            'restore_env_files'
+        )
+        env = dict(self.env)
+        env["FAKE_SSH_RUN"] = str(self.dir / "hosts")
+        ran = subprocess.run(
+            ["bash", "-c", snippet],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(ran.returncode, 0, f"{ran.stdout}{ran.stderr}")
+        backed_up = sorted((etc).glob("env.php.bak-*"))
+        self.assertEqual(len(backed_up), 1, "no dated backup was made")
+        self.assertTrue(backed_up[0].is_file() and not backed_up[0].is_symlink(),
+            "the backup must be a real file, not a second symlink")
+        self.assertEqual(backed_up[0].read_text(), original,
+            "the backup lost the original bytes")
+        self.assertEqual(shared_file.read_text(), original,
+            "the shared env.php's bytes changed through backup/edit/restore")
 
     def test_blue_green_flag_is_set_on_old_servers_only(self) -> None:
         result = self.run_arm("arm2", "-y")
@@ -413,7 +562,33 @@ class ZdtArmTest(unittest.TestCase):
         # duration 1s at 1/s over 3 nodes + the LB, two phases: exactly 8.
         # The generator sends total = duration * rate per target and no more.
         self.assertEqual(len(log), 8, "the generator must stop at the duration")
-        self.assertLess(elapsed, 30, "the watchdog must let a short run finish at once")
+        self.assertLess(elapsed, 30, "a short run must finish at once")
+
+    def test_traffic_asks_for_the_configured_paths(self) -> None:
+        result = self.run_arm("arm1", "-y", ZDT_RATE="7")
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        curl = self.curl_calls.read_text()
+        for path in ("/mens.html", "/products/gt.html", "/checkout/cart/",
+                     "/rest/V1/directory/currency", "/graphql?query=",
+                     "/health_check.php"):
+            self.assertIn(path, curl, f"the mix never asked for {path}")
+
+    def test_a_missing_route_404_is_not_a_refusal(self) -> None:
+        # A route answering 404 mid-migration is a fact for traffic.log, not
+        # a server refusing: the target must not be listed as refusing.
+        result = self.run_arm(
+            "arm1", "-y", ZDT_RATE="7", FAKE_CURL_NOTFOUND="/mens.html"
+        )
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        self.assertIn("PASS  falsifier 5", result.stdout)
+        refused_line = [
+            l for l in result.stdout.splitlines() if "targets that refused" in l
+        ]
+        self.assertTrue(refused_line)
+        self.assertIn("targets that refused: none", refused_line[0])
+        # The 404 is still recorded: it is in the log, as a fact.
+        log = (self.dir / "run" / "traffic.log").read_text()
+        self.assertIn(" 404 ", log)
 
     def test_health_check_failure_on_a_refusing_node_is_a_falsifier_5_fail(
         self,

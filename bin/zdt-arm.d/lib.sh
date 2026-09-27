@@ -68,6 +68,17 @@ require_env() {
         || die "issue #5 needs at least three web hosts; ZDT_WEB_HOSTS lists ${#WEB_HOSTS[@]}"
     [[ ",$ZDT_WEB_HOSTS," == *",$ZDT_NEW_NODE,"* ]] \
         || die "ZDT_NEW_NODE ($ZDT_NEW_NODE) is not one of ZDT_WEB_HOSTS"
+    # setup:upgrade runs on ZDT_ADMIN_NODE from $ZDT_CURRENT_LINK, and the
+    # new release is only ever placed on ZDT_NEW_NODE. Splitting the two
+    # would run the migration on the old release's code — no migration, both
+    # arms reporting on a run that never happened — so refuse, naming both.
+    [[ "$ZDT_ADMIN_NODE" == "$ZDT_NEW_NODE" ]] \
+        || die "ZDT_ADMIN_NODE ($ZDT_ADMIN_NODE) must be ZDT_NEW_NODE ($ZDT_NEW_NODE): the migration runs on the node that carries the new release"
+    local missing_paths=()
+    [[ -n ${ZDT_CATEGORY_PATH:-} ]] || missing_paths+=(ZDT_CATEGORY_PATH)
+    [[ -n ${ZDT_PRODUCT_PATH:-} ]] || missing_paths+=(ZDT_PRODUCT_PATH)
+    [[ ${#missing_paths[@]} -eq 0 ]] \
+        || die "set ${missing_paths[*]} to a real category/product page's path: a guessed URL a stock store does not serve would record every target as refusing"
     IFS=',' read -r -a NODE_URLS <<< "$ZDT_NODE_URLS"
     [[ ${#NODE_URLS[@]} -eq ${#WEB_HOSTS[@]} ]] \
         || die "ZDT_NODE_URLS must name one URL per web host (${#WEB_HOSTS[@]} hosts, ${#NODE_URLS[@]} URLs)"
@@ -278,7 +289,11 @@ env_backup() {
     # are what survive SIGKILL and a power cut.
     local host="$1"
     [[ -n ${ENV_BACKED_UP[$host]:-} ]] && return 0
-    remote_cmd "$host" cp -a "$ZDT_ENV_PHP" "$ZDT_ENV_PHP.bak-$RUN_ID" || return 1
+    # cp -L: env.php is deployed as a symlink to the shared copy, so a
+    # dereference-free cp -a would "back up" a second symlink to the very
+    # file the run edits — and the restore would put the edited bytes back,
+    # losing the original on every node. The backup holds contents.
+    remote_cmd "$host" cp -L --preserve=mode,ownership,timestamps "$ZDT_ENV_PHP" "$ZDT_ENV_PHP.bak-$RUN_ID" || return 1
     ENV_BACKED_UP["$host"]=1
     ENV_BACKUP_HOSTS+=("$host")
     WRITTEN=1
@@ -318,7 +333,7 @@ print_restores() {
     local h
     for h in "${ENV_BACKUP_HOSTS[@]:-}"; do
         [[ -n $h ]] || continue
-        echo "  ssh -o BatchMode=yes $h cp -a $ZDT_ENV_PHP.bak-$RUN_ID $ZDT_ENV_PHP"
+        echo "  ssh -o BatchMode=yes $h cp --preserve=mode,ownership,timestamps $ZDT_ENV_PHP.bak-$RUN_ID $ZDT_ENV_PHP"
     done
 }
 
@@ -327,7 +342,10 @@ restore_env_files() {
     local h
     for h in "${ENV_BACKUP_HOSTS[@]:-}"; do
         [[ -n $h ]] || continue
-        ssh "${ssh_opts[@]}" "$h" cp -a "$ZDT_ENV_PHP.bak-$RUN_ID" "$ZDT_ENV_PHP" >/dev/null 2>&1 || true
+        # Plain cp: the dated backup is a real file (cp -L made it one);
+        # following the destination symlink writes the original bytes back
+        # into the shared copy — where env.php points.
+        ssh "${ssh_opts[@]}" "$h" cp --preserve=mode,ownership,timestamps "$ZDT_ENV_PHP.bak-$RUN_ID" "$ZDT_ENV_PHP" >/dev/null 2>&1 || true
     done
 }
 
@@ -408,11 +426,12 @@ TRAFFIC_TYPES=(cms category product cart rest graphql health)
 traffic_path() {
     case "$1" in
         cms) printf '/' ;;
-        category) printf '/category.html' ;;
-        product) printf '/product.html' ;;
-        cart) printf '/cart' ;;
-        rest) printf '/rest/V1/store/products' ;;
-        graphql) printf '/graphql' ;;
+        category) printf '%s' "$ZDT_CATEGORY_PATH" ;;
+        product) printf '%s' "$ZDT_PRODUCT_PATH" ;;
+        cart) printf '/checkout/cart/' ;;
+        rest) printf '/rest/V1/directory/currency' ;;
+        # Braces percent-encoded: curl's URL globbing would eat them.
+        graphql) printf '/graphql?query=%%7BstoreConfig%%7Bstore_code%%7D%%7D' ;;
         health) printf '/health_check.php' ;;
     esac
 }
@@ -471,8 +490,11 @@ traffic_verdicts() {
     # Falsifier 5 from the log: health_check.php answered 200 on every target
     # that refused anything. The guard-message count is reported as a fact;
     # arms 3 and 4 judge the guard claims, arms 1 and 2 record them.
+    # "Refused" means the server was not serving: 5xx, no answer at all, or
+    # a guard message. A 4xx is a fact for the log, not a refusal — a route
+    # that goes missing mid-migration still shows there.
     local refused t bad=0
-    refused=$(awk '$3 != "health" && $4 !~ /^2/' "$OUT/traffic.log" | awk '{print $2}' | sort -u)
+    refused=$(awk '$3 != "health" && ($4 ~ /^5/ || $4 == "000" || $5 == 1)' "$OUT/traffic.log" | awk '{print $2}' | sort -u)
     for t in $refused; do
         if awk -v t="$t" '$3 == "health" && $2 == t && $4 != "200"' "$OUT/traffic.log" | grep -q .; then
             falsifier FAIL "falsifier 5: $t refused requests and its health_check.php answered non-200"
@@ -494,16 +516,24 @@ run_phase() {
     local h pfx
     for h in "${WEB_HOSTS[@]}"; do
         if [[ $label == shared-* ]]; then
-            env_set "$h" cache.frontend.default.backend_options.cache_prefix '"zdt-shared"'
-            env_set "$h" cache.frontend.page_cache.backend_options.cache_prefix '"zdt-shared"'
+            # id_prefix IS the cache prefix Magento reads (the P1-1 proof
+            # edits and reads back this key); backend_options.cache_prefix is
+            # a key Magento ignores.
+            env_set "$h" cache.frontend.default.id_prefix '"zdt-shared"' \
+                || die "the env.php edit on $h failed before the migration; the arm stops here"
+            env_set "$h" cache.frontend.page_cache.id_prefix '"zdt-shared"' \
+                || die "the env.php edit on $h failed before the migration; the arm stops here"
         else
             pfx="old"
             [[ $h == "$ZDT_NEW_NODE" ]] && pfx="$ZDT_LABEL_NEW"
-            env_set "$h" cache.frontend.default.backend_options.cache_prefix "\"zdt-$pfx\""
-            env_set "$h" cache.frontend.page_cache.backend_options.cache_prefix "\"zdt-$pfx\""
+            env_set "$h" cache.frontend.default.id_prefix "\"zdt-$pfx\"" \
+                || die "the env.php edit on $h failed before the migration; the arm stops here"
+            env_set "$h" cache.frontend.page_cache.id_prefix "\"zdt-$pfx\"" \
+                || die "the env.php edit on $h failed before the migration; the arm stops here"
         fi
         if [[ $with_blue_green == 1 && $h != "$ZDT_NEW_NODE" ]]; then
-            env_set "$h" deployment.blue_green.enabled 'true'
+            env_set "$h" deployment.blue_green.enabled 'true' \
+                || die "the env.php edit on $h failed before the migration; the arm stops here"
         fi
     done
     [[ $PLAN_ONLY == 1 ]] && return 0
@@ -511,8 +541,14 @@ run_phase() {
     snapshot_gate
     traffic_run &
     local traffic_pid=$!
-    place_new_release
-    run_setup_upgrade
+    if ! place_new_release; then
+        kill "$traffic_pid" 2>/dev/null || true
+        die "the new release did not land on $ZDT_NEW_NODE; the migration did not happen"
+    fi
+    if ! run_setup_upgrade; then
+        kill "$traffic_pid" 2>/dev/null || true
+        die "setup:upgrade failed on $ZDT_ADMIN_NODE; the migration did not happen"
+    fi
     wait "$traffic_pid" 2>/dev/null || true
     traffic_verdicts
     replica_after
@@ -521,10 +557,10 @@ run_phase() {
 
 run_arms() {
     local with_blue_green="$1"
-    if [[ $PLAN_ONLY == 1 ]]; then
-        plan_all "$with_blue_green"
-        return 0
-    fi
+    # The plan is printed either way: -n stops there, otherwise the operator
+    # confirms the plan visible above the prompt, never one unseen.
+    plan_all "$with_blue_green"
+    [[ $PLAN_ONLY == 1 ]] && return 0
     confirm_plan
     mkdir -p "$OUT"
     replica_gate
@@ -532,7 +568,7 @@ run_arms() {
     # Between the two phases, back to the start: the next phase repeats the
     # same migration under different cache settings.
     restore_snapshot "$SNAPSHOT"
-    link_old_release
+    link_old_release || die "could not relink $ZDT_NEW_NODE to $ZDT_LABEL_OLD; check that node by hand before re-running an arm"
     run_phase "per-release-prefix" "$with_blue_green"
     echo
     echo "== summary: $PASSES pass, $FAILS fail =="
@@ -540,22 +576,42 @@ run_arms() {
     [[ $FAILS -eq 0 ]] || exit 1
 }
 
-plan_all() {
-    local with_blue_green="$1" h pfx
-    echo "== plan (nothing runs) =="
-    printf 'PLAN  control: bin/zdt-fleet replica-check (the gate; refuses a dead replica)\n'
+plan_phase() {
+    # One phase's plan lines, in the order run_phase does them.
+    local label="$1" with_blue_green="$2" h pfx
+    printf 'PLAN  == phase: %s ==\n' "$label"
     for h in "${WEB_HOSTS[@]}"; do
-        printf 'PLAN  %s: cp -a %s %s.bak-%s\n' "$h" "$ZDT_ENV_PHP" "$ZDT_ENV_PHP" "$RUN_ID"
-        printf 'PLAN  %s\n' "$h: set cache prefixes (shared, then per-release)"
-        [[ $h == "$ZDT_NEW_NODE" ]] && printf 'PLAN  %s\n' "$h: rsync $ZDT_RELEASE_TARBALL -> $ZDT_RELEASES_DIR/$ZDT_LABEL_NEW.tar.gz" && printf 'PLAN  %s\n' "$h: unpack and link release $ZDT_LABEL_NEW" || true
+        printf 'PLAN  %s: cp -L --preserve=mode,ownership,timestamps %s %s.bak-%s\n' "$h" "$ZDT_ENV_PHP" "$ZDT_ENV_PHP" "$RUN_ID"
+        if [[ $label == shared-* ]]; then
+            printf 'PLAN  %s\n' "$h: set cache prefixes (id_prefix) to zdt-shared in $ZDT_ENV_PHP"
+        else
+            pfx="old"
+            [[ $h == "$ZDT_NEW_NODE" ]] && pfx="$ZDT_LABEL_NEW"
+            printf 'PLAN  %s\n' "$h: set cache prefixes (id_prefix) to zdt-$pfx in $ZDT_ENV_PHP"
+        fi
         if [[ $with_blue_green == 1 && $h != "$ZDT_NEW_NODE" ]]; then
             printf 'PLAN  %s\n' "$h: set deployment.blue_green.enabled to true in $ZDT_ENV_PHP"
         fi
     done
-    snapshot_line "$OUT/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
+    printf 'PLAN  %s\n' "$ZDT_NEW_NODE: rsync $ZDT_RELEASE_TARBALL -> $ZDT_RELEASES_DIR/$ZDT_LABEL_NEW.tar.gz"
+    printf 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $ZDT_LABEL_NEW"
+    snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
     printf 'PLAN  control: traffic %ss at %s/s per target (%s web nodes + the load balancer)\n' "$DURATION" "$RATE" "${#WEB_HOSTS[@]}"
     printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
     printf 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1)\n'
+}
+
+plan_all() {
+    # The whole run, in the order run_arms does it — both phases AND the
+    # destructive steps between them (restore over the primary, relink), so
+    # what -y would do is fully reviewable from the plan alone.
+    local with_blue_green="$1"
+    echo "== plan (nothing runs) =="
+    printf 'PLAN  control: bin/zdt-fleet replica-check (the gate; it stops a run whose replica is not live)\n'
+    plan_phase "shared-prefix" "$with_blue_green"
+    printf 'PLAN  %s\n' "$(redact "$ZDT_ADMIN_NODE: restore database $ZDT_DB_NAME from $ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz (password $ZDT_DB_PASSWORD)")"
+    printf 'PLAN  %s\n' "$ZDT_NEW_NODE: link release $ZDT_LABEL_OLD back in"
+    plan_phase "per-release-prefix" "$with_blue_green"
     printf 'PLAN  control: restore env.php from the dated backups on every node\n'
 }
 

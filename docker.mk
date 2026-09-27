@@ -20,6 +20,10 @@ docker-up:
 docker-test:
 	@bin/docker-suite test
 
+## docker-test-shard: one shard of that run on a clean fleet, as CI runs it (SHARD=name; bin/docker-suite shards lists them)
+docker-test-shard:
+	@bin/docker-suite test-shard '$(SHARD)'
+
 ## docker-demo: the same run, but building REAL Magento cloned from GitHub
 # The archive, the rsync fan-out and the cutover all move a real release rather
 # than the few-KB fixture. Shallow on purpose, so the changelog step has no merge

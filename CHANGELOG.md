@@ -59,6 +59,7 @@ changed, because there's nothing before it.
 
 ### Changed
 
+- CI runs the end-to-end suite as seven shards side by side, each on a fleet of its own, so a pull request hears back in minutes rather than half an hour. `make docker-test` still runs every scenario in order on one fleet, and CI takes its list of shards from the suite itself, so the two can't drift apart.
 - After the cutover, every app host requests the storefront paths in
   `health.paths` from its own web server, bypassing Varnish. When any fails, the
   release it replaced is put back automatically, provided its code still fits

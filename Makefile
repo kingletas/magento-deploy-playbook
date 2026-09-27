@@ -60,7 +60,7 @@ endif
 environments := $(notdir $(patsubst %/,%,$(wildcard inventory/*/)))
 
 .PHONY: help check lint venv collections test deploy verify rollback unlock audit-verify evidence magepack-image \
-        docker-up docker-test docker-demo docker-deploy docker-verify docker-reset \
+        docker-up docker-test docker-test-shard docker-demo docker-deploy docker-verify docker-reset \
         docker-logs docker-down
 
 .DEFAULT_GOAL := help

@@ -154,7 +154,7 @@ remote_cmd() {
     ssh "${ssh_opts[@]}" "$host" "$@" 2>"$errf"
     rc=$?
     _check_host_key_error "$errf" "$host"
-    [[ $rc -ne 0 ]] && cat "$errf" >&2 || true
+    if [[ $rc -ne 0 ]]; then cat "$errf" >&2; fi
     rm -f "$errf"
     [[ $rc -eq 0 ]] || return "$rc"
 }
@@ -175,7 +175,7 @@ remote_script() {
     ssh "${ssh_opts[@]}" "$host" bash -s >"$out" 2>"$errf"
     rc=$?
     _check_host_key_error "$errf" "$host"
-    [[ $rc -ne 0 ]] && cat "$errf" >&2 || true
+    if [[ $rc -ne 0 ]]; then cat "$errf" >&2; fi
     rm -f "$errf"
     cat "$out" || true
     rm -f "$out"

@@ -12,6 +12,7 @@
 #   bin/zdt-arm arm1 [-n|-y]
 #   bin/zdt-arm arm2 [-n|-y]
 #   bin/zdt-arm arm3 [-n|-y]
+#   bin/zdt-arm arm4 [-n|-y]
 #   bin/zdt-arm restore-snapshot /path/on/the/admin/node [-n|-y]
 #
 # -n prints the whole plan and runs nothing. Without -y the arm shows the
@@ -66,10 +67,12 @@
 #                     with the flag on must serve without a guard message
 #   ZDT_RELEASE_BREAKING / ZDT_LABEL_BREAKING
 #                     the BREAKING release: renames or drops a column the old
-#                     code reads — the evidence leg
-#   ZDT_READ_PATH     a route that really reads that column or table (e.g. a
-#                     product page reading the column). The first old-server
-#                     failure across the breaking release must name it
+#                     code reads — the evidence leg (arm3) and the release
+#                     whose outage arm4 measures
+#   ZDT_READ_PATH     arm3 only: a route that really reads that column or
+#                     table (e.g. a product page reading the column). The
+#                     first old-server failure across the breaking release
+#                     must name it
 #   ZDT_SCHEMA_OBJECT the renamed or dropped column/table name; falsifier 3
 #                     greps the first old-server failure's body for it
 #   ZDT_RUN_DIR       where this run's evidence lands (default
@@ -115,7 +118,7 @@ fi
 arm="$1"
 shift
 case "$arm" in
-    arm1|arm2|arm3)
+    arm1|arm2|arm3|arm4)
         script="$ARM_DIR/$arm.sh"
         # An arm name is a file name, never a path — as in bin/zdt-proof.
         [[ -f $script ]] || { echo "zdt-arm: no arm named $arm; see zdt-arm list" >&2; exit 2; }

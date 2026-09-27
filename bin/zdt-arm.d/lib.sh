@@ -41,6 +41,7 @@ LAG_WAIT_LIMIT=300   # falsifier 1: lag back to zero within five minutes
 SECRET_VALUES=()
 declare -A ENV_BACKED_UP=()
 ENV_BACKUP_HOSTS=()
+MAINT_ON_HOSTS=()
 SNAPSHOT=""
 
 die() { echo "zdt-arm/$ARM_NAME: $*" >&2; exit 2; }
@@ -63,6 +64,7 @@ require_env() {
     # ZDT_LABEL_NEW pair the other arms place.
     local release_vars=(ZDT_RELEASE_TARBALL ZDT_LABEL_NEW)
     if [[ ${ARM_CROSSING:-0} == 1 ]]; then release_vars=(); fi
+    if [[ ${ARM_OUTAGE:-0} == 1 ]]; then release_vars=(); fi
     for v in ZDT_WEB_HOSTS ZDT_NEW_NODE ZDT_ADMIN_NODE ZDT_LB_URL ZDT_NODE_URLS \
              "${release_vars[@]}" ZDT_LABEL_OLD \
              ZDT_ENV_PHP ZDT_DB_HOST ZDT_DB_USER ZDT_DB_PASSWORD ZDT_DB_NAME; do
@@ -71,6 +73,7 @@ require_env() {
     [[ ${#missing[@]} -eq 0 ]] \
         || die "set these first: ${missing[*]} (see bin/zdt-arm --help)"
     if [[ ${ARM_CROSSING:-0} == 1 ]]; then crossing_require; fi
+    if [[ ${ARM_OUTAGE:-0} == 1 ]]; then outage_require; fi
     IFS=',' read -r -a WEB_HOSTS <<< "$ZDT_WEB_HOSTS"
     [[ ${#WEB_HOSTS[@]} -ge 3 ]] \
         || die "issue #5 needs at least three web hosts; ZDT_WEB_HOSTS lists ${#WEB_HOSTS[@]}"
@@ -120,6 +123,19 @@ crossing_require() {
     done
     [[ ${#missing_c[@]} -eq 0 ]] \
         || die "arm 3 needs these too: ${missing_c[*]} (see bin/zdt-arm --help)"
+}
+
+outage_require() {
+    # Arm 4's own settings: the BREAKING release whose rollout it measures,
+    # twice — once live, once behind maintenance mode. Like arm 3's, it has
+    # no defaults: measuring the outage of the wrong release would answer a
+    # question nobody asked, so a missing one stops arm 4 by name.
+    local missing_o=() ov
+    for ov in ZDT_RELEASE_BREAKING ZDT_LABEL_BREAKING; do
+        [[ -n ${!ov:-} ]] || missing_o+=("$ov")
+    done
+    [[ ${#missing_o[@]} -eq 0 ]] \
+        || die "arm 4 needs these too: ${missing_o[*]} (see bin/zdt-arm --help)"
 }
 
 parse_common_flags() {
@@ -358,6 +374,10 @@ print_restores() {
     echo "power cut), put it back by running, on the control machine:"
     [[ -n $SNAPSHOT ]] && echo "  bin/zdt-arm restore-snapshot $SNAPSHOT -y"
     local h
+    for h in "${MAINT_ON_HOSTS[@]:-}"; do
+        [[ -n $h ]] || continue
+        echo "  ssh -o BatchMode=yes $h 'cd $ZDT_CURRENT_LINK && php bin/magento maintenance:disable'"
+    done
     for h in "${ENV_BACKUP_HOSTS[@]:-}"; do
         [[ -n $h ]] || continue
         echo "  ssh -o BatchMode=yes $h cp --preserve=mode,ownership,timestamps $ZDT_ENV_PHP.bak-$RUN_ID $ZDT_ENV_PHP"
@@ -373,6 +393,34 @@ restore_env_files() {
         # following the destination symlink writes the original bytes back
         # into the shared copy — where env.php points.
         ssh "${ssh_opts[@]}" "$h" cp --preserve=mode,ownership,timestamps "$ZDT_ENV_PHP.bak-$RUN_ID" "$ZDT_ENV_PHP" >/dev/null 2>&1 || true
+    done
+}
+
+# ------------------------------------------------------------- maintenance mode
+
+maintenance_enable() {
+    # maintenance_enable HOST — the stock way in: the release's own
+    # maintenance:enable, run from current. The host is remembered so the
+    # trap and print_restores can put it back whatever happens after.
+    local host="$1"
+    remote_cmd "$host" "cd $ZDT_CURRENT_LINK && php bin/magento maintenance:enable" \
+        || return 1
+    MAINT_ON_HOSTS+=("$host")
+    WRITTEN=1
+}
+
+maintenance_disable() {
+    local host="$1"
+    remote_cmd "$host" "cd $ZDT_CURRENT_LINK && php bin/magento maintenance:disable" || true
+}
+
+restore_maintenance() {
+    [[ ${#MAINT_ON_HOSTS[@]} -eq 0 ]] && return 0
+    local h
+    for h in "${MAINT_ON_HOSTS[@]}"; do
+        [[ -n $h ]] || continue
+        # shellcheck disable=SC2029  # client-side expansion is the point: the path is the control machine's view.
+        ssh "${ssh_opts[@]}" "$h" "cd $ZDT_CURRENT_LINK && php bin/magento maintenance:disable" >/dev/null 2>&1 || true
     done
 }
 
@@ -865,13 +913,163 @@ plan_all_crossing() {
     printf 'PLAN  control: restore env.php from the dated backups on every node\n'
 }
 
+# ---------------------------------------------------------------- outage (arm 4)
+#
+# Arm 4 measures the outage of the breaking release two ways, second by
+# second: the rollout (no maintenance mode, old servers serving while the
+# migration runs) and the same rollout behind maintenance mode. A request
+# counts as failed when it was refused: 5xx, no answer at all, or a guard
+# match — the maintenance page IS a 503, so the mode's own outage is counted
+# the same way. Per second and request type the report carries the share
+# that failed ("what the customer sees" every second of the rollout); the
+# verdict compares the two legs on totals: failed requests, and seconds in
+# which something failed (the outage's length).
+
+outage_is_fail() { awk '($4 ~ /^[45]/ || $4 == "000" || $5 == 1)'; }
+
+summarize_outage() {
+    # summarize_outage LOG REPORT LABEL — writes REPORT: per second and
+    # request type the share of requests that failed ("what the customer
+    # sees" second by second; health excluded — falsifier 5 judges it), then
+    # one TOTAL line. Echoes "failed=<n> seconds=<n>": the failed requests,
+    # and the distinct seconds in which at least one failed (the outage's
+    # length, not the run's).
+    local log="$1" report="$2" label="$3"
+    {
+        printf '== %s: per second and type, failed/total (0 means all served) ==\n' "$label"
+        awk '
+            $3 != "health" {
+                total[$1 " " $3]++
+                if ($4 ~ /^[45]/ || $4 == "000" || $5 == 1) fail[$1 " " $3]++
+            }
+            END { for (k in total) printf "%s %d/%d\n", k, fail[k], total[k] }
+        ' "$log" | sort -n
+        printf 'TOTAL %s\n' "$(outage_is_fail < "$log" | wc -l | tr -d ' ')"
+    } > "$report"
+    local failed seconds
+    failed=$(outage_is_fail < "$log" | wc -l | tr -d ' ')
+    seconds=$(outage_is_fail < "$log" | cut -d' ' -f1 | sort -u | wc -l | tr -d ' ')
+    printf 'failed=%s seconds=%s\n' "$failed" "$seconds"
+}
+
+falsifier4_verdict() {
+    # Falsifier 4: the rollout must fail MORE requests, and for MORE seconds,
+    # than the same release behind maintenance mode. Fewer or shorter means
+    # the statement is false — a FAIL, per the issue's "false if".
+    if (( $1 > $3 && $2 > $4 )); then
+        falsifier PASS "falsifier 4: the rollout failed $1 requests in $2 seconds; maintenance mode failed $3 in $4 — maintenance is the smaller outage"
+        return
+    fi
+    falsifier FAIL "falsifier 4: the rollout failed $1 requests in $2 seconds; maintenance mode failed $3 in $4 — maintenance was NOT the smaller outage (want the rollout strictly worse on both)"
+}
+
+outage_phase() {
+    # outage_phase LABEL TARBALL REL [MAINT] — one leg. With MAINT the nodes
+    # go behind maintenance mode before the rollout and come out of it after
+    # setup:upgrade; without, the window is exactly what a live rollout is.
+    local label="$1" tarball="$2" rel="$3" maint="${4:-}"
+    TRAFFIC_LOG="$OUT/traffic-$label.log"
+    EVIDENCE_DIR="$OUT/evidence-$label"
+    echo
+    echo "== outage: $label ($rel) =="
+    [[ $PLAN_ONLY == 1 ]] && return 0
+
+    snapshot_gate
+    traffic_run &
+    local traffic_pid=$!
+    if [[ $maint == maint ]]; then
+        local h
+        for h in "${WEB_HOSTS[@]}"; do
+            if ! maintenance_enable "$h"; then
+                kill "$traffic_pid" 2>/dev/null || true
+                die "maintenance:enable failed on $h; the maintenance leg did not happen"
+            fi
+        done
+    fi
+    if ! place_new_release "$tarball" "$rel"; then
+        kill "$traffic_pid" 2>/dev/null || true
+        die "the release did not land on $ZDT_NEW_NODE; the rollout did not happen"
+    fi
+    if ! run_setup_upgrade; then
+        kill "$traffic_pid" 2>/dev/null || true
+        die "setup:upgrade failed on $ZDT_ADMIN_NODE; the rollout did not happen"
+    fi
+    if [[ $maint == maint ]]; then
+        maintenance_disable "$ZDT_ADMIN_NODE"
+    fi
+    wait "$traffic_pid" 2>/dev/null || true
+    traffic_verdicts
+    replica_after
+}
+
+run_outage() {
+    # Arm 4's shape: the rollout leg first, then the database back to its
+    # exact pre-run state, then the same rollout behind maintenance mode.
+    # Falsifier 4 compares the two legs; falsifier 5 is judged on each.
+    plan_all_outage
+    [[ $PLAN_ONLY == 1 ]] && return 0
+    confirm_plan
+    mkdir -p "$OUT"
+    replica_gate
+    outage_phase "rollout" "$ZDT_RELEASE_BREAKING" "$ZDT_LABEL_BREAKING"
+    restore_snapshot "$SNAPSHOT"
+    link_old_release "$ZDT_LABEL_OLD" || die "could not relink $ZDT_NEW_NODE to $ZDT_LABEL_OLD; check that node by hand before re-running the arm"
+    outage_phase "maintenance" "$ZDT_RELEASE_BREAKING" "$ZDT_LABEL_BREAKING" maint
+    local r m rf rs mf ms
+    r=$(summarize_outage "$OUT/traffic-rollout.log" "$OUT/outage-report-rollout.txt" "rollout")
+    m=$(summarize_outage "$OUT/traffic-maintenance.log" "$OUT/outage-report-maintenance.txt" "maintenance")
+    rf="${r#failed=}"; rf="${rf%% *}"
+    rs="${r##*seconds=}"
+    mf="${m#failed=}"; mf="${mf%% *}"
+    ms="${m##*seconds=}"
+    falsifier4_verdict "$rf" "$rs" "$mf" "$ms"
+    echo "outage: rollout failed $rf requests in $rs seconds; maintenance mode failed $mf in $ms (per-second shares: $OUT/outage-report-rollout.txt, $OUT/outage-report-maintenance.txt)"
+    echo
+    echo "== summary: $PASSES pass, $FAILS fail =="
+    print_restores
+    [[ $FAILS -eq 0 ]] || exit 1
+}
+
+plan_phase_outage() {
+    local label="$1" tarball="$2" rel="$3" maint="${4:-}" h
+    printf 'PLAN  == outage: %s (%s) ==\n' "$label" "$rel"
+    if [[ $maint == maint ]]; then
+        for h in "${WEB_HOSTS[@]}"; do
+            printf 'PLAN  %s\n' "$h: php bin/magento maintenance:enable (before the rollout)"
+        done
+    fi
+    printf 'PLAN  %s\n' "$ZDT_NEW_NODE: rsync $tarball -> $ZDT_RELEASES_DIR/$rel.tar.gz"
+    printf 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $rel"
+    snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
+    printf 'PLAN  control: traffic %ss at %s/s per target (%s web nodes + the load balancer)\n' "$DURATION" "$RATE" "${#WEB_HOSTS[@]}"
+    printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
+    if [[ $maint == maint ]]; then
+        printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento maintenance:disable (after the migration)"
+    fi
+    printf 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1)\n'
+}
+
+plan_all_outage() {
+    echo "== plan (nothing runs) =="
+    printf 'PLAN  control: bin/zdt-fleet replica-check (the gate; it stops a run whose replica is not live)\n'
+    plan_phase_outage "rollout" "$ZDT_RELEASE_BREAKING" "$ZDT_LABEL_BREAKING"
+    printf 'PLAN  %s\n' "$(redact "$ZDT_ADMIN_NODE: restore database $ZDT_DB_NAME from $ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz (password $ZDT_DB_PASSWORD)")"
+    printf 'PLAN  %s\n' "$ZDT_NEW_NODE: link release $ZDT_LABEL_OLD back in"
+    plan_phase_outage "maintenance" "$ZDT_RELEASE_BREAKING" "$ZDT_LABEL_BREAKING" maint
+    printf 'PLAN  control: disable maintenance on every node, restore env.php from the dated backups\n'
+}
+
 arm_main() {
     require_env
     parse_common_flags "$@"
-    trap 'restore_env_files' EXIT
+    trap 'restore_env_files; restore_maintenance' EXIT
     if [[ ${ARM_CROSSING:-0} == 1 ]]; then
         TRAFFIC_TYPES+=(read)
         run_crossing
+        return
+    fi
+    if [[ ${ARM_OUTAGE:-0} == 1 ]]; then
+        run_outage
         return
     fi
     run_arms "${ARM_BLUE_GREEN:-0}"

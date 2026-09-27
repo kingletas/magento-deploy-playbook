@@ -144,6 +144,18 @@ changed, because there's nothing before it.
 
 ### Added
 
+- `bin/zdt-arm arm4`, the outage arm of issue #5: the breaking release
+  (`ZDT_RELEASE_BREAKING` / `ZDT_LABEL_BREAKING`) rolls out twice — once
+  with no maintenance mode, old servers serving while the migration runs,
+  and once behind `maintenance:enable` on every web node — with the
+  database restored between the two so both start from the same state.
+  Per second and request type the report carries the share of requests
+  that failed: what the customer sees, second by second. Falsifier 4 then
+  compares the legs — the rollout must fail more requests, and for more
+  seconds, than maintenance mode, or "maintenance mode is the smaller
+  outage" is reported as disproved. Maintenance is lifted again on every
+  exit path the arm can reach, and the exact commands for the paths it
+  cannot are printed.
 - `bin/zdt-arm arm3`, the crossing arm of issue #5: two code versions against
   one database with `deployment/blue_green/enabled` on the old servers, first
   across an additive control release (old servers must serve without a guard

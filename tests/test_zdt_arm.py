@@ -860,6 +860,126 @@ class ZdtArmTest(unittest.TestCase):
             "the always-new node must not take the flag",
         )
 
+    # ------------------------------------------------------------------ arm 4
+
+    def test_arm4_missing_release_refused_by_name(self) -> None:
+        env = {
+            k: v
+            for k, v in self.env.items()
+            if k not in ("ZDT_RELEASE_BREAKING", "ZDT_LABEL_BREAKING")
+        }
+        result = subprocess.run(
+            [str(RUNNER), "arm4", "-y"],
+            env=env,
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("ZDT_RELEASE_BREAKING", result.stderr)
+        self.assertIn("ZDT_LABEL_BREAKING", result.stderr)
+        self.assertEqual(self.calls(), "")
+
+    def test_arm4_plan_shows_both_legs_and_runs_nothing(self) -> None:
+        result = self.run_arm("arm4", "-n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls(), "", "-n must reach no server")
+        self.assertFalse(self.curl_calls.exists(), "-n must send no traffic")
+        transcript = result.stdout + result.stderr
+        self.assertIn("outage: rollout (rel-break)", transcript)
+        self.assertIn("outage: maintenance (rel-break)", transcript)
+        # The maintenance leg's whole shape, in order, in the plan.
+        self.assertEqual(transcript.count("maintenance:enable"), 3)  # every node
+        self.assertIn("maintenance:disable", transcript)
+        self.assertIn("restore database magento", transcript)
+        self.assertIn("link release rel-old back in", transcript)
+        self.assertEqual(transcript.count("setup:upgrade"), 2)
+        self.assertNotIn("Sup3rSecretPw", transcript)
+
+    def test_arm4_maintenance_leg_enables_every_node_then_disables(self) -> None:
+        result = self.run_arm("arm4", "-y", FAKE_CURL_DOWN="node2.example")
+        lines = [l for l in self.calls().splitlines() if l.startswith("SSH|")]
+        enables = [i for i, l in enumerate(lines) if "maintenance:enable" in l]
+        disables = [i for i, l in enumerate(lines) if "maintenance:disable" in l]
+        # Three enables, one per web node, and they land only in the second
+        # leg: before them sit exactly one snapshot+upgrade pair, and after
+        # them comes the disable. The rollout leg never touches maintenance.
+        self.assertEqual(len(enables), 3, f"expected 3 enables: {enables}")
+        self.assertTrue(disables, "the maintenance leg must lift maintenance")
+        upgrades = [i for i, l in enumerate(lines) if "setup:upgrade" in l]
+        self.assertEqual(len(upgrades), 2)
+        self.assertTrue(all(u < min(enables) for u in upgrades[:1]))
+        self.assertTrue(all(u > max(enables) for u in upgrades[1:]))
+        enabled_hosts = {l.split("|")[1] for l in lines if "maintenance:enable" in l}
+        self.assertEqual(enabled_hosts, {"node1", "node2", "node3"})
+        self.assertEqual(result.returncode, 1, result.stdout)  # see below
+
+    def test_arm4_verdict_compares_the_two_legs(self) -> None:
+        # Both legs run the same fake failure (node2 down), so both fail the
+        # same share: the rollout is NOT strictly worse, and falsifier 4
+        # FAILS rather than passing by equality. The comparison itself is
+        # pinned exactly by test_arm4_verdict_math below.
+        result = self.run_arm("arm4", "-y", FAKE_CURL_DOWN="node2.example")
+        self.assertIn("FAIL  falsifier 4:", result.stdout)
+        self.assertIn("rollout failed", result.stdout)
+        self.assertIn("outage-report-rollout.txt", result.stdout)
+        for leg in ("rollout", "maintenance"):
+            report = self.dir / "run" / f"outage-report-{leg}.txt"
+            self.assertTrue(report.exists(), f"no report for {leg}")
+            text = report.read_text()
+            self.assertIn("TOTAL", text)
+            # Health rows never appear in the per-second shares: falsifier 5
+            # judges the health check, not the customer-facing outage.
+            self.assertNotIn(" health ", text)
+
+    def test_arm4_verdict_math(self) -> None:
+        # The comparison, unit-level: strictly more requests AND strictly more
+        # seconds is a PASS; anything else is the falsifier's FAIL, per the
+        # issue's "false if".
+        snippet = (
+            'ARM_DIR="' + str(ROOT / "bin" / "zdt-arm.d") + '"; '
+            'source "$ARM_DIR/lib.sh" 2>/dev/null || true; '
+            'falsifier4_verdict 4 2 1 1; falsifier4_verdict 4 2 4 1; '
+            'falsifier4_verdict 4 2 3 2; falsifier4_verdict 5 3 4 3'
+        )
+        ran = subprocess.run(
+            ["bash", "-c", snippet],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        out = ran.stdout
+        self.assertEqual(out.count("PASS  falsifier 4"), 1)
+        self.assertEqual(out.count("FAIL  falsifier 4"), 3)
+
+    def test_arm4_restores_maintenance_after_a_failed_step(self) -> None:
+        # Mid-maintenance-leg failure: the trap must still lift maintenance
+        # on every node it had enabled — a store left behind the maintenance
+        # page by a failed proof run is worse than the failed run. Here the
+        # enable on node3 fails, after node1 and node2 went under.
+        failfile = self.dir / "ssh-fail"
+        failfile.write_text("node3|maintenance:enable\n")
+        result = self.run_arm("arm4", "-y", FAKE_SSH_FAIL=str(failfile))
+        self.assertNotEqual(result.returncode, 0)
+        lines = [l for l in self.calls().splitlines() if l.startswith("SSH|")]
+        disabled = [l for l in lines if "maintenance:disable" in l]
+        # The fake records a call before its fail rule bites, so node3's
+        # failed enable is in the log; what matters is that every node that
+        # went under maintenance comes out, and nothing else is touched.
+        self.assertEqual(
+            {l.split("|")[1] for l in disabled}, {"node1", "node2"},
+            "a failed maintenance leg must still lift maintenance everywhere it went in",
+        )
+
+    def test_arm4_lists_and_help(self) -> None:
+        listing = self.run_arm("list")
+        self.assertIn("arm4", listing.stdout)
+        help_text = self.run_arm("--help").stdout
+        self.assertIn("arm4", help_text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -96,6 +96,12 @@ fi
 if [[ -n ${FAKE_CURL_NOTFOUND:-} && $url == *"$FAKE_CURL_NOTFOUND"* && $url != *health_check* ]]; then
     code=404
 fi
+if [[ -n ${FAKE_CURL_BREAK_READ:-} && $url == *"$FAKE_CURL_BREAK_READ"* && $url == *"$ZDT_READ_PATH"* ]]; then
+    code=503; body="${FAKE_CURL_BREAK_BODY:-SQLSTATE[42S22]: Column not found: 1054 Unknown column 'gift_registry_id' in 'field list'}"
+fi
+if [[ -n ${FAKE_CURL_BREAK_READ2:-} && $url == *"$FAKE_CURL_BREAK_READ2"* && $url == *"$ZDT_READ_PATH"* ]]; then
+    code=503; body="${FAKE_CURL_BREAK_BODY2:-SQLSTATE[HY000]: unrelated}"
+fi
 [[ -n $out && -n $body ]] && printf '%s\\n' "$body" > "$out"
 echo "$code"
 """
@@ -160,6 +166,12 @@ class ZdtArmTest(unittest.TestCase):
                 "ZDT_GUARD_PATTERN": "Please refresh",
                 "ZDT_CATEGORY_PATH": "/mens.html",
                 "ZDT_PRODUCT_PATH": "/products/gt.html",
+                "ZDT_RELEASE_ADDITIVE": str(self.tarball),
+                "ZDT_LABEL_ADDITIVE": "rel-add",
+                "ZDT_RELEASE_BREAKING": str(self.tarball),
+                "ZDT_LABEL_BREAKING": "rel-break",
+                "ZDT_READ_PATH": "/products/gt.html",
+                "ZDT_SCHEMA_OBJECT": "gift_registry_id",
                 "ZDT_DURATION": "1",
                 "ZDT_RATE": "1",
                 "ZDT_RUN_DIR": str(self.dir / "run"),
@@ -558,10 +570,15 @@ class ZdtArmTest(unittest.TestCase):
         result = self.run_arm("arm1", "-y")
         elapsed = time.monotonic() - start
         self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
-        log = (self.dir / "run" / "traffic.log").read_text().splitlines()
-        # duration 1s at 1/s over 3 nodes + the LB, two phases: exactly 8.
-        # The generator sends total = duration * rate per target and no more.
-        self.assertEqual(len(log), 8, "the generator must stop at the duration")
+        logs = [
+            (self.dir / "run" / f"traffic-{phase}.log").read_text().splitlines()
+            for phase in ("shared-prefix", "per-release-prefix")
+        ]
+        # duration 1s at 1/s over 3 nodes + the LB, one phase: exactly 4.
+        # The generator sends total = duration * rate per target and no more,
+        # and each phase's verdict counts its own log alone.
+        for log in logs:
+            self.assertEqual(len(log), 4, "the generator must stop at the duration")
         self.assertLess(elapsed, 30, "a short run must finish at once")
 
     def test_traffic_asks_for_the_configured_paths(self) -> None:
@@ -586,8 +603,8 @@ class ZdtArmTest(unittest.TestCase):
         ]
         self.assertTrue(refused_line)
         self.assertIn("targets that refused: none", refused_line[0])
-        # The 404 is still recorded: it is in the log, as a fact.
-        log = (self.dir / "run" / "traffic.log").read_text()
+        # The 404 is still recorded: it is in each phase's log, as a fact.
+        log = (self.dir / "run" / "traffic-shared-prefix.log").read_text()
         self.assertIn(" 404 ", log)
 
     def test_health_check_failure_on_a_refusing_node_is_a_falsifier_5_fail(
@@ -653,6 +670,195 @@ class ZdtArmTest(unittest.TestCase):
     def test_restore_snapshot_refuses_a_relative_path(self) -> None:
         result = self.run_arm("restore-snapshot", "oops.sql.gz", "-y")
         self.assertEqual(result.returncode, 2)
+
+
+    # ------------------------------------------------------------------ arm 3
+
+    def test_help_lists_the_arm3_variables(self) -> None:
+        result = self.run_arm("--help")
+        for var in (
+            "ZDT_RELEASE_ADDITIVE",
+            "ZDT_LABEL_ADDITIVE",
+            "ZDT_RELEASE_BREAKING",
+            "ZDT_LABEL_BREAKING",
+            "ZDT_READ_PATH",
+            "ZDT_SCHEMA_OBJECT",
+        ):
+            self.assertIn(var, result.stdout)
+
+    def test_list_shows_arm3(self) -> None:
+        result = self.run_arm("list")
+        self.assertIn("arm3", result.stdout)
+
+    def test_arm3_missing_crossing_variables_refused_by_name(self) -> None:
+        env = {
+            k: v
+            for k, v in self.env.items()
+            if k not in ("ZDT_READ_PATH", "ZDT_SCHEMA_OBJECT")
+        }
+        result = subprocess.run(
+            [str(RUNNER), "arm3", "-y"],
+            env=env,
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("ZDT_READ_PATH", result.stderr)
+        self.assertIn("ZDT_SCHEMA_OBJECT", result.stderr)
+        self.assertEqual(self.calls(), "")
+
+    def test_arm3_arm1_and_arm2_ignore_the_crossing_variables(self) -> None:
+        # Dropping arm 3's variables must not disturb the other arms: they
+        # never ask for them.
+        env = {
+            k: v
+            for k, v in self.env.items()
+            if k
+            not in (
+                "ZDT_RELEASE_ADDITIVE",
+                "ZDT_LABEL_ADDITIVE",
+                "ZDT_RELEASE_BREAKING",
+                "ZDT_LABEL_BREAKING",
+                "ZDT_READ_PATH",
+                "ZDT_SCHEMA_OBJECT",
+            )
+        }
+        result = subprocess.run(
+            [str(RUNNER), "arm1", "-y"],
+            env=env,
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+
+    def test_arm3_plan_shows_both_crossings_and_runs_nothing(self) -> None:
+        result = self.run_arm("arm3", "-n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls(), "", "-n must reach no server")
+        self.assertFalse(self.curl_calls.exists(), "-n must send no traffic")
+        transcript = result.stdout + result.stderr
+        self.assertIn("crossing: additive-control (rel-add)", transcript)
+        self.assertIn("crossing: breaking-evidence (rel-break)", transcript)
+        self.assertIn("restore database magento", transcript)
+        self.assertIn("link release rel-old back in", transcript)
+        self.assertIn("/var/www/magento/zdt-snapshots/zdt-snapshot-", transcript)
+        self.assertEqual(transcript.count("setup:upgrade"), 2)
+        self.assertIn("/products/gt.html", transcript)  # the named read path
+        self.assertIn("id_prefix", transcript)
+        self.assertNotIn("backend_options", transcript)
+        self.assertNotIn("Sup3rSecretPw", transcript)
+
+    def test_arm3_breaking_failure_naming_the_object_passes_falsifier_3(self) -> None:
+        # node2's read path fails across both crossings naming the object.
+        # Control: node2 is an old server, so the control must FAIL there too
+        # — but only on the guard-message rule; a 503 without the guard text
+        # is not a control failure. Then the breaking leg's first saved
+        # failure names gift_registry_id: falsifier 3 PASSes on evidence.
+        result = self.run_arm(
+            "arm3", "-y", ZDT_RATE="8",
+            FAKE_CURL_BREAK_READ="node2.example",
+        )
+        self.assertIn("PASS  falsifier 3 (control)", result.stdout)
+        self.assertIn("PASS  falsifier 3:", result.stdout)
+        self.assertIn("names gift_registry_id", result.stdout)
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+
+    def test_arm3_first_failure_not_naming_the_object_fails(self) -> None:
+        result = self.run_arm(
+            "arm3", "-y", ZDT_RATE="8",
+            FAKE_CURL_BREAK_READ="node2.example",
+            FAKE_CURL_BREAK_BODY="SQLSTATE[42S02]: Base table not found: 1146",
+        )
+        self.assertIn("FAIL  falsifier 3:", result.stdout)
+        self.assertIn("does not name gift_registry_id", result.stdout)
+        self.assertEqual(result.returncode, 1)
+
+    def test_arm3_old_servers_passing_across_the_breaking_release_fail(self) -> None:
+        # Nothing fails on the read path: either the release does not break
+        # what the read path reads, or old servers served a schema they do
+        # not match. Either way falsifier 3 FAILS — it never passes by
+        # silence.
+        result = self.run_arm("arm3", "-y", ZDT_RATE="8")
+        self.assertIn("FAIL  falsifier 3:", result.stdout)
+        self.assertEqual(result.returncode, 1)
+
+    def test_arm3_guard_message_on_an_old_server_fails_both_legs(self) -> None:
+        # The flag is ON in arm 3: a guard message across either crossing
+        # disproves falsifier 3's claim about the flag.
+        result = self.run_arm(
+            "arm3", "-y", ZDT_RATE="8",
+            FAKE_CURL_BREAK_READ="node2.example",
+            FAKE_CURL_BREAK_BODY="Please refresh the page",
+        )
+        self.assertIn("FAIL  falsifier 3 (control)", result.stdout)
+        self.assertIn("FAIL  falsifier 3:", result.stdout)
+        self.assertEqual(result.returncode, 1)
+
+    def test_arm3_guard_on_the_new_node_does_not_blame_old_servers(self) -> None:
+        # place_new_release links the breaking code on the new node BEFORE
+        # setup:upgrade, so for that window the new node can answer the guard
+        # message with the flag off. Falsifier 3 counts old servers only: the
+        # guard rule fires on node1 (the new node), the read failure on node2,
+        # and both legs must still PASS.
+        result = self.run_arm(
+            "arm3", "-y", ZDT_RATE="8",
+            FAKE_CURL_DOWN="node1.example",
+            FAKE_CURL_BREAK_READ="node2.example",
+        )
+        self.assertIn("PASS  falsifier 3 (control)", result.stdout)
+        self.assertIn("PASS  falsifier 3:", result.stdout)
+        self.assertIn("names gift_registry_id", result.stdout)
+        self.assertNotIn("FAIL  falsifier 3", result.stdout)
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+
+    def test_arm3_first_failure_counts_only_old_server_bodies(self) -> None:
+        # The load balancer's read failure lands too, with a body that does
+        # not name the object. The verdict is the old servers' first failure,
+        # not whichever body finished first: node2's body names the object,
+        # so falsifier 3 PASSes and names node2.example as the source.
+        result = self.run_arm(
+            "arm3", "-y", ZDT_RATE="8",
+            FAKE_CURL_BREAK_READ="node2.example",
+            FAKE_CURL_BREAK_READ2="lb.example",
+            FAKE_CURL_BREAK_BODY2="SQLSTATE[HY000]: unrelated",
+        )
+        self.assertIn("PASS  falsifier 3:", result.stdout)
+        self.assertIn("first old-server failure on node2.example names gift_registry_id", result.stdout)
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+
+    def test_arm3_saves_the_first_failures_body_as_evidence(self) -> None:
+        result = self.run_arm(
+            "arm3", "-y", ZDT_RATE="8",
+            FAKE_CURL_BREAK_READ="node2.example",
+        )
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        evidence = self.dir / "run" / "evidence-breaking-evidence"
+        bodies = sorted(evidence.iterdir())
+        self.assertTrue(bodies, "no failure bodies saved for the breaking leg")
+        self.assertTrue(
+            any("gift_registry_id" in b.read_text() for b in bodies),
+            "no saved body names the schema object",
+        )
+
+    def test_arm3_sets_the_flag_on_old_servers_only(self) -> None:
+        self.run_arm("arm3", "-y")
+        lines = [l for l in self.calls().splitlines() if l.startswith("SSH|")]
+        for node in ("node2", "node3"):
+            self.assertTrue(
+                any(l.startswith(f"SSH|{node}|") and "blue_green" in l for l in lines),
+                f"{node}: arm 3 must set the flag on the old servers",
+            )
+        self.assertEqual(
+            [l for l in lines if l.startswith("SSH|node1|") and "blue_green" in l],
+            [],
+            "the always-new node must not take the flag",
+        )
 
 
 if __name__ == "__main__":

@@ -144,6 +144,19 @@ changed, because there's nothing before it.
 
 ### Added
 
+- `bin/zdt-arm arm3`, the crossing arm of issue #5: two code versions against
+  one database with `deployment/blue_green/enabled` on the old servers, first
+  across an additive control release (old servers must serve without a guard
+  message; passing it alone proves nothing) and then across a release that
+  renames or drops a column the old code reads — the evidence. The first
+  old-server failure must name the changed object, so failing read bodies are
+  saved under the run directory and the verdict greps the chronologically
+  first one; an old server answering 200 across a schema it does not match
+  fails the falsifier. The breaking change, the read route and the object's
+  name come only from you (`ZDT_RELEASE_ADDITIVE/_BREAKING`,
+  `ZDT_READ_PATH`, `ZDT_SCHEMA_OBJECT`): a missing one stops arm 3 by name
+  rather than guessing an evidence chain. The database is restored between
+  the two legs, so the breaking leg starts exactly where the control started.
 - `bin/zdt-arm`, the runner for the fleet arms of issue #5. `arm1` runs the
   migration with the blue/green flag off — one shared cache prefix, then a
   prefix per release, traffic on every server; `arm2` runs it again with the

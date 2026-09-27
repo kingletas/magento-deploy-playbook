@@ -1,6 +1,7 @@
 ---
 # What a commit has to pass, run somewhere other than the machine that wrote it.
-# The first job is `make check`; the second exercises the deploy end to end.
+# The first job is `make check`; the others exercise the deploy end to end,
+# split into shards that run side by side, each on a fleet of its own.
 # Actions are pinned to a commit SHA, because a tag can be moved.
 
 name: ci
@@ -42,9 +43,30 @@ jobs:
           REQUIRE_LINT: "1"   # a missing linter here means the install broke
         run: make check
 
-  docker:
-    name: end-to-end against six containers
+  # The shard names come from the suite itself, so the matrix can't drift from
+  # the list `make docker-test` runs locally.
+  shards:
+    name: list the end-to-end shards
     runs-on: ubuntu-24.04
+    outputs:
+      shards: ${{ steps.list.outputs.shards }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: List the shards
+        id: list
+        run: echo "shards=$(bin/docker-suite shards)" >> "$GITHUB_OUTPUT"
+
+  docker:
+    name: end-to-end, ${{ matrix.shard }}
+    needs: shards
+    runs-on: ubuntu-24.04
+    strategy:
+      # Every shard reports, so one failure doesn't hide another.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.shards.outputs.shards) }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -60,7 +82,9 @@ jobs:
           make collections
 
       - name: Build the fleet, deploy to it, and assert on the result
-        run: make docker-test
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: make docker-test-shard SHARD="$SHARD"
 
       - name: Tear the fleet down
         if: always()

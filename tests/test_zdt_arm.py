@@ -99,6 +99,9 @@ fi
 if [[ -n ${FAKE_CURL_BREAK_READ:-} && $url == *"$FAKE_CURL_BREAK_READ"* && $url == *"$ZDT_READ_PATH"* ]]; then
     code=503; body="${FAKE_CURL_BREAK_BODY:-SQLSTATE[42S22]: Column not found: 1054 Unknown column 'gift_registry_id' in 'field list'}"
 fi
+if [[ -n ${FAKE_CURL_BREAK_READ2:-} && $url == *"$FAKE_CURL_BREAK_READ2"* && $url == *"$ZDT_READ_PATH"* ]]; then
+    code=503; body="${FAKE_CURL_BREAK_BODY2:-SQLSTATE[HY000]: unrelated}"
+fi
 [[ -n $out && -n $body ]] && printf '%s\\n' "$body" > "$out"
 echo "$code"
 """
@@ -796,6 +799,38 @@ class ZdtArmTest(unittest.TestCase):
         self.assertIn("FAIL  falsifier 3 (control)", result.stdout)
         self.assertIn("FAIL  falsifier 3:", result.stdout)
         self.assertEqual(result.returncode, 1)
+
+    def test_arm3_guard_on_the_new_node_does_not_blame_old_servers(self) -> None:
+        # place_new_release links the breaking code on the new node BEFORE
+        # setup:upgrade, so for that window the new node can answer the guard
+        # message with the flag off. Falsifier 3 counts old servers only: the
+        # guard rule fires on node1 (the new node), the read failure on node2,
+        # and both legs must still PASS.
+        result = self.run_arm(
+            "arm3", "-y", ZDT_RATE="8",
+            FAKE_CURL_DOWN="node1.example",
+            FAKE_CURL_BREAK_READ="node2.example",
+        )
+        self.assertIn("PASS  falsifier 3 (control)", result.stdout)
+        self.assertIn("PASS  falsifier 3:", result.stdout)
+        self.assertIn("names gift_registry_id", result.stdout)
+        self.assertNotIn("FAIL  falsifier 3", result.stdout)
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+
+    def test_arm3_first_failure_counts_only_old_server_bodies(self) -> None:
+        # The load balancer's read failure lands too, with a body that does
+        # not name the object. The verdict is the old servers' first failure,
+        # not whichever body finished first: node2's body names the object,
+        # so falsifier 3 PASSes and names node2.example as the source.
+        result = self.run_arm(
+            "arm3", "-y", ZDT_RATE="8",
+            FAKE_CURL_BREAK_READ="node2.example",
+            FAKE_CURL_BREAK_READ2="lb.example",
+            FAKE_CURL_BREAK_BODY2="SQLSTATE[HY000]: unrelated",
+        )
+        self.assertIn("PASS  falsifier 3:", result.stdout)
+        self.assertIn("first old-server failure on node2.example names gift_registry_id", result.stdout)
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
 
     def test_arm3_saves_the_first_failures_body_as_evidence(self) -> None:
         result = self.run_arm(

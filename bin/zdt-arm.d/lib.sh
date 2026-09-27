@@ -775,7 +775,11 @@ falsifier3_breaking() {
         served_ok=$((served_ok + m))
     done
     local guarded=0
-    guarded=$(awk 'BEGIN{c=0} $3 != "health" && $5 == 1 {c++} END{print c}' "$TRAFFIC_LOG")
+    for t in $old_t; do
+        local g
+        g=$(awk -v t="$t" '$2 == t && $3 != "health" && $5 == 1' "$TRAFFIC_LOG" | wc -l | tr -d ' ')
+        guarded=$((guarded + g))
+    done
     if [[ $guarded -gt 0 ]]; then
         falsifier FAIL "falsifier 3: $guarded guarded responses on old servers across the breaking release with the flag on — the flag did not silence the guard"
         return 1
@@ -786,19 +790,33 @@ falsifier3_breaking() {
     fi
     # The first failure's own words must name the schema object. Names carry
     # the epoch in nanoseconds, so the chronological first is a numeric sort
-    # on field 4.
-    local first hit=""
-    first=$(find "$EVIDENCE_DIR" -maxdepth 1 -type f -name 'read-*' -printf '%f\n' 2>/dev/null | sort -t- -k3,3n | head -1)
+    # on field 3. Only the old servers count: a body saved from the new node
+    # (new code before setup:upgrade) or from the load balancer is not an
+    # old-server failure, so an evidence file only qualifies when its name
+    # ends in -<old target>, with the target stripped the way save_evidence
+    # strips it (no http://, no trailing slash — the log keeps the slash and
+    # the file name drops it).
+    local first="" first_node="" hit="" f t suffix
+    for f in $(find "$EVIDENCE_DIR" -maxdepth 1 -type f -name 'read-*' -printf '%f\n' 2>/dev/null | sort -t- -k3,3n); do
+        for t in $old_t; do
+            suffix="${t#http://}"; suffix="${suffix%/}"
+            if [[ $f == *"-$suffix" ]]; then
+                first="$f"; first_node="$suffix"
+                break
+            fi
+        done
+        [[ -n $first ]] && break
+    done
     if [[ -n $first ]]; then
         if grep -qi "$ZDT_SCHEMA_OBJECT" "$EVIDENCE_DIR/$first"; then
             hit="$EVIDENCE_DIR/$first"
         fi
     fi
     if [[ -z $hit ]]; then
-        falsifier FAIL "falsifier 3: the first old-server failure does not name $ZDT_SCHEMA_OBJECT (see $EVIDENCE_DIR/${first:-no saved body})"
+        falsifier FAIL "falsifier 3: the first old-server failure does not name $ZDT_SCHEMA_OBJECT (first old-server body: ${first:-none saved}; see $EVIDENCE_DIR)"
         return 1
     fi
-    falsifier PASS "falsifier 3: across the breaking release the first old-server failure names $ZDT_SCHEMA_OBJECT ($hit; the read path is $ZDT_READ_PATH, sent to the old nodes $old_t)"
+    falsifier PASS "falsifier 3: across the breaking release the first old-server failure on $first_node names $ZDT_SCHEMA_OBJECT ($hit; the read path is $ZDT_READ_PATH)"
 }
 
 run_crossing() {

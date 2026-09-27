@@ -628,7 +628,7 @@ run_arms() {
     # Between the two phases, back to the start: the next phase repeats the
     # same migration under different cache settings.
     restore_snapshot "$SNAPSHOT"
-    link_old_release || die "could not relink $ZDT_NEW_NODE to $ZDT_LABEL_OLD; check that node by hand before re-running an arm"
+    link_old_release "$ZDT_LABEL_OLD" || die "could not relink $ZDT_NEW_NODE to $ZDT_LABEL_OLD; check that node by hand before re-running an arm"
     run_phase "per-release-prefix" "$with_blue_green"
     echo
     echo "== summary: $PASSES pass, $FAILS fail =="
@@ -812,7 +812,7 @@ run_crossing() {
     replica_gate
     crossing_phase "additive-control" "$ZDT_RELEASE_ADDITIVE" "$ZDT_LABEL_ADDITIVE"
     restore_snapshot "$SNAPSHOT"
-    link_old_release || die "could not relink $ZDT_NEW_NODE to $ZDT_LABEL_OLD; check that node by hand before re-running the arm"
+    link_old_release "$ZDT_LABEL_OLD" || die "could not relink $ZDT_NEW_NODE to $ZDT_LABEL_OLD; check that node by hand before re-running the arm"
     crossing_phase "breaking-evidence" "$ZDT_RELEASE_BREAKING" "$ZDT_LABEL_BREAKING"
     echo
     echo "== summary: $PASSES pass, $FAILS fail =="

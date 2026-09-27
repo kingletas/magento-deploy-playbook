@@ -26,6 +26,7 @@ them and keep the transcript.
 - [P1-5: a patch_list row written out of band marks a patch applied](#p1-5-a-patch_list-row-written-out-of-band-marks-a-patch-applied)
 - [Running the framework proofs on a production store](#running-the-framework-proofs-on-a-production-store)
 - [The fleet checks: `bin/zdt-fleet`](#the-fleet-checks-binzdt-fleet)
+- [The fleet arms: `bin/zdt-arm`](#the-fleet-arms-binzdt-arm)
 
 ## Running the proofs
 
@@ -504,3 +505,119 @@ the run did not happen. On exit 2 stdout may hold partial output — a
 
 The tests (`tests/test_zdt_fleet.py`, run by `make check`) use a fake `mysql`
 client returning canned output.
+
+
+## The fleet arms: `bin/zdt-arm`
+
+`bin/zdt-fleet` checks and records; `bin/zdt-arm` runs things. It is the
+runner for the fleet arms of [issue #5](https://github.com/kingletas/magento-deploy-playbook/issues/5),
+built on the interface the maintainer approved: one command per step from the
+control machine over ssh, the arms driving the migration end to end on the
+admin node, a built-in traffic generator, and the cache prefixes and the
+blue/green flag set and restored by the scripts themselves. Arms 1 and 2 are
+here; arms 3 and 4 come in their own pull requests.
+
+```bash
+bin/zdt-arm list
+bin/zdt-arm arm1 -n     # print the whole plan, run nothing
+bin/zdt-arm arm1        # show the plan, then ask before the first remote write
+bin/zdt-arm arm1 -y     # the same, without asking (for an operator who means it)
+```
+
+- **arm1** — the migration with `deployment/blue_green/enabled` off
+  everywhere: first with one shared cache prefix, then a prefix per release,
+  with traffic on every server throughout.
+- **arm2** — the same run with `deployment/blue_green/enabled` set in the
+  `env.php` of every server that stays on the old code.
+- **restore-snapshot** — put a snapshot back on the primary. Destructive, so
+  it plans and asks like the arms.
+
+### How a run is kept safe
+
+- `-n` prints the whole plan, every command in order, and runs nothing.
+  Without `-y` the arm shows the plan and asks before its first remote write;
+  with no terminal to answer, it stops rather than guessing (exit 2).
+- Before `setup:upgrade` the arm takes a database snapshot on
+  `ZDT_ADMIN_NODE`, prints the exact command that restores it, and refuses to
+  go on if the snapshot fails.
+- Before the first edit, every node's `env.php` is copied to a dated backup
+  on its node, and the exact restore command is printed — because an exit
+  trap restores on the paths it can reach, and not on `SIGKILL` or a power
+  cut.
+- The traffic generator has a default rate of 2 requests a second per target
+  and a hard refusal above 20, and a default duration of 120 s with a hard
+  maximum of 600: the lab machine runs other things too. The mix asks routes a
+  stock store answers anonymously (home, `/checkout/cart/`,
+  `/rest/V1/directory/currency`, a real GraphQL query, `pub/health_check.php`)
+  plus the category and product pages you name in `ZDT_CATEGORY_PATH` and
+  `ZDT_PRODUCT_PATH`. A target counts as refusing only on a 5xx, no answer at
+  all, or a guard-pattern match; a 4xx is a fact in `traffic.log`, not a
+  refusal — a route that goes missing mid-migration still shows there.
+- Every remote command is echoed before it runs, and any secret in it is
+  echoed as `***`. Commands that carry the database password run it embedded
+  in a script piped over ssh stdin, so it is in no argv, no `ps`, no shell
+  history — and never in the transcript.
+- ssh runs with `BatchMode=yes` and normal host-key checking; an unknown
+  host stops the arm with its name. Nothing here can turn host key checking
+  off — `bin/check-structure` refuses it.
+- The replica gate from `bin/zdt-fleet replica-check` runs before anything:
+  a replica that is not live means the run is reported as NOT RUN, missing
+  condition 1, and no node is touched.
+
+### Variables
+
+The hosts have no defaults: a missing one stops the arm by name rather than
+aiming at a guess. All values come from the environment, never from
+arguments, so no password lands in a shell history or a transcript.
+
+| Variable | Meaning |
+|---|---|
+| `ZDT_WEB_HOSTS` | comma-separated ssh names of the web nodes (at least three) |
+| `ZDT_NEW_NODE` | the always-new node; one of `ZDT_WEB_HOSTS` |
+| `ZDT_ADMIN_NODE` | the node that runs Magento's commands and the snapshot; must be `ZDT_NEW_NODE` — the migration runs from `current`, so a split between the two is refused, naming both |
+| `ZDT_LB_URL` | the load balancer's base URL |
+| `ZDT_NODE_URLS` | comma-separated per-node base URLs, same order as `ZDT_WEB_HOSTS`; traffic goes to each node directly, so a refusing node is attributed to that node |
+| `ZDT_RELEASE_TARBALL` | the new release, a path on the control machine |
+| `ZDT_LABEL_NEW` / `ZDT_LABEL_OLD` | release directory names under `ZDT_RELEASES_DIR`; `ZDT_LABEL_OLD` must already be deployed on every node |
+| `ZDT_ENV_PHP` | each node's `env.php` path (they are edited by `php -r`, backed up first) |
+| `ZDT_DB_HOST` / `ZDT_DB_USER` / `ZDT_DB_PASSWORD` / `ZDT_DB_NAME` | the primary's connection, for the snapshot |
+| `ZDT_SNAPSHOT_DIR` | where the admin node keeps snapshots (default `/var/www/magento/zdt-snapshots`) |
+| `ZDT_RATE` / `ZDT_DURATION` | traffic per target: requests/s (default 2, max 20) and seconds (default 120, max 600) |
+| `ZDT_GUARD_PATTERN` | extended regex; a response body matching it is logged as a guard message |
+| `ZDT_CATEGORY_PATH` / `ZDT_PRODUCT_PATH` | paths of a real category and a real product page (e.g. `/mens.html`, `/products/gt.html`). No default: a guessed path a stock store does not serve would record every target as refusing |
+| `ZDT_TOUCHED_TABLES` | comma-separated tables to checksum once the lag reaches zero (default `catalog_product_entity`) |
+| `ZDT_RUN_DIR` | where the run's evidence lands (default `local.d/zdt-arm/<run>-<arm>/`) |
+| `ZDT_FLEET_BIN` | path of `bin/zdt-fleet` (default beside `bin/zdt-arm`) |
+
+The replica connection (`ZDT_PRIMARY_*` / `ZDT_REPLICA_*`) belongs to
+`bin/zdt-fleet`, which the arms call as their gate.
+
+### What the run leaves behind
+
+The transcript (every `PLAN`/`RUN` line, secret-free), `traffic.log` — one
+line per request: epoch second, target, request type, status, guard flag —
+`replica-before.json` and `replica-after.json` from the gate, and
+`checksums.txt`. `PASS`/`FAIL` lines for falsifier 1 (the replica survives
+the migration: live after it, lag back to zero within five minutes, the
+touched tables' checksums matching once the lag is zero) and falsifier 5
+(the health check never takes a refusing server out of rotation). The guard
+counts are recorded as facts for the results document; falsifiers 2, 3 and
+4 belong to arms 3 and 4 and to Commerce runs, as issue #5 defines them.
+
+### Exit codes
+
+0 pass; 1 the run failed (a `FAIL` line); 2 the run never happened: missing
+settings, a declined or unanswerable plan, a refused gate, a failed
+snapshot. As with `bin/zdt-fleet`: 1 is a falsifier's FAIL, 2 means the run
+did not happen.
+
+The tests (`tests/test_zdt_arm.py`, run by `make check`) fake `ssh`, `curl`
+and `rsync` beside the fake `mysql` client, so no lab and no live server is
+touched: they show the plan runs nothing and names both phases and the
+restore and relink between them, a declined prompt — shown the plan it asks
+about — runs nothing, a failed snapshot, a failed release placement, a failed
+`setup:upgrade` or a failed `env.php` edit stops the arm rather than letting
+it report success, the backup precedes every edit and survives the
+`env.php` symlink, the printed restores are right, the rate cap and the
+duration stop hold, a 404 on one route is not read as a refusing target, and
+the transcript never carries a password.

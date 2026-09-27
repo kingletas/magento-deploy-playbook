@@ -769,8 +769,8 @@ bin/docker-suite        the local fleet
 bin/zdt-proof           the zero-downtime proofs, run against a Kapelos store
 bin/zdt-proof.d/        its library, proofs, PHP payloads and fixture module
 bin/zdt-fleet           the fleet checks: replica health and table checksums
-bin/zdt-arm             the fleet arms: issue #5's arms 1 and 2, run from the
-                        control machine
+bin/zdt-arm             the fleet arms: issue #5's arms 1, 2 and 3, run from
+                        the control machine
 bin/zdt-arm.d/          their library and arm scripts
 docker/                 the local fleet's image, fakes and fixtures
 docs/                   from-nothing.md, design.md, ledger.md, compliance.md,

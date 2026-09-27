@@ -11,6 +11,7 @@
 #   bin/zdt-arm list
 #   bin/zdt-arm arm1 [-n|-y]
 #   bin/zdt-arm arm2 [-n|-y]
+#   bin/zdt-arm arm3 [-n|-y]
 #   bin/zdt-arm restore-snapshot /path/on/the/admin/node [-n|-y]
 #
 # -n prints the whole plan and runs nothing. Without -y the arm shows the
@@ -58,6 +59,19 @@
 #                     target as refusing, so the arm asks for them by name
 #   ZDT_TOUCHED_TABLES  comma-separated tables to checksum after the lag
 #                     reaches zero (default catalog_product_entity)
+#   Arm 3 only — the crossing needs the lab's own breaking change, never a
+#   guess; a missing one stops arm3 by name:
+#   ZDT_RELEASE_ADDITIVE / ZDT_LABEL_ADDITIVE
+#                     the additive CONTROL release (adds only): old servers
+#                     with the flag on must serve without a guard message
+#   ZDT_RELEASE_BREAKING / ZDT_LABEL_BREAKING
+#                     the BREAKING release: renames or drops a column the old
+#                     code reads — the evidence leg
+#   ZDT_READ_PATH     a route that really reads that column or table (e.g. a
+#                     product page reading the column). The first old-server
+#                     failure across the breaking release must name it
+#   ZDT_SCHEMA_OBJECT the renamed or dropped column/table name; falsifier 3
+#                     greps the first old-server failure's body for it
 #   ZDT_RUN_DIR       where this run's evidence lands (default
 #                     local.d/zdt-arm/<run>-<arm>/ under the current dir)
 #   ZDT_FLEET_BIN     path of bin/zdt-fleet (default beside this script)
@@ -101,7 +115,7 @@ fi
 arm="$1"
 shift
 case "$arm" in
-    arm1|arm2)
+    arm1|arm2|arm3)
         script="$ARM_DIR/$arm.sh"
         # An arm name is a file name, never a path — as in bin/zdt-proof.
         [[ -f $script ]] || { echo "zdt-arm: no arm named $arm; see zdt-arm list" >&2; exit 2; }

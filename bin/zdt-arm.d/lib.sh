@@ -30,6 +30,8 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 ARM_NAME="$(basename "$0" .sh)"
 OUT="${ZDT_RUN_DIR:-local.d/zdt-arm/$RUN_ID-$ARM_NAME}"
 
+TRAFFIC_LOG="$OUT/traffic.log"
+
 DEFAULT_RATE=2
 DEFAULT_DURATION=120
 MAX_RATE=20
@@ -56,13 +58,19 @@ require_env() {
     # rather than aiming at a guess. Paths every lab here uses the same way
     # have defaults; addresses and credentials never do.
     local missing=() v
+    # Arm 3 places two releases (the additive control, then the breaking
+    # one), so it asks for those instead of the single ZDT_RELEASE_TARBALL /
+    # ZDT_LABEL_NEW pair the other arms place.
+    local release_vars=(ZDT_RELEASE_TARBALL ZDT_LABEL_NEW)
+    if [[ ${ARM_CROSSING:-0} == 1 ]]; then release_vars=(); fi
     for v in ZDT_WEB_HOSTS ZDT_NEW_NODE ZDT_ADMIN_NODE ZDT_LB_URL ZDT_NODE_URLS \
-             ZDT_RELEASE_TARBALL ZDT_LABEL_NEW ZDT_LABEL_OLD \
+             "${release_vars[@]}" ZDT_LABEL_OLD \
              ZDT_ENV_PHP ZDT_DB_HOST ZDT_DB_USER ZDT_DB_PASSWORD ZDT_DB_NAME; do
         [[ -n ${!v:-} ]] || missing+=("$v")
     done
     [[ ${#missing[@]} -eq 0 ]] \
         || die "set these first: ${missing[*]} (see bin/zdt-arm --help)"
+    if [[ ${ARM_CROSSING:-0} == 1 ]]; then crossing_require; fi
     IFS=',' read -r -a WEB_HOSTS <<< "$ZDT_WEB_HOSTS"
     [[ ${#WEB_HOSTS[@]} -ge 3 ]] \
         || die "issue #5 needs at least three web hosts; ZDT_WEB_HOSTS lists ${#WEB_HOSTS[@]}"
@@ -97,6 +105,21 @@ require_env() {
     FLEET_BIN="${ZDT_FLEET_BIN:-$ARM_DIR/../zdt-fleet}"
     [[ -x $FLEET_BIN ]] || die "no executable bin/zdt-fleet at $FLEET_BIN (set ZDT_FLEET_BIN)"
     SECRET_VALUES+=("$ZDT_DB_PASSWORD")
+}
+
+crossing_require() {
+    # Arm 3's own settings, refused by name when missing: the two releases it
+    # crosses (additive control, then breaking), the route that reads the
+    # schema object the breaking release renames or drops, and the object's
+    # name. Falsifier 3's PASS must name that object in the first failure, so
+    # a guessed one would poison the evidence: no default, refusal instead.
+    local missing_c=() cv
+    for cv in ZDT_RELEASE_ADDITIVE ZDT_LABEL_ADDITIVE ZDT_RELEASE_BREAKING \
+              ZDT_LABEL_BREAKING ZDT_READ_PATH ZDT_SCHEMA_OBJECT; do
+        [[ -n ${!cv:-} ]] || missing_c+=("$cv")
+    done
+    [[ ${#missing_c[@]} -eq 0 ]] \
+        || die "arm 3 needs these too: ${missing_c[*]} (see bin/zdt-arm --help)"
 }
 
 parse_common_flags() {
@@ -245,31 +268,35 @@ REMOTE
 }
 
 place_new_release() {
-    # One rsync and two links on the always-new node. The other nodes are
-    # never touched here: at least one stays on the old code throughout, as
-    # the issue requires.
+    # place_new_release [TARBALL LABEL] -- one rsync and two links on the
+    # always-new node; defaults to the single release the non-crossing arms
+    # place. The other nodes are never touched here: at least one stays on
+    # the old code throughout, as the issue requires.
+    local tarball="${1:-$ZDT_RELEASE_TARBALL}" label="${2:-$ZDT_LABEL_NEW}"
     if [[ $PLAN_ONLY == 1 ]]; then
-        printf 'PLAN  %s\n' "$ZDT_NEW_NODE: rsync $ZDT_RELEASE_TARBALL -> $ZDT_RELEASES_DIR/$ZDT_LABEL_NEW.tar.gz"
-        printf 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $ZDT_LABEL_NEW"
+        printf 'PLAN  %s\n' "$ZDT_NEW_NODE: rsync $tarball -> $ZDT_RELEASES_DIR/$label.tar.gz"
+        printf 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $label"
         return 0
     fi
-    [[ -f $ZDT_RELEASE_TARBALL ]] || die "no release tarball at $ZDT_RELEASE_TARBALL on the control machine"
-    rsync -a "$ZDT_RELEASE_TARBALL" "$ZDT_NEW_NODE:$ZDT_RELEASES_DIR/$ZDT_LABEL_NEW.tar.gz" \
+    [[ -f $tarball ]] || die "no release tarball at $tarball on the control machine"
+    rsync -a "$tarball" "$ZDT_NEW_NODE:$ZDT_RELEASES_DIR/$label.tar.gz" \
         || die "the rsync to $ZDT_NEW_NODE failed"
     WRITTEN=1
-    remote_script "$ZDT_NEW_NODE" "unpack and link release $ZDT_LABEL_NEW" >/dev/null <<REMOTE
+    remote_script "$ZDT_NEW_NODE" "unpack and link release $label" >/dev/null <<REMOTE
 set -euo pipefail
-mkdir -p "$ZDT_RELEASES_DIR/$ZDT_LABEL_NEW"
-tar -xzf "$ZDT_RELEASES_DIR/$ZDT_LABEL_NEW.tar.gz" -C "$ZDT_RELEASES_DIR/$ZDT_LABEL_NEW"
-ln -sfn "$ZDT_RELEASES_DIR/$ZDT_LABEL_NEW" "$ZDT_CURRENT_LINK"
+mkdir -p "$ZDT_RELEASES_DIR/$label"
+tar -xzf "$ZDT_RELEASES_DIR/$label.tar.gz" -C "$ZDT_RELEASES_DIR/$label"
+ln -sfn "$ZDT_RELEASES_DIR/$label" "$ZDT_CURRENT_LINK"
 REMOTE
 }
 
 link_old_release() {
-    # Between phases: put the always-new node back on the old release.
-    remote_script "$ZDT_NEW_NODE" "link release $ZDT_LABEL_OLD back in" >/dev/null <<REMOTE
+    # Between phases: put the always-new node back on the release named
+    # (default: the old one).
+    local label="${1:-$ZDT_LABEL_OLD}"
+    remote_script "$ZDT_NEW_NODE" "link release $label back in" >/dev/null <<REMOTE
 set -euo pipefail
-ln -sfn "$ZDT_RELEASES_DIR/$ZDT_LABEL_OLD" "$ZDT_CURRENT_LINK"
+ln -sfn "$ZDT_RELEASES_DIR/$label" "$ZDT_CURRENT_LINK"
 REMOTE
 }
 
@@ -422,6 +449,11 @@ _lag_of() { printf '%s' "$1" | sed -n 's/.*"seconds_behind": *\([0-9]*\).*/\1/p'
 # REST, GraphQL, health check).
 
 TRAFFIC_TYPES=(cms category product cart rest graphql health)
+# Arm 3's crossing adds a request that reads the named schema object, added
+# in arm_main (ARM_CROSSING is set after this file is sourced). The lab sets
+# ZDT_READ_PATH to a route that really reads it (the issue: "the results must
+# name the request that reads that column and show it was sent to an old
+# server"); with no crossing run, the mix stays as the issue's request types.
 
 traffic_path() {
     case "$1" in
@@ -433,6 +465,7 @@ traffic_path() {
         # Braces percent-encoded: curl's URL globbing would eat them.
         graphql) printf '/graphql?query=%%7BstoreConfig%%7Bstore_code%%7D%%7D' ;;
         health) printf '/health_check.php' ;;
+        read) printf '%s' "$ZDT_READ_PATH" ;;
     esac
 }
 
@@ -442,9 +475,9 @@ traffic_run() {
     # stops at its end time and every request carries curl --max-time, so a
     # stuck request costs at most 25s, not the run.
     mkdir -p "$OUT"
-    # Append, never truncate: the two phases of one run share the run's
-    # traffic.log, and the run directory is fresh per RUN_ID anyway.
-    touch "$OUT/traffic.log"
+    # Append, never truncate: a phase's log belongs to that phase alone
+    # (TRAFFIC_LOG), and the run directory is fresh per RUN_ID anyway.
+    touch "$TRAFFIC_LOG"
     local targets=("${NODE_URLS[@]}" "$ZDT_LB_URL")
     local pids=() t
     for t in "${targets[@]}"; do
@@ -453,8 +486,8 @@ traffic_run() {
     done
     wait "${pids[@]}" 2>/dev/null || true
     local n
-    n=$(grep -c . "$OUT/traffic.log" 2>/dev/null || echo 0)
-    echo "traffic: $n requests logged to $OUT/traffic.log" >&2
+    n=$(grep -c . "$TRAFFIC_LOG" 2>/dev/null || echo 0)
+    echo "traffic: $n requests logged to $TRAFFIC_LOG" >&2
 }
 
 traffic_one_target() {
@@ -472,17 +505,43 @@ traffic_one_target() {
     done
 }
 
+save_evidence() {
+    # Keep the response body as evidence: falsifier 3 must check that the
+    # first failure on an old server names the schema object that changed,
+    # and the log line alone cannot show that. Names carry time, pid, target,
+    # type and status so nothing overwrites; a body without the words stays
+    # there too — its absence from the grep is itself evidence.
+    local target="$1" type="$2" status="$3" body="$4" name
+    [[ -n ${EVIDENCE_DIR:-} ]] || return 0
+    mkdir -p "$EVIDENCE_DIR"
+    # Trailing slashes stripped: "http://node2.example/" would otherwise make
+    # the copy destination end in /, where cp silently goes wrong.
+    name="${target#http://}"; name="${name%/}"
+    cp "$body" "$EVIDENCE_DIR/${type}-${status}-$(date +%s%N)-${BASHPID:-$$}-${name}" 2>/dev/null || true
+}
+
 send_one() {
-    # One request, one log line. The body sample is guard-checked then
-    # dropped; the line is the evidence, the samples are not.
+    # One request, one log line, through TRAFFIC_LOG (one log per phase, so a
+    # later verdict never counts the earlier phase's lines). A body that
+    # tripped the guard is copied to $EVIDENCE_DIR when that is set: falsifier
+    # 3 needs the first failure's own words, to check they name the schema
+    # object. Otherwise the body sample is guard-checked then dropped.
     local target="$1" type="$2" path="$3"
     local body status guard=0
     body=$(mktemp "${TMPDIR:-/tmp}/zdt-arm-body.XXXXXX")
     status=$(curl -s -o "$body" -w '%{http_code}' --max-time 25 "$target$path" 2>/dev/null) || status=000
     if [[ -n ${ZDT_GUARD_PATTERN:-} ]]; then
-        if grep -Eq "$ZDT_GUARD_PATTERN" "$body" 2>/dev/null; then guard=1; fi
+        if grep -Eq "$ZDT_GUARD_PATTERN" "$body" 2>/dev/null; then
+            guard=1
+            save_evidence "$target" "$type" "$status" "$body"
+        fi
     fi
-    printf '%s %s %s %s %s\n' "$(date +%s)" "${target#http://}" "$type" "${status:-000}" "$guard" >> "$OUT/traffic.log"
+    # Falsifier 3 reads a failed read request's own words even when no guard
+    # pattern was set to catch it: a schema error is not a guard message.
+    if [[ $type == read && $status != 200 ]]; then
+        save_evidence "$target" "$type" "$status" "$body"
+    fi
+    printf '%s %s %s %s %s\n' "$(date +%s)" "${target#http://}" "$type" "${status:-000}" "$guard" >> "$TRAFFIC_LOG"
     rm -f "$body"
 }
 
@@ -494,23 +553,24 @@ traffic_verdicts() {
     # a guard message. A 4xx is a fact for the log, not a refusal — a route
     # that goes missing mid-migration still shows there.
     local refused t bad=0
-    refused=$(awk '$3 != "health" && ($4 ~ /^5/ || $4 == "000" || $5 == 1)' "$OUT/traffic.log" | awk '{print $2}' | sort -u)
+    refused=$(awk '$3 != "health" && ($4 ~ /^5/ || $4 == "000" || $5 == 1)' "$TRAFFIC_LOG" | awk '{print $2}' | sort -u)
     for t in $refused; do
-        if awk -v t="$t" '$3 == "health" && $2 == t && $4 != "200"' "$OUT/traffic.log" | grep -q .; then
+        if awk -v t="$t" '$3 == "health" && $2 == t && $4 != "200"' "$TRAFFIC_LOG" | grep -q .; then
             falsifier FAIL "falsifier 5: $t refused requests and its health_check.php answered non-200"
             bad=1
         fi
     done
     [[ $bad -eq 0 ]] && falsifier PASS "falsifier 5: health_check.php answered 200 on every target that refused (targets that refused: ${refused:-none})"
     local guarded
-    guarded=$(awk '$5 == 1' "$OUT/traffic.log" | wc -l | tr -d ' ')
-    echo "traffic: $guarded responses matched ZDT_GUARD_PATTERN (see $OUT/traffic.log)"
+    guarded=$(awk '$5 == 1' "$TRAFFIC_LOG" | wc -l | tr -d ' ')
+    echo "traffic: $guarded responses matched ZDT_GUARD_PATTERN (see $TRAFFIC_LOG)"
 }
 
 # ------------------------------------------------------------------ the run
 
 run_phase() {
     local label="$1" with_blue_green="$2"
+    TRAFFIC_LOG="$OUT/traffic-$label.log"
     echo
     echo "== phase: $label =="
     local h pfx
@@ -615,9 +675,186 @@ plan_all() {
     printf 'PLAN  control: restore env.php from the dated backups on every node\n'
 }
 
+# --------------------------------------------------- arm 3: crossing releases
+
+crossing_old_targets() {
+    # The nodes that stay on the old code: every node URL but the new node's.
+    # Falsifier 3 is judged on these alone — the new node is expected to
+    # match the schema after the upgrade.
+    local i new_url=""
+    for i in "${!WEB_HOSTS[@]}"; do
+        [[ ${WEB_HOSTS[$i]} == "$ZDT_NEW_NODE" ]] && new_url="${NODE_URLS[$i]#http://}"
+    done
+    local t
+    for t in "${NODE_URLS[@]}"; do
+        [[ ${t#http://} == "$new_url" ]] && continue
+        printf '%s\n' "${t#http://}"
+    done
+}
+
+crossing_phase() {
+    # One crossing: old code serving while this release's migration runs
+    # against the primary, with the flag ON on the old servers. The label
+    # says which release (additive control / breaking evidence).
+    local label="$1" tarball="$2" rel="$3"
+    TRAFFIC_LOG="$OUT/traffic-$label.log"
+    EVIDENCE_DIR="$OUT/evidence-$label"
+    echo
+    echo "== crossing: $label ($rel) =="
+    local h pfx
+    for h in "${WEB_HOSTS[@]}"; do
+        pfx="old"
+        [[ $h == "$ZDT_NEW_NODE" ]] && pfx="$rel"
+        env_set "$h" cache.frontend.default.id_prefix "\"zdt-$pfx\"" \
+            || die "the env.php edit on $h failed before the crossing; the arm stops here"
+        env_set "$h" cache.frontend.page_cache.id_prefix "\"zdt-$pfx\"" \
+            || die "the env.php edit on $h failed before the crossing; the arm stops here"
+        if [[ $h != "$ZDT_NEW_NODE" ]]; then
+            # Arm 3 is defined with the flag ON: this is where falsifier 3
+            # tests the claim that it lets old code serve until the schema
+            # breaks.
+            env_set "$h" deployment.blue_green.enabled 'true' \
+                || die "the env.php edit on $h failed before the crossing; the arm stops here"
+        fi
+    done
+    [[ $PLAN_ONLY == 1 ]] && return 0
+
+    snapshot_gate
+    traffic_run &
+    local traffic_pid=$!
+    if ! place_new_release "$tarball" "$rel"; then
+        kill "$traffic_pid" 2>/dev/null || true
+        die "the release did not land on $ZDT_NEW_NODE; the crossing did not happen"
+    fi
+    if ! run_setup_upgrade; then
+        kill "$traffic_pid" 2>/dev/null || true
+        die "setup:upgrade failed on $ZDT_ADMIN_NODE; the crossing did not happen"
+    fi
+    wait "$traffic_pid" 2>/dev/null || true
+    traffic_verdicts
+    replica_after
+    if [[ $label == breaking-* ]]; then
+        falsifier3_breaking
+    else
+        falsifier3_control
+    fi
+    restore_env_files
+}
+
+falsifier3_control() {
+    # Control leg: across the ADDITIVE release, old servers with the flag on
+    # must serve pages, REST and GraphQL without a guard message. Per the
+    # issue, passing this alone is not evidence of anything — the breaking
+    # leg below is the evidence — but a guard message here disproves the
+    # flag's claim on the cheapest possible release.
+    local old_t guarded=0 t
+    old_t=$(crossing_old_targets)
+    for t in $old_t; do
+        local n
+        n=$(awk -v t="$t" '$2 == t && $3 != "health" && $5 == 1' "$TRAFFIC_LOG" | wc -l | tr -d ' ')
+        guarded=$((guarded + n))
+    done
+    if [[ $guarded -gt 0 ]]; then
+        falsifier FAIL "falsifier 3 (control): $guarded guarded responses on old servers across the additive release with the flag on"
+        return 1
+    fi
+    falsifier PASS "falsifier 3 (control): no guard message on any old server across the additive release (a control; not the evidence)"
+}
+
+falsifier3_breaking() {
+    # Evidence leg: across the BREAKING release, the first failure on an old
+    # server must name $ZDT_SCHEMA_OBJECT, and the read path must not sail
+    # through. Both come from this phase's own log and saved bodies.
+    local old_t read_failed=0 served_ok=0 t
+    old_t=$(crossing_old_targets)
+    for t in $old_t; do
+        local n m
+        n=$(awk -v t="$t" '$2 == t && $3 == "read" && ($4 ~ /^[45]/ || $4 == "000" || $5 == 1)' "$TRAFFIC_LOG" | wc -l | tr -d ' ')
+        m=$(awk -v t="$t" '$2 == t && $3 == "read" && $4 == "200"' "$TRAFFIC_LOG" | wc -l | tr -d ' ')
+        read_failed=$((read_failed + n))
+        served_ok=$((served_ok + m))
+    done
+    local guarded=0
+    guarded=$(awk 'BEGIN{c=0} $3 != "health" && $5 == 1 {c++} END{print c}' "$TRAFFIC_LOG")
+    if [[ $guarded -gt 0 ]]; then
+        falsifier FAIL "falsifier 3: $guarded guarded responses on old servers across the breaking release with the flag on — the flag did not silence the guard"
+        return 1
+    fi
+    if [[ $read_failed -eq 0 ]]; then
+        falsifier FAIL "falsifier 3: no old server failed the read path across the breaking release (old read requests answered 200: $served_ok) — either the release does not break what $ZDT_READ_PATH reads, or old servers served a schema they do not match"
+        return 1
+    fi
+    # The first failure's own words must name the schema object. Names carry
+    # the epoch in nanoseconds, so the chronological first is a numeric sort
+    # on field 4.
+    local first hit=""
+    first=$(find "$EVIDENCE_DIR" -maxdepth 1 -type f -name 'read-*' -printf '%f\n' 2>/dev/null | sort -t- -k3,3n | head -1)
+    if [[ -n $first ]]; then
+        if grep -qi "$ZDT_SCHEMA_OBJECT" "$EVIDENCE_DIR/$first"; then
+            hit="$EVIDENCE_DIR/$first"
+        fi
+    fi
+    if [[ -z $hit ]]; then
+        falsifier FAIL "falsifier 3: the first old-server failure does not name $ZDT_SCHEMA_OBJECT (see $EVIDENCE_DIR/${first:-no saved body})"
+        return 1
+    fi
+    falsifier PASS "falsifier 3: across the breaking release the first old-server failure names $ZDT_SCHEMA_OBJECT ($hit; the read path is $ZDT_READ_PATH, sent to the old nodes $old_t)"
+}
+
+run_crossing() {
+    # Arm 3's shape: control first, then the evidence, with the database
+    # restored between them so the breaking crossing starts from the same
+    # state. One phase each; the flag is on the old servers throughout.
+    plan_all_crossing
+    [[ $PLAN_ONLY == 1 ]] && return 0
+    confirm_plan
+    mkdir -p "$OUT"
+    replica_gate
+    crossing_phase "additive-control" "$ZDT_RELEASE_ADDITIVE" "$ZDT_LABEL_ADDITIVE"
+    restore_snapshot "$SNAPSHOT"
+    link_old_release || die "could not relink $ZDT_NEW_NODE to $ZDT_LABEL_OLD; check that node by hand before re-running the arm"
+    crossing_phase "breaking-evidence" "$ZDT_RELEASE_BREAKING" "$ZDT_LABEL_BREAKING"
+    echo
+    echo "== summary: $PASSES pass, $FAILS fail =="
+    print_restores
+    [[ $FAILS -eq 0 ]] || exit 1
+}
+
+plan_phase_crossing() {
+    local label="$1" tarball="$2" rel="$3" h pfx
+    printf 'PLAN  == crossing: %s (%s) ==\n' "$label" "$rel"
+    for h in "${WEB_HOSTS[@]}"; do
+        printf 'PLAN  %s: cp -L --preserve=mode,ownership,timestamps %s %s.bak-%s\n' "$h" "$ZDT_ENV_PHP" "$ZDT_ENV_PHP" "$RUN_ID"
+        pfx="old"
+        [[ $h == "$ZDT_NEW_NODE" ]] && pfx="$rel"
+        printf 'PLAN  %s\n' "$h: set cache prefixes (id_prefix) to zdt-$pfx and deployment.blue_green.enabled to true (old nodes only) in $ZDT_ENV_PHP"
+    done
+    printf 'PLAN  %s\n' "$ZDT_NEW_NODE: rsync $tarball -> $ZDT_RELEASES_DIR/$rel.tar.gz"
+    printf 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $rel"
+    snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
+    printf 'PLAN  control: traffic %ss at %s/s per target, including the read path %s (%s web nodes + the load balancer)\n' "$DURATION" "$RATE" "$ZDT_READ_PATH" "${#WEB_HOSTS[@]}"
+    printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
+    printf 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1); saved failure bodies under %s/evidence-%s/ (falsifier 3)\n' "$OUT" "$label"
+}
+
+plan_all_crossing() {
+    echo "== plan (nothing runs) =="
+    printf 'PLAN  control: bin/zdt-fleet replica-check (the gate; it stops a run whose replica is not live)\n'
+    plan_phase_crossing "additive-control" "$ZDT_RELEASE_ADDITIVE" "$ZDT_LABEL_ADDITIVE"
+    printf 'PLAN  %s\n' "$(redact "$ZDT_ADMIN_NODE: restore database $ZDT_DB_NAME from $ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz (password $ZDT_DB_PASSWORD)")"
+    printf 'PLAN  %s\n' "$ZDT_NEW_NODE: link release $ZDT_LABEL_OLD back in"
+    plan_phase_crossing "breaking-evidence" "$ZDT_RELEASE_BREAKING" "$ZDT_LABEL_BREAKING"
+    printf 'PLAN  control: restore env.php from the dated backups on every node\n'
+}
+
 arm_main() {
     require_env
     parse_common_flags "$@"
     trap 'restore_env_files' EXIT
+    if [[ ${ARM_CROSSING:-0} == 1 ]]; then
+        TRAFFIC_TYPES+=(read)
+        run_crossing
+        return
+    fi
     run_arms "${ARM_BLUE_GREEN:-0}"
 }

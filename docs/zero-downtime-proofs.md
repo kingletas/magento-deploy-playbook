@@ -515,7 +515,7 @@ built on the interface the maintainer approved: one command per step from the
 control machine over ssh, the arms driving the migration end to end on the
 admin node, a built-in traffic generator, and the cache prefixes and the
 blue/green flag set and restored by the scripts themselves. Arms 1 and 2 are
-here; arms 3 and 4 come in their own pull requests.
+here; arms 3 and 4 come in their own pull requests (arm 3 is in this build).
 
 ```bash
 bin/zdt-arm list
@@ -529,6 +529,9 @@ bin/zdt-arm arm1 -y     # the same, without asking (for an operator who means it
   with traffic on every server throughout.
 - **arm2** — the same run with `deployment/blue_green/enabled` set in the
   `env.php` of every server that stays on the old code.
+- **arm3** — two code versions against one database with the flag on, across
+  a release that changes the schema: first the additive **control**, then the
+  breaking **evidence** (see *Arm 3* below).
 - **restore-snapshot** — put a snapshot back on the primary. Destructive, so
   it plans and asks like the arms.
 
@@ -564,6 +567,35 @@ bin/zdt-arm arm1 -y     # the same, without asking (for an operator who means it
   a replica that is not live means the run is reported as NOT RUN, missing
   condition 1, and no node is touched.
 
+### Arm 3: the crossing, and why its variables have no defaults
+
+Arm 3 is the arm the issue turns on, and its two legs are not symmetric. The
+**additive control** (`ZDT_RELEASE_ADDITIVE`) only adds: old servers with the
+flag on must serve pages, REST and GraphQL without a guard message. Per the
+issue, passing it alone proves nothing — a release with nothing to reconcile
+passes by construction — but a guard message here disproves the flag's claim
+on the cheapest possible release. The **breaking evidence**
+(`ZDT_RELEASE_BREAKING`) renames or drops a column the old code reads. Old
+servers must fail across it, the first failure's own words must name the
+changed object, and the read path must not sail through with a 200: an old
+server answering 200 across a schema it does not match fails the falsifier,
+not the run's silence passing it.
+
+The database is restored between the two legs (the same snapshot mechanism as
+arms 1 and 2), so the breaking leg starts from exactly the state the control
+started from. Response bodies of failing read requests and guard matches are
+saved under the run directory (`evidence-<leg>/`), named with the time so the
+chronologically first failure is unambiguous — the log line alone cannot show
+that the failure *names the column*.
+
+`ZDT_READ_PATH` and `ZDT_SCHEMA_OBJECT` have no defaults, and neither have
+the two releases: the breaking change and the route that reads it belong to
+the lab, and a guessed one would poison the evidence chain — the issue says
+the results "must name the request that reads that column and show it was
+sent to an old server". A missing one stops arm 3 by name (exit 2, nothing
+runs). Falsifier 2 on these editions stays a control reported in the results
+document: nothing on Open Source or Mage-OS reads the replica.
+
 ### Variables
 
 The hosts have no defaults: a missing one stops the arm by name rather than
@@ -586,6 +618,10 @@ arguments, so no password lands in a shell history or a transcript.
 | `ZDT_GUARD_PATTERN` | extended regex; a response body matching it is logged as a guard message |
 | `ZDT_CATEGORY_PATH` / `ZDT_PRODUCT_PATH` | paths of a real category and a real product page (e.g. `/mens.html`, `/products/gt.html`). No default: a guessed path a stock store does not serve would record every target as refusing |
 | `ZDT_TOUCHED_TABLES` | comma-separated tables to checksum once the lag reaches zero (default `catalog_product_entity`) |
+| `ZDT_RELEASE_ADDITIVE` / `ZDT_LABEL_ADDITIVE` | arm 3 only: the additive control release (adds only) |
+| `ZDT_RELEASE_BREAKING` / `ZDT_LABEL_BREAKING` | arm 3 only: the breaking release — renames or drops a column the old code reads |
+| `ZDT_READ_PATH` | arm 3 only: a route that really reads that column or table |
+| `ZDT_SCHEMA_OBJECT` | arm 3 only: the renamed or dropped name; the first old-server failure's body must contain it |
 | `ZDT_RUN_DIR` | where the run's evidence lands (default `local.d/zdt-arm/<run>-<arm>/`) |
 | `ZDT_FLEET_BIN` | path of `bin/zdt-fleet` (default beside `bin/zdt-arm`) |
 
@@ -594,10 +630,11 @@ The replica connection (`ZDT_PRIMARY_*` / `ZDT_REPLICA_*`) belongs to
 
 ### What the run leaves behind
 
-The transcript (every `PLAN`/`RUN` line, secret-free), `traffic.log` — one
-line per request: epoch second, target, request type, status, guard flag —
-`replica-before.json` and `replica-after.json` from the gate, and
-`checksums.txt`. `PASS`/`FAIL` lines for falsifier 1 (the replica survives
+The transcript (every `PLAN`/`RUN` line, secret-free), `traffic-<phase>.log`
+— one per phase, so no verdict ever counts another phase's lines; each line
+one request: epoch second, target, request type, status, guard flag —
+`replica-before.json` and `replica-after.json` from the gate, , `evidence-<leg>/` (arm 3: the saved failure bodies),
+and `checksums.txt`. `PASS`/`FAIL` lines for falsifier 1 (the replica survives
 the migration: live after it, lag back to zero within five minutes, the
 touched tables' checksums matching once the lag is zero) and falsifier 5
 (the health check never takes a refusing server out of rotation). The guard

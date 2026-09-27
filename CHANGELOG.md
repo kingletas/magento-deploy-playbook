@@ -148,11 +148,18 @@ changed, because there's nothing before it.
   migration with the blue/green flag off — one shared cache prefix, then a
   prefix per release, traffic on every server; `arm2` runs it again with the
   flag on the old servers; `restore-snapshot` puts a database snapshot back.
-  `-n` prints the whole plan and runs nothing; without `-y` the arm asks
-  before its first remote write. The snapshot comes before `setup:upgrade`
-  and stops the run when it fails, every `env.php` is backed up with its
-  restore command printed, the traffic generator has a hard rate and
-  duration cap, and secrets never reach the transcript. Settings come from
+  `-n` prints the whole plan — both cache-prefix phases and the snapshot
+  restore and relink between them — and runs nothing; without `-y` the arm
+  asks about the plan it just printed, never one it did not. The snapshot
+  comes before `setup:upgrade` and stops the run when it fails, and so does
+  any failed release placement, upgrade or `env.php` edit — a step that
+  fails stops the arm instead of letting it report a migration that never
+  happened. Every `env.php` is backed up with its contents (the symlink to
+  the shared copy is followed, so the backup is the original bytes) and its
+  restore command printed. The traffic generator has a hard rate and
+  duration cap, asks only routes a stock store serves — name your category
+  and product pages in `ZDT_CATEGORY_PATH` / `ZDT_PRODUCT_PATH` — and reads
+  a refusal only from a 5xx, no answer, or a guard match. Settings come from
   `ZDT_*` environment variables. See
   [docs/zero-downtime-proofs.md](docs/zero-downtime-proofs.md).
 - `bin/zdt-fleet`, the checks the multi-database runs stand on. `replica-check`

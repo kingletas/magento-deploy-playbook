@@ -546,7 +546,13 @@ bin/zdt-arm arm1 -y     # the same, without asking (for an operator who means it
   cut.
 - The traffic generator has a default rate of 2 requests a second per target
   and a hard refusal above 20, and a default duration of 120 s with a hard
-  maximum of 600: the lab machine runs other things too.
+  maximum of 600: the lab machine runs other things too. The mix asks routes a
+  stock store answers anonymously (home, `/checkout/cart/`,
+  `/rest/V1/directory/currency`, a real GraphQL query, `pub/health_check.php`)
+  plus the category and product pages you name in `ZDT_CATEGORY_PATH` and
+  `ZDT_PRODUCT_PATH`. A target counts as refusing only on a 5xx, no answer at
+  all, or a guard-pattern match; a 4xx is a fact in `traffic.log`, not a
+  refusal — a route that goes missing mid-migration still shows there.
 - Every remote command is echoed before it runs, and any secret in it is
   echoed as `***`. Commands that carry the database password run it embedded
   in a script piped over ssh stdin, so it is in no argv, no `ps`, no shell
@@ -568,7 +574,7 @@ arguments, so no password lands in a shell history or a transcript.
 |---|---|
 | `ZDT_WEB_HOSTS` | comma-separated ssh names of the web nodes (at least three) |
 | `ZDT_NEW_NODE` | the always-new node; one of `ZDT_WEB_HOSTS` |
-| `ZDT_ADMIN_NODE` | the node that runs Magento's commands and the snapshot |
+| `ZDT_ADMIN_NODE` | the node that runs Magento's commands and the snapshot; must be `ZDT_NEW_NODE` — the migration runs from `current`, so a split between the two is refused, naming both |
 | `ZDT_LB_URL` | the load balancer's base URL |
 | `ZDT_NODE_URLS` | comma-separated per-node base URLs, same order as `ZDT_WEB_HOSTS`; traffic goes to each node directly, so a refusing node is attributed to that node |
 | `ZDT_RELEASE_TARBALL` | the new release, a path on the control machine |
@@ -578,6 +584,7 @@ arguments, so no password lands in a shell history or a transcript.
 | `ZDT_SNAPSHOT_DIR` | where the admin node keeps snapshots (default `/var/www/magento/zdt-snapshots`) |
 | `ZDT_RATE` / `ZDT_DURATION` | traffic per target: requests/s (default 2, max 20) and seconds (default 120, max 600) |
 | `ZDT_GUARD_PATTERN` | extended regex; a response body matching it is logged as a guard message |
+| `ZDT_CATEGORY_PATH` / `ZDT_PRODUCT_PATH` | paths of a real category and a real product page (e.g. `/mens.html`, `/products/gt.html`). No default: a guessed path a stock store does not serve would record every target as refusing |
 | `ZDT_TOUCHED_TABLES` | comma-separated tables to checksum once the lag reaches zero (default `catalog_product_entity`) |
 | `ZDT_RUN_DIR` | where the run's evidence lands (default `local.d/zdt-arm/<run>-<arm>/`) |
 | `ZDT_FLEET_BIN` | path of `bin/zdt-fleet` (default beside `bin/zdt-arm`) |
@@ -606,7 +613,11 @@ did not happen.
 
 The tests (`tests/test_zdt_arm.py`, run by `make check`) fake `ssh`, `curl`
 and `rsync` beside the fake `mysql` client, so no lab and no live server is
-touched: they show the plan runs nothing, a declined prompt runs nothing, a
-failed snapshot stops before `setup:upgrade`, the backup precedes every
-edit, the printed restores are right, the rate cap and the duration stop
-hold, and the transcript never carries a password.
+touched: they show the plan runs nothing and names both phases and the
+restore and relink between them, a declined prompt — shown the plan it asks
+about — runs nothing, a failed snapshot, a failed release placement, a failed
+`setup:upgrade` or a failed `env.php` edit stops the arm rather than letting
+it report success, the backup precedes every edit and survives the
+`env.php` symlink, the printed restores are right, the rate cap and the
+duration stop hold, a 404 on one route is not read as a refusing target, and
+the transcript never carries a password.

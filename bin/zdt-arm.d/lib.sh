@@ -970,7 +970,11 @@ plan_all_crossing() {
 # verdict compares the two legs on totals: failed requests, and seconds in
 # which something failed (the outage's length).
 
-outage_is_fail() { awk '($4 ~ /^[45]/ || $4 == "000" || $5 == 1)'; }
+# One rule, used by the verdict, the TOTAL line and the per-second table: a
+# request failed when it was REFUSED — 5xx, no answer at all, or a guard
+# match. Health is excluded (falsifier 5 judges it) and a 4xx is a fact for
+# the log, not a refusal, exactly as traffic_verdicts defines it.
+outage_is_fail() { awk '$3 != "health" && ($4 ~ /^5/ || $4 == "000" || $5 == 1)'; }
 
 summarize_outage() {
     # summarize_outage LOG REPORT LABEL — writes REPORT: per second and
@@ -985,7 +989,7 @@ summarize_outage() {
         awk '
             $3 != "health" {
                 total[$1 " " $3]++
-                if ($4 ~ /^[45]/ || $4 == "000" || $5 == 1) fail[$1 " " $3]++
+                if ($4 ~ /^5/ || $4 == "000" || $5 == 1) fail[$1 " " $3]++
             }
             END { for (k in total) printf "%s %d/%d\n", k, fail[k], total[k] }
         ' "$log" | sort -n

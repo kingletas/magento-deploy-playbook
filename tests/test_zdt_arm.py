@@ -1042,6 +1042,34 @@ class ZdtArmTest(unittest.TestCase):
         self.assertIn("node3.example", seen)
         self.assertEqual(result.returncode in (0, 1), True, result.stdout)
 
+    def test_arm4_summarise_counts_only_refusals(self) -> None:
+        # Blocker 2 (Ed's unit test): one rule for the table, the TOTAL and
+        # the verdict — health excluded, 4xx not a refusal. Hand-written log:
+        # one health 503, one cart 404, one cart 503 => exactly one failure
+        # in one second, and the report's TOTAL agrees with its own rows.
+        log = self.dir / "log.txt"
+        log.write_text(
+            "100 node1 health 503 0\n"
+            "100 node2 cart 404 0\n"
+            "101 node2 cart 503 0\n"
+        )
+        report = self.dir / "report.txt"
+        snippet = (
+            'ARM_DIR="' + str(ROOT / "bin" / "zdt-arm.d") + '"; '
+            'source "$ARM_DIR/lib.sh" 2>/dev/null || true; '
+            f'summarize_outage "{log}" "{report}" test'
+        )
+        ran = subprocess.run(
+            ["bash", "-c", snippet], capture_output=True, text=True, timeout=30, check=False
+        )
+        self.assertIn("failed=1 seconds=1", ran.stdout)
+        lines = report.read_text().splitlines()
+        self.assertEqual(lines[-1], "TOTAL 1")
+        # The per-type rows use the same rule: only the 503 is a failure...
+        self.assertIn("101 cart 1/1", lines)
+        # ...the 404 is a fact for the log, not a refusal.
+        self.assertIn("100 cart 0/1", lines)
+
     def test_arm4_lists_and_help(self) -> None:
         listing = self.run_arm("list")
         self.assertIn("arm4", listing.stdout)

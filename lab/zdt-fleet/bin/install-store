@@ -152,6 +152,13 @@ tar -xzf "$ZDT_RELEASES_DIR/$ZDT_LABEL_OLD.tar.gz" -C "$ZDT_RELEASES_DIR/$ZDT_LA
 ln -sfn "$ZDT_RELEASES_DIR/$ZDT_LABEL_OLD" "$ZDT_CURRENT_LINK"
 REMOTE
 
+# A source tree can carry modules the lab is not meant to run; they stay in
+# the code but are installed disabled, so the store is stock.
+DISABLE_ARG=""
+if [[ -n ${ZDT_DISABLE_MODULES:-} ]]; then
+    DISABLE_ARG="--disable-modules=$ZDT_DISABLE_MODULES"
+fi
+
 remote_script "$ZDT_ADMIN_NODE" "setup:install (db password and admin password redacted here; see this script's header for the one window neither can be hidden in)" <<REMOTE
 set -euo pipefail
 cd "$ZDT_CURRENT_LINK"
@@ -162,6 +169,7 @@ php bin/magento setup:install \\
     --db-user='$ZDT_DB_USER' \\
     --db-password='$DB_PASSWORD' \\
     --backend-frontname=admin \\
+    $DISABLE_ARG \\
     --search-engine=opensearch \\
     --opensearch-host='$ZDT_SEARCH_HOST' \\
     --opensearch-port='$ZDT_SEARCH_PORT' \\

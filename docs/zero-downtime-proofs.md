@@ -679,7 +679,11 @@ carry a secret goes through `redact()` first, and the `-n` plan leaves no file
 at all) — `platform.json` (the facts the results document has to open with:
 Magento edition and version, PHP, database server and version, replication
 mode, the number of web servers; a fact the lab does not answer is `null`
-with the reason in `not_recorded`, never a guess), `traffic-<phase>.log`
+with the reason in `not_recorded`, never a guess — including the edition,
+which is named only when the release's `composer.json` lists exactly one
+edition package: with two, the run cannot say which platform the lab has, so
+`edition_packages` keeps the raw list and the reason says the list was
+ambiguous)`, `traffic-<phase>.log`
 — one per phase, so no verdict ever counts another phase's lines; each line
 one request: epoch second, target, request type, status, guard flag —
 `replica-before.json` and `replica-after.json` from the gate, `evidence-<leg>/` (arm 3: the saved failure bodies),
@@ -714,5 +718,6 @@ tests too: a run leaves `transcript.log` holding the `RUN` lines, the
 verdicts and the printed restore commands, a plan (`-n`) and a declined plan
 leave none, a failed run's transcript keeps the `FAIL` and the step that
 died, `platform.json` carries the lab's answers with `null` and a reason when
-one is unreadable, and the platform probe reaches no `ssh` argv with the
+one is unreadable (and `null` with an ambiguity reason when the release names
+two edition packages), and the platform probe reaches no `ssh` argv with the
 password.

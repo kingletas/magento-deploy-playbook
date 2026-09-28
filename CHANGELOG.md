@@ -158,7 +158,10 @@ changed, because there's nothing before it.
   with, which nothing recorded before, so its header came from memory. A fact
   the lab does not answer is `null`, with the reason in `not_recorded` and a
   `WARN` in the transcript: the run goes on and the document says what could
-  not be read rather than a guess.
+  not be read rather than a guess. An edition is named only when the release's
+  `composer.json` lists exactly one edition package — with two, the run cannot
+  say which platform the lab has, so the fact stays `null` and the raw list
+  and the reason are recorded instead of one of the two labels.
 - `bin/zdt-arm arm4`, the outage arm of issue #5: the breaking release
   (`ZDT_RELEASE_BREAKING` / `ZDT_LABEL_BREAKING`) rolls out twice — once
   with no maintenance mode, old servers serving while the migration runs,

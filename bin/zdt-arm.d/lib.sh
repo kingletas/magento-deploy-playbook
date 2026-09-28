@@ -170,14 +170,25 @@ REMOTE
     pkgs=$(printf '%s\n' "$probe" | sed -n 's/^edition_packages=//p' | head -1)
     cli=$(printf '%s\n' "$probe" | sed -n 's/^magento_cli=//p' | head -1)
     dbserver=$(printf '%s\n' "$probe" | sed -n 's/^db_server=//p' | head -1)
-    # The edition, named only when the packages identify exactly one. A release
-    # carrying two, or none, records null and the raw list — a label guessed
-    # here would put a platform in the document that the lab does not have.
-    case "$pkgs" in
-        *magento/product-community-edition*|*mage-os/product-community-edition*)
-            edition="Open Source"; [[ $pkgs == *mage-os* ]] && edition="Mage-OS" ;;
-        *magento/product-enterprise-edition*) edition="Commerce" ;;
-    esac
+    # The edition, named only when the packages identify exactly ONE. A release
+    # whose composer.json names two edition packages does not say which platform
+    # the lab runs, so it records null and the raw list, and the reason names the
+    # ambiguity — a label guessed here would put a platform in the document that
+    # the lab does not have.
+    local pkg_list=()
+    if [[ -n $pkgs ]]; then
+        IFS=',' read -r -a pkg_list <<< "$pkgs"
+    fi
+    edition_reason=""
+    if [[ ${#pkg_list[@]} -eq 1 ]]; then
+        case "${pkg_list[0]}" in
+            magento/product-community-edition) edition="Open Source" ;;
+            mage-os/product-community-edition) edition="Mage-OS" ;;
+            magento/product-enterprise-edition) edition="Commerce" ;;
+        esac
+    elif [[ ${#pkg_list[@]} -gt 1 ]]; then
+        edition_reason="the release's composer.json names more than one edition package ($pkgs)"
+    fi
     # The CLI line is "Magento CLI 2.4.8" (Mage-OS names itself likewise); its
     # last field is the version. Both are recorded, so the document can quote
     # the line it came from.
@@ -190,7 +201,13 @@ REMOTE
     [[ -n $replay ]] || reason="${reason:+$reason; }replica-before.json carries no binlog_format"
     # A named-but-ambiguous list says something different from "no known
     # package at all", so the reason carries the ambiguity, not the default.
-    [[ -n $edition ]] || reason="${reason:+$reason; }the release's composer.json did not name a known edition package"
+    if [[ -z $edition ]]; then
+        if [[ -n $edition_reason ]]; then
+            reason="${reason:+$reason; }$edition_reason"
+        else
+            reason="${reason:+$reason; }the release's composer.json did not name a known edition package"
+        fi
+    fi
 
     {
         printf '{\n'

@@ -1351,6 +1351,36 @@ class ZdtArmTest(unittest.TestCase):
         facts = json.loads((self.dir / "run" / "platform.json").read_text())
         self.assertEqual(facts["magento_edition"], "Open Source")
 
+    def test_platform_facts_identify_commerce(self) -> None:
+        # The Commerce package on its own names the edition too: a licence the
+        # lab holds is still a platform the document has to state.
+        result = self.run_arm(
+            "arm1",
+            "-y",
+            FAKE_PLATFORM_MAGENTO="Magento CLI 2.4.8",
+            FAKE_PLATFORM_PACKAGES="magento/product-enterprise-edition",
+        )
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        facts = json.loads((self.dir / "run" / "platform.json").read_text())
+        self.assertEqual(facts["magento_edition"], "Commerce")
+        self.assertEqual(facts["not_recorded"], None)
+
+    def test_two_edition_packages_are_null_not_a_guessed_label(self) -> None:
+        # A composer.json naming both Community and Commerce says nothing about
+        # which platform the lab runs. Naming one of them would put a platform
+        # in the results document that the run cannot support, so the fact is
+        # null, the raw list is kept, and the reason says it was ambiguous
+        # rather than "did not name a known edition package".
+        both = "magento/product-community-edition,magento/product-enterprise-edition"
+        result = self.run_arm("arm1", "-y", FAKE_PLATFORM_PACKAGES=both)
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        facts = json.loads((self.dir / "run" / "platform.json").read_text())
+        self.assertIsNone(facts["magento_edition"])
+        self.assertEqual(facts["edition_packages"], both)
+        self.assertIn("more than one edition package", facts["not_recorded"])
+        self.assertIn(both, facts["not_recorded"])
+        self.assertIn("WARN  platform", (self.dir / "run" / "transcript.log").read_text())
+
     def test_unreadable_platform_facts_are_null_with_a_reason(self) -> None:
         # A fact the lab will not answer is recorded as null and named in
         # not_recorded — never guessed. The run goes on: a missing header line

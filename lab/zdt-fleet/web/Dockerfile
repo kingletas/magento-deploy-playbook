@@ -2,12 +2,16 @@
 # bin/zdt-arm expects a real host to be.
 FROM php:8.4-fpm
 
+# The extension compile is the heavy part of the build; two jobs keep it from
+# taking every core of a host that runs other work.
+ARG BUILD_JOBS=2
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         nginx openssh-server rsync mariadb-client \
         libfreetype-dev libjpeg62-turbo-dev libpng-dev libicu-dev \
         libxml2-dev libxslt1-dev libzip-dev libsodium-dev \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install -j "$(nproc)" bcmath gd intl opcache pdo_mysql soap sockets xsl zip \
+    && docker-php-ext-install -j "$BUILD_JOBS" bcmath gd intl opcache pdo_mysql soap sockets xsl zip \
     && rm -rf /var/lib/apt/lists/*
 
 # Fail the build, not the install, if an extension Magento needs is missing.

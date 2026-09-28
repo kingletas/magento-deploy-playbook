@@ -118,7 +118,9 @@ if [[ -n ${ZDT_ADMIN_PASSWORD_FILE:-} ]]; then
 else
     # No admin secret was provisioned for the lab, so one is made here: two
     # classes and enough length to clear Magento's own complexity check.
-    ADMIN_PASSWORD="Zdt$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c20)!"
+    # Python makes it rather than a pipe from /dev/urandom, whose early close
+    # would end this script under pipefail.
+    ADMIN_PASSWORD="Zdt7$(python3 -c 'import secrets; print(secrets.token_hex(12))')!"
 fi
 [[ -n $ADMIN_PASSWORD ]] || die "the admin password ended up empty"
 

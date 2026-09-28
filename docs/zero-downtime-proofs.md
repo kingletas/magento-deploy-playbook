@@ -514,8 +514,8 @@ runner for the fleet arms of [issue #5](https://github.com/kingletas/magento-dep
 built on the interface the maintainer approved: one command per step from the
 control machine over ssh, the arms driving the migration end to end on the
 admin node, a built-in traffic generator, and the cache prefixes and the
-blue/green flag set and restored by the scripts themselves. Arms 1 and 2 are
-here; arms 3 and 4 come in their own pull requests (arm 3 is in this build).
+blue/green flag set and restored by the scripts themselves. Arms 1, 2 and 3
+are here; arm 4 is in this build too.
 
 ```bash
 bin/zdt-arm list
@@ -532,6 +532,9 @@ bin/zdt-arm arm1 -y     # the same, without asking (for an operator who means it
 - **arm3** — two code versions against one database with the flag on, across
   a release that changes the schema: first the additive **control**, then the
   breaking **evidence** (see *Arm 3* below).
+- **arm4** — the outage: the breaking release's rollout measured second by
+  second against the same rollout behind maintenance mode (see *Arm 4*
+  below).
 - **restore-snapshot** — put a snapshot back on the primary. Destructive, so
   it plans and asks like the arms.
 
@@ -596,6 +599,45 @@ sent to an old server". A missing one stops arm 3 by name (exit 2, nothing
 runs). Falsifier 2 on these editions stays a control reported in the results
 document: nothing on Open Source or Mage-OS reads the replica.
 
+### Arm 4: the outage, and what the two legs mean
+
+Arm 4 runs the breaking release (`ZDT_RELEASE_BREAKING` /
+`ZDT_LABEL_BREAKING` — the same variables as arm 3's evidence leg; arm 4
+needs no read path or schema object, it counts failures rather than reading
+their bodies) twice, with the database restored between the two so both legs
+start from the exact same state:
+
+- the **rollout** leg: no maintenance mode. Old servers serve while the
+  migration runs — what the customer sees when zero downtime is attempted on
+  a release that breaks them.
+- the **maintenance** leg: a real maintenance deploy. A maintenance flag is
+  `var/.maintenance.flag`, and `var/` is **not** shared between releases, so
+  the flag lives in the release that wrote it. `maintenance:enable` on every
+  web node in the release `current` points at before anything moves, then the
+  breaking release on every web node **under the page and before the
+  migration**: each node unpacks it, raises the flag inside it, and only then
+  moves the symlink — a release linked first would serve with no flag from the
+  moment `current` moved. `setup:upgrade` then runs behind the page, and
+  `maintenance:disable` follows on every node in one step, each flag lifted in
+  the release that carries it — the new release's right after the migration,
+  the old release's by path as part of the relink. The web nodes go back to
+  the old release only after the traffic window closes (old code against the
+  migrated schema would add the rollout leg's failures on top of the
+  measurement), and the exact relink and disable commands are printed, release
+  by release, for the paths no trap can reach.
+
+A request counts as failed when it was refused: 5xx, no answer at all, or a
+guard match. The maintenance page is itself a 503, so the mode's own outage
+is counted by the same rule. `outage-report-<leg>.txt` holds, for each
+second and request type, the share of requests that failed — the shape of
+what the customer sees, second by second (the health check is excluded:
+falsifier 5 judges it, and it is not a customer request). Falsifier 4
+compares the legs on both totals: the rollout must fail **more requests**
+and for **more seconds** (seconds in which at least one request failed) than
+maintenance mode, or the claim "maintenance mode is the smaller outage" is
+reported as disproved. Like arm 3's releases, these have no defaults: a
+missing one stops arm 4 by name.
+
 ### Variables
 
 The hosts have no defaults: a missing one stops the arm by name rather than
@@ -619,7 +661,7 @@ arguments, so no password lands in a shell history or a transcript.
 | `ZDT_CATEGORY_PATH` / `ZDT_PRODUCT_PATH` | paths of a real category and a real product page (e.g. `/mens.html`, `/products/gt.html`). No default: a guessed path a stock store does not serve would record every target as refusing |
 | `ZDT_TOUCHED_TABLES` | comma-separated tables to checksum once the lag reaches zero (default `catalog_product_entity`) |
 | `ZDT_RELEASE_ADDITIVE` / `ZDT_LABEL_ADDITIVE` | arm 3 only: the additive control release (adds only) |
-| `ZDT_RELEASE_BREAKING` / `ZDT_LABEL_BREAKING` | arm 3 only: the breaking release — renames or drops a column the old code reads |
+| `ZDT_RELEASE_BREAKING` / `ZDT_LABEL_BREAKING` | the breaking release — renames or drops a column the old code reads: arm 3's evidence leg, and the release arm 4's outage is measured against |
 | `ZDT_READ_PATH` | arm 3 only: a route that really reads that column or table |
 | `ZDT_SCHEMA_OBJECT` | arm 3 only: the renamed or dropped name; the first old-server failure's body must contain it |
 | `ZDT_RUN_DIR` | where the run's evidence lands (default `local.d/zdt-arm/<run>-<arm>/`) |
@@ -633,13 +675,16 @@ The replica connection (`ZDT_PRIMARY_*` / `ZDT_REPLICA_*`) belongs to
 The transcript (every `PLAN`/`RUN` line, secret-free), `traffic-<phase>.log`
 — one per phase, so no verdict ever counts another phase's lines; each line
 one request: epoch second, target, request type, status, guard flag —
-`replica-before.json` and `replica-after.json` from the gate, , `evidence-<leg>/` (arm 3: the saved failure bodies),
+`replica-before.json` and `replica-after.json` from the gate, `evidence-<leg>/` (arm 3: the saved failure bodies),
+`outage-report-<leg>.txt` (arm 4: the per-second, per-type failed shares)
 and `checksums.txt`. `PASS`/`FAIL` lines for falsifier 1 (the replica survives
 the migration: live after it, lag back to zero within five minutes, the
 touched tables' checksums matching once the lag is zero) and falsifier 5
-(the health check never takes a refusing server out of rotation). The guard
-counts are recorded as facts for the results document; falsifiers 2, 3 and
-4 belong to arms 3 and 4 and to Commerce runs, as issue #5 defines them.
+(the health check never takes a refusing server out of rotation). Arm 4 adds
+falsifier 4 (maintenance mode is the smaller outage for the breaking
+release), judged on the two legs' totals. The guard
+counts are recorded as facts for the results document; falsifiers 2 and the
+Commerce parts belong to Commerce runs, as issue #5 defines them.
 
 ### Exit codes
 

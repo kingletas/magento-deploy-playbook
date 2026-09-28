@@ -41,6 +41,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
+      # A first start initialises the data directory, which is slow on a
+      # spinning disk; failures in this window do not count.
+      start_period: 120s
 
   # The replica starts empty and idle: bin/replica-seed loads it from the
   # primary and starts replication once the store is installed.
@@ -64,6 +67,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 6
+      # A first start initialises the data directory, which is slow on a
+      # spinning disk; failures in this window do not count.
+      start_period: 120s
 
   opensearch:
     image: opensearchproject/opensearch:2.19.6

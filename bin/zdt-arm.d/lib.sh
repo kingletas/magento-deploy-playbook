@@ -385,10 +385,14 @@ relink_linked_hosts_old() {
     for h in "${MAINT_LINKED_HOSTS[@]}"; do
         [[ -n $h ]] || continue
         # shellcheck disable=SC2029  # client-side expansion is the point.
-        if ssh "${ssh_opts[@]}" "$h" "cd $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD && php bin/magento maintenance:disable; ln -sfn $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD $ZDT_CURRENT_LINK" >/dev/null 2>&1; then
+        # `&&`, not `;`: ssh reports the LAST command's status, so with `;` a
+        # failed `maintenance:disable` would still look like a successful
+        # relink — the node would be handed back behind the page, its flag
+        # dropped from the tracking, and the operator told nothing.
+        if ssh "${ssh_opts[@]}" "$h" "cd $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD && php bin/magento maintenance:disable && ln -sfn $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD $ZDT_CURRENT_LINK" >/dev/null 2>&1; then
             maint_flags_drop_host "$h"
         else
-            echo "zdt-arm/$ARM_NAME: could not relink $h to $ZDT_LABEL_OLD; run: ssh -o BatchMode=yes $h 'cd $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD && php bin/magento maintenance:disable; ln -sfn $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD $ZDT_CURRENT_LINK'" >&2
+            echo "zdt-arm/$ARM_NAME: could not relink $h to $ZDT_LABEL_OLD; run: ssh -o BatchMode=yes $h 'cd $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD && php bin/magento maintenance:disable && ln -sfn $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD $ZDT_CURRENT_LINK'" >&2
         fi
     done
     MAINT_LINKED_HOSTS=()
@@ -462,7 +466,7 @@ print_restores() {
     done
     for h in "${MAINT_LINKED_HOSTS[@]:-}"; do
         [[ -n $h ]] || continue
-        echo "  ssh -o BatchMode=yes $h 'cd $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD && php bin/magento maintenance:disable; ln -sfn $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD $ZDT_CURRENT_LINK'"
+        echo "  ssh -o BatchMode=yes $h 'cd $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD && php bin/magento maintenance:disable && ln -sfn $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD $ZDT_CURRENT_LINK'"
     done
     for h in "${ENV_BACKUP_HOSTS[@]:-}"; do
         [[ -n $h ]] || continue

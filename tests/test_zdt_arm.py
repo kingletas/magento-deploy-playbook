@@ -1170,9 +1170,12 @@ class ZdtArmTest(unittest.TestCase):
         # OLD release's flag before pointing `current` back at it: a relink
         # that repointed first would serve the page from the release the flag
         # was still sitting in.
+        # The needle carries the `&&` the relink uses: with `;` a failed
+        # `maintenance:disable` would still report success and this ordering
+        # would hold over a node handed back behind the page.
         for node in ("node1", "node2", "node3"):
             down = call_pos(node, f"cd /var/www/magento/{new_rel} && php bin/magento maintenance:disable")
-            relink = call_pos(node, f"cd /var/www/magento/{node_rel} && php bin/magento maintenance:disable; ln -sfn")
+            relink = call_pos(node, f"cd /var/www/magento/{node_rel} && php bin/magento maintenance:disable && ln -sfn")
             self.assertLess(migration, down, f"{node}: the page comes down after the migration")
             self.assertLess(down, relink, f"{node}: the page comes down before the relink")
         self.assertEqual(result.returncode in (0, 1), True, result.stdout)

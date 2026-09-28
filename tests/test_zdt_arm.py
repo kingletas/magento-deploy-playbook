@@ -1250,6 +1250,13 @@ class ZdtArmTest(unittest.TestCase):
         # not just what happened after it: "every PLAN/RUN line".
         self.assertIn("PLAN  ", text)
         self.assertIn("== phase: shared-prefix ==", text)
+        # The most important restore of all — the database, from the snapshot
+        # the run took — is in the file, not only on the terminal. Asserted as
+        # a whole line: snapshot_gate's own "Restore it with: … restore-snapshot"
+        # line is already in the transcript, so a bare substring would pass
+        # even if print_restores' line were missing (one direction isn't a test).
+        self.assertIn("restore-snapshot ", text)
+        self.assertRegex(text, r"(?m)^  bin/zdt-arm restore-snapshot .* -y$")
         self.assertIn("PASS  falsifier 1", text)
         self.assertIn("PASS  falsifier 5", text)
         self.assertIn("summary: 4 pass, 0 fail", text)
@@ -1271,6 +1278,32 @@ class ZdtArmTest(unittest.TestCase):
         result = self.run_arm("arm1", stdin="n\n")
         self.assertEqual(result.returncode, 2)
         self.assertFalse((self.dir / "run" / "transcript.log").exists())
+
+    def test_transcript_keeps_the_gate_output_a_failed_check_printed(self) -> None:
+        # The gate's exit 2 ("the check never happened") dies right after
+        # printing the fleet's own explanation, and that output is the only
+        # thing that says WHY the run stopped — a wrong password, an
+        # unreachable host. It has to be in the transcript, not only on the
+        # terminal: it is exactly the text the results document quotes when a
+        # run is reported as not run.
+        count = self.dir / "fleet-count"
+        wrapper = self.dir / "fleet-wrapper"
+        wrapper.write_text(
+            "#!/usr/bin/env bash\n"
+            "n=$(cat \"$FLEET_COUNT\" 2>/dev/null || echo 0); n=$((n + 1))\n"
+            "printf '%s\\n' \"$n\" > \"$FLEET_COUNT\"\n"
+            # The second replica-check is replica_after's, after the gate.
+            "[[ $n -ge 2 ]] && { printf 'zdt-fleet: the replica connection is not configured\\n' >&2; exit 2; }\n"
+            f"exec {ROOT / 'bin' / 'zdt-fleet'} \"$@\"\n"
+        )
+        wrapper.chmod(0o755)
+        result = self.run_arm(
+            "arm1", "-y", ZDT_FLEET_BIN=str(wrapper), FLEET_COUNT=str(count)
+        )
+        self.assertEqual(result.returncode, 2)
+        text = (self.dir / "run" / "transcript.log").read_text()
+        self.assertIn("the replica connection is not configured", text)
+        self.assertIn("could not run after the migration", text)
 
     def test_transcript_keeps_the_lines_a_failed_run_printed(self) -> None:
         # The runs that matter most are the ones that fail: the transcript has

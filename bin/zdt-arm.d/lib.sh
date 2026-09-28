@@ -188,6 +188,8 @@ REMOTE
     [[ -n $phpv ]] || reason="the admin node did not answer 'php -r echo PHP_VERSION'"
     [[ -n $dbserver ]] || reason="${reason:+$reason; }the primary did not answer SELECT VERSION()"
     [[ -n $replay ]] || reason="${reason:+$reason; }replica-before.json carries no binlog_format"
+    # A named-but-ambiguous list says something different from "no known
+    # package at all", so the reason carries the ambiguity, not the default.
     [[ -n $edition ]] || reason="${reason:+$reason; }the release's composer.json did not name a known edition package"
 
     {
@@ -607,7 +609,10 @@ print_restores() {
     say 1 ""
     say 1 "If the run was cut short in a way no trap could handle (kill -9, a"
     say 1 "power cut), put it back by running, on the control machine:"
-    [[ -n $SNAPSHOT ]] && echo "  bin/zdt-arm restore-snapshot $SNAPSHOT -y"
+    # `[[ -z … ]] ||` rather than `[[ -n … ]] &&`: with `&&` an empty SNAPSHOT
+    # would leave the function with status 1, which `set -e` reads as a failure
+    # in the middle of printing the restores.
+    [[ -z $SNAPSHOT ]] || say 1 "  bin/zdt-arm restore-snapshot $SNAPSHOT -y"
     local spec h rel
     # One line per flag actually raised, naming the release that holds it:
     # `cd $ZDT_CURRENT_LINK` would disable whatever release the node happens
@@ -732,7 +737,7 @@ replica_after() {
     local out rc lag waited=0
     out=$("$FLEET_BIN" replica-check 2>&1)
     rc=$?
-    [[ $rc -eq 2 ]] && { printf '%s\n' "$out" >&2; die "bin/zdt-fleet replica-check could not run after the migration"; }
+    [[ $rc -eq 2 ]] && { say 2 "$out"; die "bin/zdt-fleet replica-check could not run after the migration"; }
     printf '%s\n' "$out" > "$OUT/replica-after.json"
     if [[ $rc -ne 0 ]]; then
         falsifier FAIL "falsifier 1: the replica stopped or errored during the migration"

@@ -710,8 +710,9 @@ it report success, the backup precedes every edit and survives the
 `env.php` symlink, the printed restores are right, the rate cap and the
 duration stop hold, a 404 on one route is not read as a refusing target, and
 the transcript never carries a password. The recording gaps have their own
-tests too: a run leaves `transcript.log` holding the `RUN` lines and the
-verdicts, a plan (`-n`) and a declined plan leave none, a failed run's
-transcript keeps the `FAIL` and the step that died, `platform.json` carries
-the lab's answers with `null` and a reason when one is unreadable, and the
-platform probe reaches no `ssh` argv with the password.
+tests too: a run leaves `transcript.log` holding the `RUN` lines, the
+verdicts and the printed restore commands, a plan (`-n`) and a declined plan
+leave none, a failed run's transcript keeps the `FAIL` and the step that
+died, `platform.json` carries the lab's answers with `null` and a reason when
+one is unreadable, and the platform probe reaches no `ssh` argv with the
+password.

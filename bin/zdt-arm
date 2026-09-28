@@ -76,7 +76,10 @@
 #   ZDT_SCHEMA_OBJECT the renamed or dropped column/table name; falsifier 3
 #                     greps the first old-server failure's body for it
 #   ZDT_RUN_DIR       where this run's evidence lands (default
-#                     local.d/zdt-arm/<run>-<arm>/ under the current dir)
+#                     local.d/zdt-arm/<run>-<arm>/ under the current dir):
+#                     the transcript the arm writes itself (transcript.log),
+#                     the platform facts (platform.json), the replica gate's
+#                     readings, the traffic logs, checksums and the reports
 #   ZDT_FLEET_BIN     path of bin/zdt-fleet (default beside this script)
 #
 # The replica connection (ZDT_PRIMARY_* / ZDT_REPLICA_*) belongs to

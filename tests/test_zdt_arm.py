@@ -40,19 +40,66 @@ done
 body=""
 if [[ "${args[0]:-}" == bash && "${args[1]:-}" == "-s" ]]; then body=$(cat); fi
 printf 'SSH|%s|%s|%s\\n' "$host" "${args[*]:-}" "$(printf '%s' "$body" | tr '\\n' '~')" >> "$FAKE_SSH_CALLS"
+if [[ -n ${FAKE_MAINT_FLAGS:-} || -n ${FAKE_MAINT_EVENTS:-} ]]; then
+    # Which release a maintenance command really touches. var/ is not shared
+    # between releases, so the flag the fake raises has to sit in the release
+    # the command runs in, and the `cd` in front of the command names it. A
+    # `cd` to the current link (the control machine expands it before ssh)
+    # means the release this host's link points at today, which the tracked
+    # `ln -sfn` below says — that is what makes the fake catch a flag written
+    # in one release and left behind, or read, in another.
+    maint_all="${args[*]:-}${body}"
+    current_link="${FAKE_ZDT_CURRENT_LINK:-/var/www/magento/current}"
+    unquote() { printf '%s' "$1" | tr -d '"'; }
+    maint_dir=$(printf '%s' "$maint_all" | awk '{for (i = 1; i < NF; i++) if ($i == "cd") { print $(i + 1); exit }}')
+    maint_dir=$(unquote "$maint_dir")
+    maint_label=""
+    if [[ -n $maint_dir ]]; then
+        if [[ $maint_dir == "$current_link" || $maint_dir == */current || $maint_dir == *'$ZDT_CURRENT_LINK'* ]]; then
+            maint_label=$(cat "${FAKE_MAINT_CURRENT:-/nonexistent}/$host" 2>/dev/null || printf '%s' "${ZDT_LABEL_OLD:-}")
+        else
+            maint_label="${maint_dir##*/}"
+        fi
+    fi
+fi
 if [[ -n ${FAKE_MAINT_FLAGS:-} ]]; then
-    # Flag-file mode (arm4 blocker test): maintenance:enable raises a
-    # per-host flag, maintenance:disable removes it, so the fake curl can
-    # serve the maintenance page for exactly the hosts that are under it.
-    all="${args[*]:-}${body}"
-    if printf '%s' "$all" | grep -qF "maintenance:enable"; then touch "$FAKE_MAINT_FLAGS/$host"; fi
-    if printf '%s' "$all" | grep -qF "maintenance:disable"; then rm -f "$FAKE_MAINT_FLAGS/$host"; fi
+    # Flag-file mode (arm4): the flag lives INSIDE the release the command ran
+    # in, exactly as Magento writes it.
+    if [[ -n $maint_label ]]; then
+        if printf '%s' "$maint_all" | grep -qF "maintenance:enable"; then
+            mkdir -p "$FAKE_MAINT_FLAGS/$host"
+            touch "$FAKE_MAINT_FLAGS/$host/$maint_label"
+        fi
+        if printf '%s' "$maint_all" | grep -qF "maintenance:disable"; then
+            rm -f "$FAKE_MAINT_FLAGS/$host/$maint_label"
+        fi
+    fi
+fi
+if [[ -n ${FAKE_MAINT_FLAGS:-} || -n ${FAKE_MAINT_EVENTS:-} ]]; then
+    # A link this call makes is this host's current release from now on. Done
+    # AFTER the flag bookkeeping above, so a node's current release never
+    # momentarily lacks the flag it should be serving behind: the release is
+    # unpacked and its flag raised, and only then does `current` move — the
+    # order the arm itself uses, which is the whole point of the fix.
+    link_line=$(printf '%s' "$maint_all" | grep -oE 'ln -sfn [^ ]+ [^ ]+' | tail -1)
+    if [[ -n $link_line && -n ${FAKE_MAINT_CURRENT:-} ]]; then
+        # ln -sfn <release> <link>: the release is $3, the flag is $2.
+        link_src=$(unquote "$(printf '%s' "$link_line" | awk '{print $3}')")
+        mkdir -p "$FAKE_MAINT_CURRENT"
+        printf '%s\\n' "${link_src##*/}" > "$FAKE_MAINT_CURRENT/$host"
+    fi
+fi
+if [[ -n ${FAKE_SSH_SLEEP:-} ]]; then
+    # Each ssh round-trip takes real time on a real fleet. Tests that judge
+    # the traffic that lands *while* a step runs need the step to last longer
+    # than a batch of requests, or the window is sub-second and the assertion
+    # is vacuous.
+    sleep "$FAKE_SSH_SLEEP"
 fi
 if [[ -n ${FAKE_MAINT_EVENTS:-} ]]; then
-    all="${args[*]:-}${body}"
     for kw in "maintenance:enable" "maintenance:disable" "setup:upgrade"; do
-        if printf '%s' "$all" | grep -qF "$kw"; then
-            printf '%s|%s|%s\\n' "$(date +%s.%N)" "$host" "$kw" >> "$FAKE_MAINT_EVENTS"
+        if printf '%s' "$maint_all" | grep -qF "$kw"; then
+            printf '%s|%s|%s|%s\\n' "$(date +%s.%N)" "$host" "$kw" "$maint_label" >> "$FAKE_MAINT_EVENTS"
         fi
     done
 fi
@@ -64,7 +111,7 @@ if [[ -n ${FAKE_SSH_RUN:-} ]]; then
     root="$FAKE_SSH_RUN/$host"
     if [[ -n $body ]]; then
         mkdir -p "$root/current/app/etc"
-        printf '%s\n' "$body" | sed "s|/srv/magento/|$root/|g" | bash -s; exit $?
+        printf '%s\\n' "$body" | sed "s|/srv/magento/|$root/|g" | bash -s; exit $?
     fi
     cmd="${args[*]:-}"
     cmd="${cmd//\\/srv\\/magento\\//$root\\/}"
@@ -102,6 +149,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 printf 'CURL|%s\\n' "$url" >> "$FAKE_CURL_CALLS"
+# How many ssh calls had been logged when this request STARTED. Read
+# here, before the response is decided: the answer reflects the flags as
+# they were then, so a request that started before an enable and was
+# answered after it belongs to the window before the page went up.
+curl_pos=$(wc -l < "${FAKE_SSH_CALLS:-/dev/null}" 2>/dev/null | tr -d ' ')
 code=200 ; body=""
 if [[ -n ${FAKE_CURL_DOWN:-} && $url == *"$FAKE_CURL_DOWN"* && $url != *health_check* ]]; then
     code=503; body="Please refresh the page and try again"
@@ -119,13 +171,21 @@ if [[ -n ${FAKE_CURL_BREAK_READ2:-} && $url == *"$FAKE_CURL_BREAK_READ2"* && $ur
     code=503; body="${FAKE_CURL_BREAK_BODY2:-SQLSTATE[HY000]: unrelated}"
 fi
 if [[ -n ${FAKE_MAINT_FLAGS:-} ]]; then
-    # Flag-file mode (arm4 blocker-1 test): a host under the maintenance
-    # page (its flag raised by fake maintenance:enable) answers 503 on every
-    # non-health request, exactly like maintenance_install would.
+    # Flag-file mode (arm4): a host answers the maintenance page while the
+    # release its `current` link resolves to carries the flag — the flag is
+    # per release, so which release `current` points at is what decides.
     fh="${url#http://}"; fh="${fh%%/*}"; fh="${fh%%:*}"; fh="${fh%%.example}"
-    if [[ -e "$FAKE_MAINT_FLAGS/$fh" && $url != *health_check* ]]; then
+    cur=$(cat "${FAKE_MAINT_CURRENT:-/nonexistent}/$fh" 2>/dev/null || printf '%s' "${ZDT_LABEL_OLD:-}")
+    if [[ -n $cur && -e "$FAKE_MAINT_FLAGS/$fh/$cur" && $url != *health_check* ]]; then
         code=503; body="Please refresh the page and try again"
     fi
+fi
+if [[ -n ${FAKE_CURL_INDEXED:-} ]]; then
+    # Which ssh call this request belongs to: the fake ssh appends exactly one
+    # line per call, so the count is a position in the run — a position, not a
+    # wall-clock second, which is what lets a test judge the traffic of a
+    # window ("while the page was up") without flaking on a loaded runner.
+    printf '%s %s %s\n' "${curl_pos:-?}" "$url" "$code" >> "$FAKE_CURL_INDEXED"
 fi
 [[ -n $out && -n $body ]] && printf '%s\n' "$body" > "$out"
 echo "$code"
@@ -915,9 +975,16 @@ class ZdtArmTest(unittest.TestCase):
         transcript = result.stdout + result.stderr
         self.assertIn("outage: rollout (rel-break)", transcript)
         self.assertIn("outage: maintenance (rel-break)", transcript)
-        # The maintenance leg's whole shape, in order, in the plan.
-        self.assertEqual(transcript.count("maintenance:enable"), 3)  # every node
-        self.assertIn("maintenance:disable", transcript)
+        # The maintenance leg's whole shape: the page goes up in the release
+        # `current` points at today (rel-old), then each node is linked to the
+        # breaking release with the flag already raised inside it — two
+        # enables per node — and both flags are printed as lifted.
+        self.assertEqual(transcript.count("maintenance:enable"), 6)  # 3 nodes × 2
+        self.assertEqual(transcript.count("maintenance:disable"), 6)  # rel-break + rel-old
+        self.assertIn(
+            "maintenance:enable in /var/www/magento/releases/rel-old", transcript
+        )
+        self.assertIn("maintenance:disable in /var/www/magento/releases/rel-break", transcript)
         self.assertIn("restore database magento", transcript)
         self.assertIn("link release rel-old back in", transcript)
         self.assertEqual(transcript.count("setup:upgrade"), 2)
@@ -926,19 +993,32 @@ class ZdtArmTest(unittest.TestCase):
     def test_arm4_maintenance_leg_enables_every_node_then_disables(self) -> None:
         result = self.run_arm("arm4", "-y", FAKE_CURL_DOWN="node2.example")
         lines = [l for l in self.calls().splitlines() if l.startswith("SSH|")]
-        enables = [i for i, l in enumerate(lines) if "maintenance:enable" in l]
-        disables = [i for i, l in enumerate(lines) if "maintenance:disable" in l]
-        # Three enables, one per web node, and they land only in the second
-        # leg: before them sit exactly one snapshot+upgrade pair, and after
-        # them comes the disable. The rollout leg never touches maintenance.
-        self.assertEqual(len(enables), 3, f"expected 3 enables: {enables}")
-        self.assertTrue(disables, "the maintenance leg must lift maintenance")
+        # Two enables per node, in this order: the run's own, in the release
+        # `current` points at, then the one that rides along with the link
+        # into the breaking release. Every one of them lands in the
+        # maintenance leg: the rollout leg never touches maintenance.
+        for node in ("node1", "node2", "node3"):
+            own = [i for i, l in enumerate(lines) if l.startswith(f"SSH|{node}|") and "maintenance:enable" in l]
+            self.assertEqual(len(own), 2, f"{node}: want 2 enables, got {own}")
+            self.assertIn(f"releases/rel-old", lines[own[0]], f"{node}: the first enable is the old release's")
+            self.assertNotIn("rel-break", lines[own[0]], f"{node}: the first enable is the old release's")
         upgrades = [i for i, l in enumerate(lines) if "setup:upgrade" in l]
         self.assertEqual(len(upgrades), 2)
-        self.assertTrue(all(u < min(enables) for u in upgrades[:1]))
-        self.assertTrue(all(u > max(enables) for u in upgrades[1:]))
-        enabled_hosts = {l.split("|")[1] for l in lines if "maintenance:enable" in l}
-        self.assertEqual(enabled_hosts, {"node1", "node2", "node3"})
+        first_maint_enable = min(
+            i for i, l in enumerate(lines) if "maintenance:enable" in l and "rel-old" in l
+        )
+        self.assertTrue(
+            all(u < first_maint_enable for u in upgrades[:1]),
+            "the rollout leg's upgrade comes before any maintenance",
+        )
+        disables = [l for l in lines if "maintenance:disable" in l]
+        self.assertTrue(disables, "the maintenance leg must lift maintenance")
+        self.assertTrue(
+            any("rel-break" in l for l in disables), "the new release's flag must be lifted"
+        )
+        self.assertTrue(
+            any("rel-old" in l for l in disables), "the old release's flag must be lifted too"
+        )
         self.assertEqual(result.returncode, 1, result.stdout)  # see below
 
     def test_arm4_verdict_compares_the_two_legs(self) -> None:
@@ -1000,46 +1080,101 @@ class ZdtArmTest(unittest.TestCase):
         )
 
     def test_arm4_maintenance_leg_lifts_every_node_after_the_upgrade(self) -> None:
-        # Blocker 1 (Ed's flag-file test): the fake ssh raises a per-host
-        # flag on maintenance:enable and removes it on maintenance:disable;
-        # the fake curl answers 503 for a host while its flag exists. The
-        # maintenance leg must therefore show NO 503 from any node after the
-        # upgrade — not the admin node only. On the old code node2 and node3
-        # stayed behind the page until the exit trap, so this test fails
-        # there. Also pins the shape: exactly 3 disables (the leg's own,
-        # after the upgrade), the trap adds none.
+        # Blocker (Ed's flag-file test, second round): the flag lives INSIDE
+        # the release that wrote it, and var/ is not shared between releases.
+        # The fake ssh therefore keys the flag by the release the command runs
+        # in ($FAKE_MAINT_FLAGS/<host>/<label>) and tracks each host's
+        # `current` from the last `ln -sfn` it saw; the fake curl answers 503
+        # while the release `current` resolves to carries the flag.
+        #
+        # The window is judged in ssh-call positions, not wall-clock seconds:
+        # the fake curl records how many ssh calls had been logged when it
+        # answered, so "while the page was up" is exact and cannot flake on a
+        # loaded runner. On the code before this round the flag was raised in
+        # the old release and then left behind when the link moved `current`
+        # to the new one, so both (a) and (b) below fail there.
         flags = self.dir / "maint-flags"
         flags.mkdir()
+        current = self.dir / "maint-current"
         events = self.dir / "maint-events"
+        indexed = self.dir / "curl-indexed"
         result = self.run_arm(
             "arm4", "-y",
-            FAKE_MAINT_FLAGS=str(flags), FAKE_MAINT_EVENTS=str(events),
-            ZDT_DURATION="4", ZDT_RATE="1",
+            FAKE_MAINT_FLAGS=str(flags), FAKE_MAINT_CURRENT=str(current),
+            FAKE_MAINT_EVENTS=str(events), FAKE_CURL_INDEXED=str(indexed),
+            # Every ssh round-trip takes real time, so the window between the
+            # first enable and the migration holds many requests: without it
+            # the window is one or two requests per node and the assertion
+            # has no teeth. A batch of RATE requests carries one of every
+            # request type, so each second of the window holds a non-health
+            # request on every node.
+            FAKE_SSH_SLEEP="0.8",
+            ZDT_DURATION="12", ZDT_RATE="5",
         )
-        # Every node came out of maintenance: no flag survives the run.
-        self.assertEqual(list(flags.iterdir()), [], "no node may stay behind the page")
-        ev = [l.strip().split("|") for l in events.read_text().splitlines() if l.strip()]
-        upgrade_ts = [float(t) for t, h, kw in ev if kw == "setup:upgrade"]
-        self.assertEqual(len(upgrade_ts), 2)
-        maint_upgrade = max(upgrade_ts)  # the maintenance leg's migration
-        disables = [(float(t), h) for t, h, kw in ev if kw == "maintenance:disable"]
-        self.assertEqual({h for _, h in disables}, {"node1", "node2", "node3"},
-                         "the maintenance leg must disable every node it enabled")
-        self.assertTrue(all(t >= maint_upgrade for t, _ in disables),
-                        "the disables come after the migration, not before")
-        # No 503 from any node after the upgrade (one second of slack for
-        # request/response vs log timestamps). At least one request per old
-        # node lands after it, so the assertion has teeth.
-        seen = []
-        for line in (self.dir / "run" / "traffic-maintenance.log").read_text().splitlines():
-            ts, host, typ, status, _guard = line.split(" ")
-            if float(ts) >= maint_upgrade + 1.0:
-                seen.append(host.rstrip("/"))
-                self.assertNotIn(status, ("000",), line)
-                self.assertFalse(status.startswith("5"),
-                                 f"{line}: refused after the upgrade — a node stayed down")
-        self.assertIn("node2.example", seen)
-        self.assertIn("node3.example", seen)
+        lines = [l for l in self.calls().splitlines() if l.startswith("SSH|")]
+        # Position of each maintenance call, as the fake curl counts them.
+        def call_pos(host: str, needle: str, which: str = "one") -> int:
+            hits = [
+                i + 1 for i, l in enumerate(lines)
+                if l.startswith(f"SSH|{host}|") and needle in l
+            ]
+            if which == "one":
+                self.assertEqual(len(hits), 1, f"{host}: want exactly one call with {needle!r}")
+                return hits[0]
+            # The maintenance leg is the second of the two legs, so its calls
+            # are the last of each kind (setup:upgrade runs once per leg).
+            self.assertTrue(hits, f"{host}: no call with {needle!r}")
+            return hits[-1]
+
+        node_rel = "releases/rel-old"
+        new_rel = "releases/rel-break"
+        # (a) From the last node's enable (the fleet-wide start of the page)
+        # until the migration, every non-health request to a web node came
+        # back as the maintenance page: the page is up across the link into
+        # the breaking release, and nothing serves while it is meant to be
+        # behind it. Positions, not seconds, are what the assertion compares,
+        # so a loaded runner cannot flake it.
+        enables = {
+            h: call_pos(h, f"cd /var/www/magento/{node_rel} && php bin/magento maintenance:enable")
+            for h in ("node1", "node2", "node3")
+        }
+        fleet_page_up = max(enables.values())
+        # setup:upgrade runs on the admin node only, so the migration is one
+        # call for the fleet.
+        migration = call_pos("node1", "setup:upgrade", "last")
+        judged = 0
+        for row in indexed.read_text().splitlines():
+            pos, url, code = row.split(" ")[:3]
+            if not pos.isdigit():
+                continue
+            host = url.split("/")[2].split(":")[0].removesuffix(".example")
+            if host not in enables or "health_check" in url or url.startswith("http://lb."):
+                continue
+            if not (fleet_page_up < int(pos) <= migration):
+                continue
+            judged += 1
+            self.assertTrue(
+                code.startswith("5"),
+                f"{host} answered {code} for {url} while the page was up"
+                f" (ssh call {pos}, page up at {fleet_page_up}, migration at {migration})",
+            )
+        self.assertGreater(judged, 3, "too few requests landed in the page window")
+        # (b) No flag survives the run, in any release on any host — the old
+        # release's own flag included: the relink points `current` back at
+        # it, so leaving it there would hand the lab back behind the page.
+        left = [str(p.relative_to(flags)) for p in flags.rglob("*") if p.is_file()]
+        self.assertEqual(left, [], "a maintenance flag survived the run")
+        # The ordering, from the ssh call log rather than wall-clock
+        # timestamps — the steadier form. After the migration, each node's
+        # page comes down in the NEW release and the relink then clears the
+        # OLD release's flag before pointing `current` back at it: a relink
+        # that repointed first would serve the page from the release the flag
+        # was still sitting in.
+        for node in ("node1", "node2", "node3"):
+            down = call_pos(node, f"cd /var/www/magento/{new_rel} && php bin/magento maintenance:disable")
+            relink = call_pos(node, f"cd /var/www/magento/{node_rel} && php bin/magento maintenance:disable; ln -sfn")
+            self.assertLess(migration, down, f"{node}: the page comes down after the migration")
+            self.assertLess(down, relink, f"{node}: the page comes down before the relink")
         self.assertEqual(result.returncode in (0, 1), True, result.stdout)
 
     def test_arm4_summarise_counts_only_refusals(self) -> None:

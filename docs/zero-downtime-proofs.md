@@ -610,16 +610,21 @@ start from the exact same state:
 - the **rollout** leg: no maintenance mode. Old servers serve while the
   migration runs — what the customer sees when zero downtime is attempted on
   a release that breaks them.
-- the **maintenance** leg: a real maintenance deploy. `maintenance:enable`
-  on every web node before anything moves, the breaking release linked on
-  every web node while the page is up, `setup:upgrade`, then
-  `maintenance:disable` on every node in one step — the outage maintenance
-  mode buys for the same release, measured on a fleet that ends the window
-  serving the new release. The web nodes go back to the old release only
-  after the traffic window closes (old code against the migrated schema
-  would add the rollout leg's failures on top of the measurement), and the
-  exact relink and disable commands are printed for the paths no trap can
-  reach.
+- the **maintenance** leg: a real maintenance deploy. A maintenance flag is
+  `var/.maintenance.flag`, and `var/` is **not** shared between releases, so
+  the flag lives in the release that wrote it. `maintenance:enable` on every
+  web node in the release `current` points at before anything moves, then the
+  breaking release on every web node **under the page and before the
+  migration**: each node unpacks it, raises the flag inside it, and only then
+  moves the symlink — a release linked first would serve with no flag from the
+  moment `current` moved. `setup:upgrade` then runs behind the page, and
+  `maintenance:disable` follows on every node in one step, each flag lifted in
+  the release that carries it — the new release's right after the migration,
+  the old release's by path as part of the relink. The web nodes go back to
+  the old release only after the traffic window closes (old code against the
+  migrated schema would add the rollout leg's failures on top of the
+  measurement), and the exact relink and disable commands are printed, release
+  by release, for the paths no trap can reach.
 
 A request counts as failed when it was refused: 5xx, no answer at all, or a
 guard match. The maintenance page is itself a 503, so the mode's own outage

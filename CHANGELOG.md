@@ -154,12 +154,15 @@ changed, because there's nothing before it.
   compares the legs — the rollout must fail more requests, and for more
   seconds, than maintenance mode, or "maintenance mode is the smaller
   outage" is reported as disproved. The maintenance leg is a real
-  maintenance deploy: the breaking release is linked on every web node
-  under the page and the page comes down on every node in one step after
-  the migration, so the measured window is the outage maintenance mode
-  actually buys. Maintenance is lifted again on every
-  exit path the arm can reach, and the exact commands for the paths it
-  cannot are printed.
+  maintenance deploy: the breaking release is put on every web node under
+  the page and the page comes down on every node in one step after the
+  migration, so the measured window is the outage maintenance mode actually
+  buys. A maintenance flag lives inside the release that wrote it (`var/` is
+  not shared between releases), so the arm raises it in the new release
+  before moving the symlink and lifts it in the release that holds it —
+  including the old release's, when the node is put back on it. Maintenance
+  is lifted again on every exit path the arm can reach, and the exact
+  commands, release by release, are printed for the paths it cannot.
 - `bin/zdt-arm arm3`, the crossing arm of issue #5: two code versions against
   one database with `deployment/blue_green/enabled` on the old servers, first
   across an additive control release (old servers must serve without a guard

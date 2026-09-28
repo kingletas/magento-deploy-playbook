@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+#
+# deploy-r0: put the current r0 release on the whole fleet.
+#
+# Runs on `control`. install-store's own r0 (the one it unpacked to run
+# setup:install) was built before build-release could deploy static
+# content, since nothing had been installed yet to dump scopes/themes from
+# (see build-release's header). Once install-store has run and
+# build-release has rebuilt r0 against the config.php it dumped, this
+# script places THAT r0 tarball on every web node, web1 included (rsync,
+# unpack, link `current`, exactly as the arms do it in
+# bin/zdt-arm.d/lib.sh's place_new_release) -- web1 relinks from the
+# install-only r0 it has been running to this rebuilt one. Every node but
+# web1 also gets web1's env.php copied to its OWN shared/app/etc/env.php
+# (each node keeps its own file; nothing here is shared); web1 does not
+# copy to itself, since its env.php is already the source. It then checks
+# every node and the load balancer answer 200 on the pages issue #5's
+# "ready" checklist names.
+#
+# What it changes: every web node's /var/www/magento/releases/
+# <ZDT_LABEL_OLD> and its `current` symlink, and every node but web1's
+# shared/app/etc/env.php.
+#
+# To undo: relink each node's `current` to whatever it pointed at before;
+# rerunning is otherwise idempotent, since it always places the same
+# release and overwrites the same env.php (on every node but web1).
+#
+# Settings come from the environment (lab.env), never arguments:
+#   ZDT_WEB_HOSTS          comma-separated web node hostnames (>= 3)
+#   ZDT_ADMIN_NODE          the node already carrying env.php (web1)
+#   ZDT_NODE_URLS           comma-separated per-node base URLs, same order
+#                         as ZDT_WEB_HOSTS
+#   ZDT_LB_URL              the load balancer's base URL
+#   ZDT_RELEASES_LOCAL_DIR  where build-release's tarballs land, as control
+#                         sees them (default /releases)
+#   ZDT_LABEL_OLD           the release label to place (default r0)
+#   ZDT_RELEASES_DIR        release directory on each node (default
+#                         /var/www/magento/releases)
+#   ZDT_CURRENT_LINK        the `current` symlink on each node (default
+#                         /var/www/magento/current)
+#   ZDT_ENV_PHP             each node's env.php path (default
+#                         /var/www/magento/shared/app/etc/env.php)
+#   ZDT_CATEGORY_PATH / ZDT_PRODUCT_PATH   printed by install-store; no
+#                         default, since a guessed path a stock store does
+#                         not serve would mark every target as failing
+#   ZDT_HEALTH_RETRIES (default 8) / ZDT_HEALTH_INTERVAL (default 3)
+#                         bounds on the health check's own wait: at most
+#                         ZDT_HEALTH_RETRIES tries per target/path, each at
+#                         most 10s, ZDT_HEALTH_INTERVAL apart
+#
+# env.php travels node to node over ssh (through this control host, never
+# through a shared volume or a file this script prints), the same trust
+# boundary every other remote write in this fleet already uses.
+#
+# Exit codes: 0 every node and the load balancer answered 200 everywhere
+# checked; 1 at least one check failed (the table names which); 2 the run
+# never happened (missing settings, a placement or copy that failed).
+
+set -euo pipefail
+
+die() { echo "deploy-r0: $*" >&2; exit 2; }
+
+: "${ZDT_WEB_HOSTS:?set ZDT_WEB_HOSTS}"
+: "${ZDT_ADMIN_NODE:?set ZDT_ADMIN_NODE}"
+: "${ZDT_NODE_URLS:?set ZDT_NODE_URLS}"
+: "${ZDT_LB_URL:?set ZDT_LB_URL}"
+: "${ZDT_CATEGORY_PATH:?set ZDT_CATEGORY_PATH, a real category page (see install-store output)}"
+: "${ZDT_PRODUCT_PATH:?set ZDT_PRODUCT_PATH, a real product page (see install-store output)}"
+
+ZDT_LABEL_OLD="${ZDT_LABEL_OLD:-r0}"
+ZDT_RELEASES_LOCAL_DIR="${ZDT_RELEASES_LOCAL_DIR:-/releases}"
+ZDT_RELEASES_DIR="${ZDT_RELEASES_DIR:-/var/www/magento/releases}"
+ZDT_CURRENT_LINK="${ZDT_CURRENT_LINK:-/var/www/magento/current}"
+ZDT_ENV_PHP="${ZDT_ENV_PHP:-/var/www/magento/shared/app/etc/env.php}"
+ZDT_HEALTH_RETRIES="${ZDT_HEALTH_RETRIES:-8}"
+ZDT_HEALTH_INTERVAL="${ZDT_HEALTH_INTERVAL:-3}"
+
+IFS=',' read -r -a WEB_HOSTS <<< "$ZDT_WEB_HOSTS"
+IFS=',' read -r -a NODE_URLS <<< "$ZDT_NODE_URLS"
+[[ ${#WEB_HOSTS[@]} -ge 3 ]] || die "issue #5 needs at least three web hosts; ZDT_WEB_HOSTS lists ${#WEB_HOSTS[@]}"
+[[ ${#WEB_HOSTS[@]} -eq ${#NODE_URLS[@]} ]] || die "ZDT_NODE_URLS must name one URL per web host"
+
+TARBALL="$ZDT_RELEASES_LOCAL_DIR/$ZDT_LABEL_OLD.tar.gz"
+[[ -f $TARBALL ]] || die "no release tarball at $TARBALL; run bin/build-release $ZDT_LABEL_OLD first"
+
+ssh_opts=(-o BatchMode=yes)
+
+remote_script() {
+    # remote_script HOST LABEL -- pipes this function's stdin to bash on the
+    # node, exactly bin/zdt-arm.d/lib.sh's helper of the same name; kept
+    # local here since deploy-r0 is not one of the arms.
+    local host="$1" label="$2"
+    echo "RUN   $host: $label" >&2
+    ssh "${ssh_opts[@]}" "$host" bash -s
+}
+
+place_r0() {
+    local host="$1"
+    echo "RUN   $host: rsync $TARBALL -> $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD.tar.gz" >&2
+    rsync -a "$TARBALL" "$host:$ZDT_RELEASES_DIR/$ZDT_LABEL_OLD.tar.gz" \
+        || die "the rsync to $host failed"
+    remote_script "$host" "unpack and link release $ZDT_LABEL_OLD on $host" <<REMOTE
+set -euo pipefail
+mkdir -p "$ZDT_RELEASES_DIR/$ZDT_LABEL_OLD"
+tar -xzf "$ZDT_RELEASES_DIR/$ZDT_LABEL_OLD.tar.gz" -C "$ZDT_RELEASES_DIR/$ZDT_LABEL_OLD"
+ln -sfn "$ZDT_RELEASES_DIR/$ZDT_LABEL_OLD" "$ZDT_CURRENT_LINK"
+REMOTE
+}
+
+copy_env_php() {
+    # The admin node's env.php, streamed straight into the target node's own
+    # copy (temp file then atomic rename): never written through this
+    # script's own stdout, never staged on a shared volume.
+    local host="$1"
+    echo "RUN   $ZDT_ADMIN_NODE -> $host: copy env.php" >&2
+    # shellcheck disable=SC2029  # client-side expansion is the point: both are the same fixed path on every node.
+    if ! ssh "${ssh_opts[@]}" "$ZDT_ADMIN_NODE" cat "$ZDT_ENV_PHP" \
+        | ssh "${ssh_opts[@]}" "$host" "cat > '$ZDT_ENV_PHP.new' && mv '$ZDT_ENV_PHP.new' '$ZDT_ENV_PHP'"; then
+        die "copying env.php from $ZDT_ADMIN_NODE to $host failed"
+    fi
+}
+
+echo "== deploy-r0: $ZDT_LABEL_OLD onto every node, $ZDT_ADMIN_NODE included =="
+for h in "${WEB_HOSTS[@]}"; do
+    place_r0 "$h"
+    # web1 already holds the env.php every other node copies from; copying
+    # it onto itself would race the read this script just did on the same
+    # host, so it is the one node skipped here.
+    [[ $h == "$ZDT_ADMIN_NODE" ]] && continue
+    copy_env_php "$h"
+done
+
+echo
+echo "== health check =="
+# path label -> URL path, in the order issue #5's "ready" checklist names.
+CHECK_LABELS=(home category product cart rest graphql health)
+CHECK_PATHS=(
+    "/"
+    "$ZDT_CATEGORY_PATH"
+    "$ZDT_PRODUCT_PATH"
+    "/checkout/cart/"
+    "/rest/V1/directory/currency"
+    "/graphql?query=%7BstoreConfig%7Bstore_code%7D%7D"
+    "/health_check.php"
+)
+
+check_one() {
+    # check_one URL PATH -- bounded retry: at most ZDT_HEALTH_RETRIES tries,
+    # ZDT_HEALTH_INTERVAL apart, each request capped at 10s, so one stuck
+    # node costs at most retries*(10+interval)s, never the run.
+    local url="$1" path="$2" try status
+    for (( try = 1; try <= ZDT_HEALTH_RETRIES; try++ )); do
+        status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url$path" 2>/dev/null)" || status=000
+        [[ $status == 200 ]] && { printf '%s' "$status"; return 0; }
+        (( try < ZDT_HEALTH_RETRIES )) && sleep "$ZDT_HEALTH_INTERVAL"
+    done
+    printf '%s' "$status"
+}
+
+targets_names=("${WEB_HOSTS[@]}" lb)
+targets_urls=("${NODE_URLS[@]}" "$ZDT_LB_URL")
+
+overall_ok=1
+printf '%-10s' target
+for label in "${CHECK_LABELS[@]}"; do printf ' %-9s' "$label"; done
+printf '\n'
+for i in "${!targets_names[@]}"; do
+    printf '%-10s' "${targets_names[$i]}"
+    for j in "${!CHECK_PATHS[@]}"; do
+        status="$(check_one "${targets_urls[$i]}" "${CHECK_PATHS[$j]}")"
+        printf ' %-9s' "$status"
+        [[ $status == 200 ]] || overall_ok=0
+    done
+    printf '\n'
+done
+
+if [[ $overall_ok -eq 1 ]]; then
+    echo
+    echo "every node and the load balancer answered 200 on every path checked."
+    exit 0
+else
+    echo
+    echo "at least one target failed at least one path; see the table above." >&2
+    exit 1
+fi

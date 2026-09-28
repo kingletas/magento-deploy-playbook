@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<schema xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:Setup/Declaration/Schema/etc/schema.xsd">
+    <table name="lab_zdt_probe" resource="default" engine="innodb" comment="Zero-downtime lab probe">
+        <column xsi:type="int" name="probe_id" unsigned="true" nullable="false" identity="true" comment="Probe ID"/>
+        <column xsi:type="varchar" name="probe_value" length="255" nullable="false" comment="Probe value"/>
+        <constraint xsi:type="primary" referenceId="PRIMARY">
+            <column name="probe_id"/>
+        </constraint>
+    </table>
+</schema>

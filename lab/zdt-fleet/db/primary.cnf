@@ -1,0 +1,8 @@
+[mysqld]
+server_id=1
+log_bin
+binlog_format=ROW
+log_slave_updates=ON
+gtid_strict_mode=ON
+innodb_buffer_pool_size=768M
+max_connections=200

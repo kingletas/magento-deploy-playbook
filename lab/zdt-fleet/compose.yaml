@@ -1,0 +1,200 @@
+---
+# The zero-downtime lab fleet. See README.md for what each service is and
+# why; every service has a CPU and memory limit, and only lb publishes a
+# port, on 127.0.0.1.
+name: zdtfleet
+
+x-web: &web
+  build:
+    context: ./web
+  image: zdtfleet-web
+  networks: [fleet]
+  cpus: "0.5"
+  mem_limit: 1250m
+  depends_on:
+    db-primary:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1/fpm-ping"]
+    interval: 10s
+    timeout: 5s
+    retries: 3
+
+services:
+  db-primary:
+    image: mariadb:11.4
+    hostname: db-primary
+    networks: [fleet]
+    cpus: "0.75"
+    mem_limit: 2g
+    environment:
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MARIADB_DATABASE: ${ZDT_DB_NAME:?set ZDT_DB_NAME in lab.env}
+      MARIADB_USER: ${ZDT_DB_USER:?set ZDT_DB_USER in lab.env}
+      MARIADB_PASSWORD_FILE: /run/secrets/db_app_password
+    volumes:
+      - db-primary-data:/var/lib/mysql
+      - ./db/primary.cnf:/etc/mysql/conf.d/zdtfleet.cnf:ro
+    secrets: [db_root_password, db_app_password]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  # The replica starts empty and idle: bin/replica-seed loads it from the
+  # primary and starts replication once the store is installed.
+  db-replica:
+    image: mariadb:11.4
+    hostname: db-replica
+    networks: [fleet]
+    cpus: "0.5"
+    mem_limit: 1500m
+    environment:
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MARIADB_DATABASE: ${ZDT_DB_NAME:?set ZDT_DB_NAME in lab.env}
+      MARIADB_USER: ${ZDT_DB_USER:?set ZDT_DB_USER in lab.env}
+      MARIADB_PASSWORD_FILE: /run/secrets/db_app_password
+    volumes:
+      - db-replica-data:/var/lib/mysql
+      - ./db/replica.cnf:/etc/mysql/conf.d/zdtfleet.cnf:ro
+    secrets: [db_root_password, db_app_password]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  opensearch:
+    image: opensearchproject/opensearch:2.19.6
+    hostname: opensearch
+    networks: [fleet]
+    cpus: "0.75"
+    mem_limit: 2g
+    environment:
+      discovery.type: single-node
+      bootstrap.memory_lock: "false"
+      OPENSEARCH_JAVA_OPTS: -Xms1g -Xmx1g
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9200/_cluster/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  valkey:
+    image: valkey/valkey:8
+    hostname: valkey
+    networks: [fleet]
+    cpus: "0.25"
+    mem_limit: 512m
+    command: ["valkey-server", "--maxmemory", "400mb", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  web1:
+    <<: *web
+    hostname: web1
+    volumes:
+      - web1-magento:/var/www/magento
+      - media:/var/www/magento/shared/pub/media
+      - ./keys/id_ed25519.pub:/run/zdtfleet/authorized_keys:ro
+
+  web2:
+    <<: *web
+    hostname: web2
+    volumes:
+      - web2-magento:/var/www/magento
+      - media:/var/www/magento/shared/pub/media
+      - ./keys/id_ed25519.pub:/run/zdtfleet/authorized_keys:ro
+
+  web3:
+    <<: *web
+    hostname: web3
+    volumes:
+      - web3-magento:/var/www/magento
+      - media:/var/www/magento/shared/pub/media
+      - ./keys/id_ed25519.pub:/run/zdtfleet/authorized_keys:ro
+
+  lb:
+    image: haproxy:3.2.24-alpine
+    hostname: lb
+    networks: [fleet]
+    cpus: "0.1"
+    mem_limit: 128m
+    ports:
+      - "127.0.0.1:18080:80"
+    volumes:
+      - ./lb/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on: [web1, web2, web3]
+
+  control:
+    build:
+      context: ./control
+    image: zdtfleet-control
+    hostname: control
+    networks: [fleet]
+    cpus: "0.15"
+    mem_limit: 512m
+    working_dir: /playbook
+    env_file: [lab.env]
+    volumes:
+      - ${ZDT_PLAYBOOK:?set ZDT_PLAYBOOK in lab.env}:/playbook:ro
+      - runs:/runs
+      - releases:/releases:ro
+      - lab-config:/lab-config
+      - ./keys/id_ed25519:/run/zdtfleet/id_ed25519:ro
+    secrets: [db_root_password, db_app_password, db_repl_password]
+    depends_on: [web1, web2, web3]
+
+  # Builds release tarballs between arms, never during one. No network: a
+  # release is made from the source tree alone.
+  builder:
+    build:
+      context: ./web
+    image: zdtfleet-web
+    hostname: builder
+    profiles: [build]
+    network_mode: none
+    cpus: "1.0"
+    mem_limit: 3g
+    user: deploy
+    entrypoint: ["bash"]
+    working_dir: /playbook
+    volumes:
+      - ${ZDT_LAB_SRC:?set ZDT_LAB_SRC in lab.env}:/src:ro
+      - ${ZDT_PLAYBOOK:?set ZDT_PLAYBOOK in lab.env}:/playbook:ro
+      - releases:/releases
+      - lab-config:/lab-config:ro
+
+networks:
+  fleet:
+    name: zdtfleet-fleet
+
+volumes:
+  db-primary-data:
+  db-replica-data:
+  opensearch-data:
+  web1-magento:
+  web2-magento:
+  web3-magento:
+  media:
+  releases:
+  runs:
+  # The first install's config.php with its scopes and themes dumped, so every
+  # later release deploys static content without a database.
+  lab-config:
+
+secrets:
+  db_root_password:
+    file: ./secrets/db_root_password
+  db_app_password:
+    file: ./secrets/db_app_password
+  db_repl_password:
+    file: ./secrets/db_repl_password

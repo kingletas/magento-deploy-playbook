@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+#
+# install-store: install the lab's r0 release on web1 and bring the store up.
+#
+# Runs on `control`, over ssh to web1 (control has no PHP of its own; the
+# release and bin/magento live on the node). It unpacks the r0 tarball
+# build-release wrote, links it as `current`, runs setup:install against
+# db-primary with search on opensearch and cache/page-cache/sessions on
+# valkey (one database each, base URL http://lb/), turns off the
+# redirect-to-base so a request to a node by name is served rather than
+# redirected, sets production mode, and seeds fixture data with Magento's
+# small performance profile. It then runs `app:config:dump scopes themes`
+# on the admin node and copies that release's resulting app/etc/config.php
+# to control's own /lab-config/config.php: build-release picks this up on
+# its next run and, from then on, can deploy static content without a
+# database (see build-release's header for why that dump is needed at all).
+# Because this release (the one install-store just unpacked) was built
+# before that config.php existed, it has no static content; every release
+# build-release makes from here on, r0 included, needs a fresh
+# build-release run before deploy-r0 uses it. This script says so at the
+# end. It then reads one category path and one product path the fixtures
+# created out of url_rewrite, and prints them so they can be copied into
+# lab.env as ZDT_CATEGORY_PATH / ZDT_PRODUCT_PATH.
+#
+# What it changes: web1's /var/www/magento/releases/<ZDT_LABEL_OLD>, its
+# `current` symlink, its shared/app/etc/env.php (written by setup:install
+# through the release's own symlink to that shared file), the primary
+# database named by ZDT_DB_NAME, and control's /lab-config/config.php.
+#
+# To undo: this is the first install, so undoing it means tearing the store
+# back down rather than rolling it forward — drop ZDT_DB_NAME on db-primary
+# and remove web1's /var/www/magento/releases/<ZDT_LABEL_OLD> and `current`
+# link, or simplest, `docker compose -p zdtfleet down --volumes` and start
+# the fleet over.
+#
+# Settings come from the environment (lab.env), never arguments:
+#   ZDT_ADMIN_NODE       the node the store is installed on (web1 in the lab)
+#   ZDT_RELEASES_LOCAL_DIR  where build-release's tarballs land, as control
+#                         sees them (default /releases, the read-only mount)
+#   ZDT_LABEL_OLD         the release label to install (default r0)
+#   ZDT_RELEASES_DIR      release directory on the node (default
+#                         /var/www/magento/releases)
+#   ZDT_CURRENT_LINK      the `current` symlink on the node (default
+#                         /var/www/magento/current)
+#   ZDT_ENV_PHP           the node's env.php (default
+#                         /var/www/magento/shared/app/etc/env.php)
+#   ZDT_DB_HOST / ZDT_DB_USER / ZDT_DB_NAME   the primary's connection
+#   ZDT_SEARCH_HOST (default opensearch) / ZDT_SEARCH_PORT (default 9200)
+#   ZDT_CACHE_HOST  (default valkey)    / ZDT_CACHE_PORT  (default 6379)
+#   ZDT_BASE_URL           default http://lb/
+#   ZDT_ADMIN_USER          default zdtadmin
+#   ZDT_ADMIN_EMAIL         default zdtadmin@example.test
+#   ZDT_RUN_DIR             where this run's admin credentials file lands
+#                         (default /runs)
+#   ZDT_LAB_CONFIG          control's read-write mount of the lab-config
+#                         volume (default /lab-config), where the dumped
+#                         config.php lands for build-release to read
+#
+# Passwords never touch argv or this script's own output:
+#   ZDT_DB_PASSWORD   the primary's app password. This script does not read
+#                     the Compose secret file itself: run it through
+#                     bin/with-secrets, which reads db_app_password and
+#                     exports it, the same way it already feeds bin/zdt-arm
+#                     and bin/zdt-fleet (see bin/with-secrets):
+#                       lab/zdt-fleet/bin/with-secrets lab/zdt-fleet/bin/install-store
+#   ZDT_ADMIN_PASSWORD_FILE   optional; no Compose secret is provisioned for
+#                     the admin account, so when this is unset a password is
+#                     generated here and written (mode 600) to
+#                     $ZDT_RUN_DIR/install-store-<run>/admin-credentials,
+#                     never printed. Set it to a file path to use one
+#                     instead.
+#
+# The one exposure this script cannot close: bin/magento setup:install
+# takes --db-password and --admin-password as CLI flags, so for the seconds
+# it runs, the remote php process's own argv carries them, visible to `ps`
+# on web1 for that window. That is inherent to Magento's installer, not a
+# gap in how this script handles the values before or after.
+#
+# Exit codes: 0 installed; 2 refused before anything changed (missing
+# settings, no tarball, an ssh or remote command failure).
+
+set -euo pipefail
+
+die() { echo "install-store: $*" >&2; exit 2; }
+
+: "${ZDT_ADMIN_NODE:?set ZDT_ADMIN_NODE (the node the store installs on, web1 in the lab)}"
+: "${ZDT_DB_HOST:?set ZDT_DB_HOST}"
+: "${ZDT_DB_USER:?set ZDT_DB_USER}"
+: "${ZDT_DB_NAME:?set ZDT_DB_NAME}"
+: "${ZDT_DB_PASSWORD:?set ZDT_DB_PASSWORD; run this script through bin/with-secrets, which reads it from the db_app_password Compose secret}"
+
+ZDT_LABEL_OLD="${ZDT_LABEL_OLD:-r0}"
+ZDT_RELEASES_LOCAL_DIR="${ZDT_RELEASES_LOCAL_DIR:-/releases}"
+ZDT_RELEASES_DIR="${ZDT_RELEASES_DIR:-/var/www/magento/releases}"
+ZDT_CURRENT_LINK="${ZDT_CURRENT_LINK:-/var/www/magento/current}"
+ZDT_ENV_PHP="${ZDT_ENV_PHP:-/var/www/magento/shared/app/etc/env.php}"
+ZDT_SEARCH_HOST="${ZDT_SEARCH_HOST:-opensearch}"
+ZDT_SEARCH_PORT="${ZDT_SEARCH_PORT:-9200}"
+ZDT_CACHE_HOST="${ZDT_CACHE_HOST:-valkey}"
+ZDT_CACHE_PORT="${ZDT_CACHE_PORT:-6379}"
+ZDT_BASE_URL="${ZDT_BASE_URL:-http://lb/}"
+ZDT_ADMIN_USER="${ZDT_ADMIN_USER:-zdtadmin}"
+ZDT_ADMIN_EMAIL="${ZDT_ADMIN_EMAIL:-zdtadmin@example.test}"
+ZDT_RUN_DIR="${ZDT_RUN_DIR:-/runs}"
+ZDT_LAB_CONFIG="${ZDT_LAB_CONFIG:-/lab-config}"
+DB_PASSWORD="$ZDT_DB_PASSWORD"
+
+TARBALL="$ZDT_RELEASES_LOCAL_DIR/$ZDT_LABEL_OLD.tar.gz"
+[[ -f $TARBALL ]] || die "no release tarball at $TARBALL; run bin/build-release $ZDT_LABEL_OLD first"
+
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+OUT="$ZDT_RUN_DIR/install-store-$RUN_ID"
+mkdir -p "$OUT"
+
+if [[ -n ${ZDT_ADMIN_PASSWORD_FILE:-} ]]; then
+    [[ -f $ZDT_ADMIN_PASSWORD_FILE ]] || die "no admin password at $ZDT_ADMIN_PASSWORD_FILE"
+    ADMIN_PASSWORD="$(<"$ZDT_ADMIN_PASSWORD_FILE")"
+else
+    # No admin secret was provisioned for the lab, so one is made here: two
+    # classes and enough length to clear Magento's own complexity check.
+    ADMIN_PASSWORD="Zdt$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c20)!"
+fi
+[[ -n $ADMIN_PASSWORD ]] || die "the admin password ended up empty"
+
+ssh_opts=(-o BatchMode=yes)
+
+# redact LABEL -- what gets echoed for a step that carries a secret: never
+# the step's own command, just a fixed description.
+redact() { printf '%s' "$1"; }
+
+remote_script() {
+    # remote_script HOST LABEL -- pipes this function's stdin to bash on the
+    # node, so a script carrying a password appears in no argv, no ps on
+    # this machine and no transcript here: only LABEL is echoed. Mirrors
+    # bin/zdt-arm.d/lib.sh's remote_script, kept local here since
+    # install-store is not one of the arms.
+    local host="$1" label="$2"
+    echo "RUN   $host: $(redact "$label")" >&2
+    ssh "${ssh_opts[@]}" "$host" bash -s
+}
+
+echo "== install-store: $ZDT_LABEL_OLD onto $ZDT_ADMIN_NODE =="
+
+echo "RUN   $ZDT_ADMIN_NODE: rsync $TARBALL -> $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD.tar.gz" >&2
+rsync -a "$TARBALL" "$ZDT_ADMIN_NODE:$ZDT_RELEASES_DIR/$ZDT_LABEL_OLD.tar.gz" \
+    || die "the rsync to $ZDT_ADMIN_NODE failed"
+
+remote_script "$ZDT_ADMIN_NODE" "unpack and link release $ZDT_LABEL_OLD" <<REMOTE
+set -euo pipefail
+mkdir -p "$ZDT_RELEASES_DIR/$ZDT_LABEL_OLD"
+tar -xzf "$ZDT_RELEASES_DIR/$ZDT_LABEL_OLD.tar.gz" -C "$ZDT_RELEASES_DIR/$ZDT_LABEL_OLD"
+ln -sfn "$ZDT_RELEASES_DIR/$ZDT_LABEL_OLD" "$ZDT_CURRENT_LINK"
+REMOTE
+
+remote_script "$ZDT_ADMIN_NODE" "setup:install (db password and admin password redacted here; see this script's header for the one window neither can be hidden in)" <<REMOTE
+set -euo pipefail
+cd "$ZDT_CURRENT_LINK"
+php bin/magento setup:install \\
+    --base-url='$ZDT_BASE_URL' \\
+    --db-host='$ZDT_DB_HOST' \\
+    --db-name='$ZDT_DB_NAME' \\
+    --db-user='$ZDT_DB_USER' \\
+    --db-password='$DB_PASSWORD' \\
+    --backend-frontname=admin \\
+    --search-engine=opensearch \\
+    --opensearch-host='$ZDT_SEARCH_HOST' \\
+    --opensearch-port='$ZDT_SEARCH_PORT' \\
+    --opensearch-index-prefix=magento2 \\
+    --opensearch-timeout=15 \\
+    --cache-backend=redis \\
+    --cache-backend-redis-server='$ZDT_CACHE_HOST' \\
+    --cache-backend-redis-port='$ZDT_CACHE_PORT' \\
+    --cache-backend-redis-db=0 \\
+    --page-cache=redis \\
+    --page-cache-redis-server='$ZDT_CACHE_HOST' \\
+    --page-cache-redis-port='$ZDT_CACHE_PORT' \\
+    --page-cache-redis-db=1 \\
+    --session-save=redis \\
+    --session-save-redis-host='$ZDT_CACHE_HOST' \\
+    --session-save-redis-port='$ZDT_CACHE_PORT' \\
+    --session-save-redis-db=2 \\
+    --admin-firstname=Zdt \\
+    --admin-lastname=Admin \\
+    --admin-email='$ZDT_ADMIN_EMAIL' \\
+    --admin-user='$ZDT_ADMIN_USER' \\
+    --admin-password='$ADMIN_PASSWORD' \\
+    --language=en_US \\
+    --currency=USD \\
+    --timezone=UTC \\
+    --use-rewrites=1 \\
+    --no-interaction
+php bin/magento config:set web/url/redirect_to_base 0 --no-interaction
+php bin/magento deploy:mode:set production --skip-compilation
+php bin/magento setup:performance:generate-fixtures "$ZDT_CURRENT_LINK/setup/performance-toolkit/profiles/ce/small.xml"
+test -s '$ZDT_ENV_PHP'
+REMOTE
+
+echo "$ZDT_ADMIN_NODE: env.php written to $ZDT_ENV_PHP (through the release's own symlink to it)"
+
+remote_script "$ZDT_ADMIN_NODE" "app:config:dump scopes themes" <<REMOTE
+set -euo pipefail
+cd "$ZDT_CURRENT_LINK"
+php bin/magento app:config:dump scopes themes
+REMOTE
+
+echo "RUN   $ZDT_ADMIN_NODE -> control: copy app/etc/config.php to $ZDT_LAB_CONFIG/config.php" >&2
+mkdir -p "$ZDT_LAB_CONFIG"
+# shellcheck disable=SC2029  # client-side expansion is the point: it is control's own fixed path on the node.
+if ! ssh "${ssh_opts[@]}" "$ZDT_ADMIN_NODE" cat "$ZDT_CURRENT_LINK/app/etc/config.php" > "$ZDT_LAB_CONFIG/config.php.new"; then
+    rm -f "$ZDT_LAB_CONFIG/config.php.new"
+    die "reading $ZDT_ADMIN_NODE's app/etc/config.php failed; $ZDT_LAB_CONFIG/config.php was not touched"
+fi
+mv "$ZDT_LAB_CONFIG/config.php.new" "$ZDT_LAB_CONFIG/config.php"
+echo "$ZDT_LAB_CONFIG/config.php written: it carries scopes and themes now, so build-release can deploy static content."
+echo "Every release build-release makes from here on needs building again, r0 included -- the $ZDT_LABEL_OLD just installed has none. Rebuild before running deploy-r0."
+
+# The admin credentials are the one secret this run itself minted; they are
+# written once, to a file only this run's operator can read, never echoed.
+{
+    printf 'admin_user=%s\n' "$ZDT_ADMIN_USER"
+    printf 'admin_password=%s\n' "$ADMIN_PASSWORD"
+} > "$OUT/admin-credentials"
+chmod 600 "$OUT/admin-credentials"
+echo "Admin credentials written to $OUT/admin-credentials (not printed here)."
+
+echo
+echo "== reading one category path and one product path from url_rewrite =="
+MYSQL_BIN="$(command -v mariadb || command -v mysql || true)"
+[[ -n $MYSQL_BIN ]] || die "no mariadb or mysql client on PATH"
+db_sql() {
+    MYSQL_PWD="$DB_PASSWORD" "$MYSQL_BIN" --no-defaults --connect-timeout=10 \
+        --batch --skip-column-names -h "$ZDT_DB_HOST" -u "$ZDT_DB_USER" "$ZDT_DB_NAME" -e "$1"
+}
+category_path="$(db_sql "SELECT request_path FROM url_rewrite WHERE entity_type='category' AND redirect_type=0 ORDER BY url_rewrite_id LIMIT 1" 2>&1)" \
+    || die "the url_rewrite query for a category path failed: $category_path"
+product_path="$(db_sql "SELECT request_path FROM url_rewrite WHERE entity_type='product' AND redirect_type=0 ORDER BY url_rewrite_id LIMIT 1" 2>&1)" \
+    || die "the url_rewrite query for a product path failed: $product_path"
+[[ -n $category_path ]] || die "no category url_rewrite row; did setup:performance:generate-fixtures run?"
+[[ -n $product_path ]] || die "no product url_rewrite row; did setup:performance:generate-fixtures run?"
+
+echo
+echo "Put these in lab.env:"
+echo "ZDT_CATEGORY_PATH=/${category_path#/}"
+echo "ZDT_PRODUCT_PATH=/${product_path#/}"

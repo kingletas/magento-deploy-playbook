@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+#
+# replica-keeps-up: the proof that the replica keeps up with the primary.
+#
+# Writes ten marker rows into a scratch table (lab_repl_probe, created if
+# absent) on the primary, one at a time, and times how long each takes to
+# become readable on the replica. Prints every lag and the maximum, then
+# runs bin/zdt-fleet replica-check with the same settings and shows its
+# result. Exits non-zero if any lag exceeds 5 seconds or that check fails.
+#
+# What it changes: adds table lab_repl_probe (if absent) and ten rows to it
+# on ZDT_PRIMARY_DATABASE, which then replicate to the replica. To undo:
+# DROP TABLE IF EXISTS lab_repl_probe; on the primary.
+#
+# Settings come from the environment (lab.env):
+#
+#   ZDT_PRIMARY_HOST / ZDT_PRIMARY_PORT (default 3306)
+#   ZDT_PRIMARY_DATABASE (falls back to ZDT_DB_NAME): where the scratch
+#     table lives.
+#   ZDT_PRIMARY_ADMIN_USER (default root) and ZDT_PRIMARY_ADMIN_PASSWORD_FILE
+#     (default /run/secrets/db_root_password): the account used to write
+#     the probe rows (a table create plus inserts, which the read-scoped
+#     ZDT_PRIMARY_USER account is not assumed to have).
+#   ZDT_REPLICA_HOST / ZDT_REPLICA_PORT (default 3306) / ZDT_REPLICA_USER /
+#   ZDT_REPLICA_PASSWORD: the account used to read the marker rows back,
+#     the same one bin/zdt-fleet uses.
+#   ZDT_FLEET_BIN: path of bin/zdt-fleet (default: found relative to this
+#     script under the standard lab/zdt-fleet/bin/... checkout layout).
+#
+# No password is ever printed or placed in argv. Each probe's wait is
+# bounded at 10 seconds; ten probes plus the fleet check cannot run past a
+# few minutes.
+#
+# Exit codes: 0 every lag was 5s or under and bin/zdt-fleet replica-check
+# passed; 1 a lag exceeded 5s, a marker never arrived, or replica-check
+# failed; 2 the tool could not run at all (missing settings, no client, a
+# write that failed outright).
+
+set -euo pipefail
+
+die() { echo "replica-keeps-up: $*" >&2; exit 2; }
+
+MYSQL_BIN="$(command -v mariadb || command -v mysql || true)"
+[[ -n $MYSQL_BIN ]] || die "no mariadb or mysql client on PATH"
+
+: "${ZDT_PRIMARY_HOST:?set ZDT_PRIMARY_HOST}"
+: "${ZDT_REPLICA_HOST:?set ZDT_REPLICA_HOST}"
+: "${ZDT_REPLICA_USER:?set ZDT_REPLICA_USER}"
+ZDT_PRIMARY_PORT="${ZDT_PRIMARY_PORT:-3306}"
+ZDT_REPLICA_PORT="${ZDT_REPLICA_PORT:-3306}"
+ZDT_PRIMARY_DATABASE="${ZDT_PRIMARY_DATABASE:-${ZDT_DB_NAME:-}}"
+[[ -n $ZDT_PRIMARY_DATABASE ]] || die "set ZDT_PRIMARY_DATABASE (or ZDT_DB_NAME)"
+ZDT_PRIMARY_ADMIN_USER="${ZDT_PRIMARY_ADMIN_USER:-root}"
+ZDT_PRIMARY_ADMIN_PASSWORD_FILE="${ZDT_PRIMARY_ADMIN_PASSWORD_FILE:-/run/secrets/db_root_password}"
+[[ -r $ZDT_PRIMARY_ADMIN_PASSWORD_FILE ]] \
+    || die "cannot read ZDT_PRIMARY_ADMIN_PASSWORD_FILE ($ZDT_PRIMARY_ADMIN_PASSWORD_FILE)"
+primary_admin_password="$(<"$ZDT_PRIMARY_ADMIN_PASSWORD_FILE")"
+
+workdir="$(mktemp -d "${TMPDIR:-/tmp}/replica-keeps-up.XXXXXX")"
+# shellcheck disable=SC2329  # called by the trap below, not called directly
+cleanup() { rm -rf "$workdir"; }
+trap 'cleanup' EXIT
+umask 077
+primary_cnf="$workdir/primary.cnf"
+cat >"$primary_cnf" <<CNF
+[client]
+user=$ZDT_PRIMARY_ADMIN_USER
+password="$primary_admin_password"
+host=$ZDT_PRIMARY_HOST
+port=$ZDT_PRIMARY_PORT
+CNF
+chmod 600 "$primary_cnf"
+
+primary_sql() {
+    "$MYSQL_BIN" --defaults-extra-file="$primary_cnf" --batch --skip-column-names \
+        --database="$ZDT_PRIMARY_DATABASE" -e "$1"
+}
+replica_sql() {
+    MYSQL_PWD="${ZDT_REPLICA_PASSWORD:-}" "$MYSQL_BIN" --no-defaults --connect-timeout=10 \
+        --batch --skip-column-names -h "$ZDT_REPLICA_HOST" -P "$ZDT_REPLICA_PORT" \
+        -u "$ZDT_REPLICA_USER" --database="$ZDT_PRIMARY_DATABASE" -e "$1"
+}
+
+primary_sql "CREATE TABLE IF NOT EXISTS lab_repl_probe (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    marker VARCHAR(64) NOT NULL,
+    written_at DATETIME(6) NOT NULL
+) ENGINE=InnoDB;"
+
+per_probe_timeout=10
+max_lag=0
+fail=0
+
+for (( i = 1; i <= 10; i++ )); do
+    marker="probe-$$-$i-$(date +%s%N)"
+    primary_sql "INSERT INTO lab_repl_probe (marker, written_at) VALUES ('$marker', NOW(6));"
+    start=$SECONDS
+    found=0
+    while (( SECONDS - start < per_probe_timeout )); do
+        count="$(replica_sql "SELECT COUNT(*) FROM lab_repl_probe WHERE marker='$marker'" 2>/dev/null || echo 0)"
+        if [[ $count == 1 ]]; then
+            found=1
+            break
+        fi
+        sleep 0.2
+    done
+    lag=$((SECONDS - start))
+    if [[ $found -ne 1 ]]; then
+        echo "probe $i: marker never appeared on the replica within ${per_probe_timeout}s"
+        fail=1
+        lag=$per_probe_timeout
+    fi
+    printf 'probe %2d: lag %ss\n' "$i" "$lag"
+    if (( lag > max_lag )); then
+        max_lag=$lag
+    fi
+done
+
+echo
+echo "maximum lag: ${max_lag}s"
+if (( max_lag > 5 )); then
+    echo "replica-keeps-up: maximum lag exceeds 5s."
+    fail=1
+fi
+
+fleet_bin="${ZDT_FLEET_BIN:-}"
+if [[ -z $fleet_bin ]]; then
+    here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    candidate="$here/../../../bin/zdt-fleet"
+    [[ -x $candidate ]] && fleet_bin="$candidate"
+fi
+[[ -n $fleet_bin && -x $fleet_bin ]] || die "cannot find bin/zdt-fleet; set ZDT_FLEET_BIN"
+
+echo
+echo "== bin/zdt-fleet replica-check =="
+if "$fleet_bin" replica-check; then
+    echo "replica-check: PASS"
+else
+    echo "replica-check: FAIL"
+    fail=1
+fi
+
+exit "$fail"

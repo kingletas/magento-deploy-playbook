@@ -7,6 +7,10 @@ Entries say what changed for somebody using this, not what the diff did.
 First public release. Everything below is what it contains rather than what
 changed, because there's nothing before it.
 
+### Added
+
+- A lab fleet for the zero-downtime arms in `lab/zdt-fleet`: three real Magento Open Source 2.4.8-p2 web nodes reached over ssh, HAProxy with a health check, a MariaDB primary with a replica following it by GTID, OpenSearch, Valkey, and a control container the arms run from. Every container has a CPU and memory limit, and only the load balancer publishes a port, on `127.0.0.1`. Its scripts build releases without a database, install the store, seed the replica and prove it keeps up, and put the first release on every node.
+
 ### Fixed
 
 - A deploy that stops no longer leaves the build lock behind for someone to find. One that stops before anything goes live releases it and records `deploy.failed` with the phase and step. One that stops after the switch in a state a person must see first, a web host lost at the switch or a failed health check left live or in maintenance, keeps it and writes why into it. The lock now says who took it and for which release, and the next deploy is refused with whatever it says. A prune that fails at the end still releases it.

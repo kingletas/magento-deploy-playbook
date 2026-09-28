@@ -11,11 +11,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libfreetype-dev libjpeg62-turbo-dev libpng-dev libicu-dev \
         libxml2-dev libxslt1-dev libzip-dev libsodium-dev \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install -j "$BUILD_JOBS" bcmath gd intl opcache pdo_mysql soap sockets xsl zip \
+    && docker-php-ext-install -j "$BUILD_JOBS" bcmath ftp gd intl opcache pdo_mysql soap sockets xsl zip \
     && rm -rf /var/lib/apt/lists/*
 
 # Fail the build, not the install, if an extension Magento needs is missing.
-RUN for ext in bcmath ctype curl dom gd intl mbstring pdo_mysql SimpleXML soap sockets sodium xsl zip "Zend OPcache"; do \
+RUN for ext in bcmath ctype curl dom ftp gd intl mbstring pdo_mysql SimpleXML soap sockets sodium xsl zip "Zend OPcache"; do \
         php -m | grep -qx "$ext" || { echo "missing PHP extension: $ext" >&2; exit 1; }; \
     done
 

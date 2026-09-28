@@ -150,7 +150,9 @@ echo "build-release: clearing var/ (compile and static deploy write logs and a c
 rm -rf "${WORKDIR:?}/var"
 
 echo "build-release: linking app/etc/env.php and pub/media to the node's shared paths"
-mkdir -p "$WORKDIR/app/etc" "$WORKDIR/pub"
+# pub/static exists even when nothing was deployed into it: setup:install
+# refuses a release whose pub/static it cannot write.
+mkdir -p "$WORKDIR/app/etc" "$WORKDIR/pub/static"
 rm -f "$WORKDIR/app/etc/env.php"
 ln -s /var/www/magento/shared/app/etc/env.php "$WORKDIR/app/etc/env.php"
 rm -rf "$WORKDIR/pub/media"

@@ -155,6 +155,7 @@ services:
       - runs:/runs
       - releases:/releases:ro
       - lab-config:/lab-config
+      - control-ssh:/home/zdt/.ssh
       - ./keys/id_ed25519:/run/zdtfleet/id_ed25519:ro
     secrets: [db_root_password, db_app_password, db_repl_password]
     depends_on: [web1, web2, web3]
@@ -193,6 +194,8 @@ volumes:
   media:
   releases:
   runs:
+  # control's ssh config and known_hosts, kept across a recreate.
+  control-ssh:
   # The first install's config.php with its scopes and themes dumped, so every
   # later release deploys static content without a database.
   lab-config:

@@ -134,6 +134,11 @@ FAKE_LB_DRAIN = """#!/usr/bin/env bash
 # order. FAKE_LB_DRAIN_FAIL names a state (maint or ready) that fails.
 printf 'DRAIN|%s\\n' "$*" >> "$FAKE_SSH_CALLS"
 [[ ${FAKE_LB_DRAIN_FAIL:-} == "$2" ]] && exit 1
+# HAProxy counts a node put into maintenance as taken out, and so does the fake.
+if [[ $2 == maint ]]; then
+    n=$(cat "$FAKE_DIR/lb-downs-$1" 2>/dev/null || echo 0)
+    echo $(( n + 1 )) > "$FAKE_DIR/lb-downs-$1"
+fi
 exit 0
 """
 
@@ -172,8 +177,8 @@ if [[ -n ${ZDT_LB_STATS_URL:-} && $url == "$ZDT_LB_STATS_URL" ]]; then
         echo "stats,FRONTEND,0,OPEN,,,0,"
         IFS=',' read -r -a servers <<< "${FAKE_LB_SERVERS:-node1,node2,node3}"
         for sv in "${servers[@]}"; do
-            downs=0
-            [[ ,${FAKE_LB_TAKEN_OUT:-}, == *",$sv,"* ]] && downs=$n
+            downs=$(cat "$FAKE_DIR/lb-downs-$sv" 2>/dev/null || echo 0)
+            [[ ,${FAKE_LB_TAKEN_OUT:-}, == *",$sv,"* ]] && downs=$(( downs + n ))
             [[ ,${FAKE_LB_BACKWARDS:-}, == *",$sv,"* ]] && downs=$(( 100 - n ))
             echo "web,$sv,0,UP,$downs,$(( downs * 5 )),2,"
         done
@@ -907,6 +912,26 @@ class ZdtArmTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
         phase = ["node1 maint", "unpack", "upgrade", "node1 ready"]
         self.assertEqual(self._drain_order(), phase + phase)
+
+    def test_the_arms_own_take_out_is_not_a_falsifier_5_fail(self) -> None:
+        # The new node refuses while it migrates, and HAProxy counts the arm's
+        # maintenance as a take-out; only a take-out outside that window counts.
+        # Only its cart refuses, so it answers 200 on its home page and goes back in.
+        result = self.run_arm(
+            "arm1", "-y", ZDT_RATE="7", ZDT_LB_DRAIN=self.lb_drain,
+            FAKE_CURL_DOWN="node1.example//checkout",
+        )
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        self.assertIn("lb: the arm took node1 out itself", result.stdout)
+        self.assertEqual(result.stdout.count("PASS  falsifier 5"), 2)
+
+    def test_a_take_out_outside_the_drain_still_fails(self) -> None:
+        result = self.run_arm(
+            "arm1", "-y", ZDT_RATE="7", ZDT_LB_DRAIN=self.lb_drain,
+            FAKE_CURL_DOWN="node1.example//checkout", FAKE_LB_TAKEN_OUT="node1",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FAIL  falsifier 5: HAProxy took node1 out of rotation", result.stdout)
 
     def test_lb_drain_covers_both_crossings_of_arm3(self) -> None:
         result = self.run_arm("arm3", "-y", ZDT_LB_DRAIN=self.lb_drain)

@@ -605,11 +605,17 @@ lb_take_out() {
     # release lands and stays out through the migration, so no customer is
     # sent to a node whose code and schema do not match yet.
     [[ -n ${ZDT_LB_DRAIN:-} ]] || return 0
+    # HAProxy counts a node put into maintenance as taken out, so the counts on
+    # either side of the arm's own take-out are kept, and falsifier 5 leaves
+    # that window out. No health check runs on a node in maintenance.
+    lb_downs "$TRAFFIC_LOG.lb-drain-start" \
+        || die "HAProxy's stats did not answer before $ZDT_NEW_NODE was taken out; the migration did not happen"
     echo "RUN   control: $ZDT_LB_DRAIN $ZDT_NEW_NODE maint"
     # shellcheck disable=SC2086  # ZDT_LB_DRAIN is a command line, split on purpose
     $ZDT_LB_DRAIN "$ZDT_NEW_NODE" maint \
         || die "$ZDT_NEW_NODE could not be taken out of the load balancer; the migration did not happen"
     LB_OUT="$ZDT_NEW_NODE"
+    DRAINED_THIS_PHASE="$ZDT_NEW_NODE"
 }
 
 lb_put_back() {
@@ -627,6 +633,7 @@ lb_put_back() {
             echo "RUN   control: $ZDT_LB_DRAIN $LB_OUT ready (it answered 200 after ${i}s)"
             # shellcheck disable=SC2086  # as in lb_take_out
             $ZDT_LB_DRAIN "$LB_OUT" ready && LB_OUT=""
+            lb_downs "$TRAFFIC_LOG.lb-drain-end" || true
             return 0
         fi
         sleep 2
@@ -880,12 +887,20 @@ lb_rotation_mark() {
     # servers by name, or there is no count to judge it by.
     mkdir -p "$OUT"
     local before="$TRAFFIC_LOG.lb-before" h
+    DRAINED_THIS_PHASE=""
     lb_downs "$before" \
         || die "HAProxy's stats did not answer at ZDT_LB_STATS_URL ($ZDT_LB_STATS_URL); falsifier 5 is judged from them, so the phase does not start"
     for h in "${WEB_HOSTS[@]}"; do
         awk -v h="$h" '$1 == h { found = 1 } END { exit !found }' "$before" \
             || die "HAProxy has no server named $h: its server names must be the names in ZDT_WEB_HOSTS, or falsifier 5 has nothing to judge $h by"
     done
+}
+
+# lb_delta HOST FROM TO -- how many more times HAProxy took HOST out, and how
+# many more seconds it spent out, between two readings.
+lb_delta() {
+    awk -v h="$1" 'FNR == 1 { f++ } $1 == h { d[f] += $2; s[f] += $3 }
+        END { print d[2] - d[1], s[2] - s[1] }' "$2" "$3"
 }
 
 traffic_verdicts() {
@@ -902,11 +917,19 @@ traffic_verdicts() {
     if ! lb_downs "$after"; then
         falsifier FAIL "falsifier 5: not judged; HAProxy's stats did not answer at $ZDT_LB_STATS_URL after the traffic"
     else
-        local i h downs secs taken=() bad=() backwards=()
+        local i h downs secs own_downs own_secs drain_end taken=() bad=() backwards=()
         for i in "${!WEB_HOSTS[@]}"; do
             h=${WEB_HOSTS[$i]}
-            read -r downs secs < <(awk -v h="$h" 'FNR == 1 { f++ } $1 == h { d[f] += $2; s[f] += $3 }
-                END { print d[2] - d[1], s[2] - s[1] }' "$before" "$after")
+            read -r downs secs < <(lb_delta "$h" "$before" "$after")
+            if [[ $h == "${DRAINED_THIS_PHASE:-}" && -f $TRAFFIC_LOG.lb-drain-start ]]; then
+                # A node never put back is left out from the take-out to the end.
+                drain_end="$TRAFFIC_LOG.lb-drain-end"
+                [[ -f $drain_end ]] || drain_end="$after"
+                read -r own_downs own_secs < <(lb_delta "$h" "$TRAFFIC_LOG.lb-drain-start" "$drain_end")
+                echo "lb: the arm took $h out itself, ${own_secs}s; that window is not counted"
+                downs=$((downs - own_downs))
+                secs=$((secs - own_secs))
+            fi
             if (( downs < 0 )); then
                 backwards+=("$h")
             elif (( downs > 0 )); then

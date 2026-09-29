@@ -455,6 +455,11 @@ class ZdtArmTest(unittest.TestCase):
         # The key Magento reads is id_prefix; backend_options is ignored.
         self.assertIn("id_prefix", transcript)
         self.assertNotIn("backend_options", transcript)
+        # A cache prefix is the start of every cache id, and Magento refuses
+        # an id with a hyphen in it; the new release's label has one.
+        self.assertIn("id_prefix) to zdt_shared_ in", transcript)
+        self.assertIn("id_prefix) to zdt_rel_new_ in", transcript)
+        self.assertNotRegex(transcript, r"id_prefix\) to \S*-")
         # Every node reloads PHP-FPM after its env.php edit, in both phases.
         self.assertEqual(transcript.count("fpm-reload-cmd (so PHP-FPM reads the edited env.php)"), 6)
         self.assertIn("restore env.php from the dated backups on every node, and fpm-reload-cmd on each", transcript)

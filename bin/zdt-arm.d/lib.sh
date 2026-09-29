@@ -450,6 +450,14 @@ file_put_contents(\$f, "<?php\nreturn " . var_export(\$env, true) . ";\n");
 REMOTE
 }
 
+cache_prefix() {
+    # cache_prefix NAME -- the cache id_prefix a phase gives NAME. It starts
+    # every cache id, and Magento's cache refuses an id with anything but
+    # letters, digits, _ { and } in it ("Invalid id or tag"), failing every
+    # request; a release label like r2-additive would carry a hyphen in.
+    printf 'zdt_%s_' "${1//[^A-Za-z0-9_]/_}"
+}
+
 fpm_reload() {
     # fpm_reload HOST -- run ZDT_FPM_RELOAD on the node, so PHP-FPM reads the
     # env.php just edited. With OPcache set never to recheck a file, as a
@@ -777,16 +785,16 @@ run_phase() {
             # id_prefix IS the cache prefix Magento reads (the P1-1 proof
             # edits and reads back this key); backend_options.cache_prefix is
             # a key Magento ignores.
-            env_set "$h" cache.frontend.default.id_prefix '"zdt-shared"' \
+            env_set "$h" cache.frontend.default.id_prefix "\"$(cache_prefix shared)\"" \
                 || die "the env.php edit on $h failed before the migration; the arm stops here"
-            env_set "$h" cache.frontend.page_cache.id_prefix '"zdt-shared"' \
+            env_set "$h" cache.frontend.page_cache.id_prefix "\"$(cache_prefix shared)\"" \
                 || die "the env.php edit on $h failed before the migration; the arm stops here"
         else
             pfx="old"
             [[ $h == "$ZDT_NEW_NODE" ]] && pfx="$ZDT_LABEL_NEW"
-            env_set "$h" cache.frontend.default.id_prefix "\"zdt-$pfx\"" \
+            env_set "$h" cache.frontend.default.id_prefix "\"$(cache_prefix "$pfx")\"" \
                 || die "the env.php edit on $h failed before the migration; the arm stops here"
-            env_set "$h" cache.frontend.page_cache.id_prefix "\"zdt-$pfx\"" \
+            env_set "$h" cache.frontend.page_cache.id_prefix "\"$(cache_prefix "$pfx")\"" \
                 || die "the env.php edit on $h failed before the migration; the arm stops here"
         fi
         if [[ $with_blue_green == 1 && $h != "$ZDT_NEW_NODE" ]]; then
@@ -842,11 +850,11 @@ plan_phase() {
     for h in "${WEB_HOSTS[@]}"; do
         printf 'PLAN  %s: cp -L --preserve=mode,ownership,timestamps %s %s.bak-%s\n' "$h" "$ZDT_ENV_PHP" "$ZDT_ENV_PHP" "$RUN_ID"
         if [[ $label == shared-* ]]; then
-            printf 'PLAN  %s\n' "$h: set cache prefixes (id_prefix) to zdt-shared in $ZDT_ENV_PHP"
+            printf 'PLAN  %s\n' "$h: set cache prefixes (id_prefix) to $(cache_prefix shared) in $ZDT_ENV_PHP"
         else
             pfx="old"
             [[ $h == "$ZDT_NEW_NODE" ]] && pfx="$ZDT_LABEL_NEW"
-            printf 'PLAN  %s\n' "$h: set cache prefixes (id_prefix) to zdt-$pfx in $ZDT_ENV_PHP"
+            printf 'PLAN  %s\n' "$h: set cache prefixes (id_prefix) to $(cache_prefix "$pfx") in $ZDT_ENV_PHP"
         fi
         if [[ $with_blue_green == 1 && $h != "$ZDT_NEW_NODE" ]]; then
             printf 'PLAN  %s\n' "$h: set deployment.blue_green.enabled to true in $ZDT_ENV_PHP"
@@ -907,9 +915,9 @@ crossing_phase() {
     for h in "${WEB_HOSTS[@]}"; do
         pfx="old"
         [[ $h == "$ZDT_NEW_NODE" ]] && pfx="$rel"
-        env_set "$h" cache.frontend.default.id_prefix "\"zdt-$pfx\"" \
+        env_set "$h" cache.frontend.default.id_prefix "\"$(cache_prefix "$pfx")\"" \
             || die "the env.php edit on $h failed before the crossing; the arm stops here"
-        env_set "$h" cache.frontend.page_cache.id_prefix "\"zdt-$pfx\"" \
+        env_set "$h" cache.frontend.page_cache.id_prefix "\"$(cache_prefix "$pfx")\"" \
             || die "the env.php edit on $h failed before the crossing; the arm stops here"
         if [[ $h != "$ZDT_NEW_NODE" ]]; then
             # Arm 3 is defined with the flag ON: this is where falsifier 3
@@ -1048,7 +1056,7 @@ plan_phase_crossing() {
         printf 'PLAN  %s: cp -L --preserve=mode,ownership,timestamps %s %s.bak-%s\n' "$h" "$ZDT_ENV_PHP" "$ZDT_ENV_PHP" "$RUN_ID"
         pfx="old"
         [[ $h == "$ZDT_NEW_NODE" ]] && pfx="$rel"
-        printf 'PLAN  %s\n' "$h: set cache prefixes (id_prefix) to zdt-$pfx and deployment.blue_green.enabled to true (old nodes only) in $ZDT_ENV_PHP"
+        printf 'PLAN  %s\n' "$h: set cache prefixes (id_prefix) to $(cache_prefix "$pfx") and deployment.blue_green.enabled to true (old nodes only) in $ZDT_ENV_PHP"
     done
     for h in "${WEB_HOSTS[@]}"; do
         printf 'PLAN  %s\n' "$h: $ZDT_FPM_RELOAD (so PHP-FPM reads the edited env.php)"

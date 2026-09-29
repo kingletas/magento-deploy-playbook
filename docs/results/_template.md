@@ -102,14 +102,21 @@ wrote.*
 
 - **Judged by:** every arm that ran — it checks the replica after each of its
   phases, so its `PASS`/`FAIL` line appears once per phase in the arm's
-  `transcript.log`, with `replica-before.json`, `replica-after.json` and
-  `checksums.txt` beside it.
+  `transcript.log`. `replica-after.json` and `checksums.txt` hold the **last**
+  phase only (`replica_after` rewrites them at the end of every phase), and
+  `replica-before.json` is written once, before the first phase; an earlier
+  phase's falsifier 1 result is its `PASS`/`FAIL` line in `transcript.log`.
 - **Verdict:** `NOT RUN — <condition missed>`
 - **Deciding line:** `<quoted verbatim, with the file it came from>`
-- **Binary log the upgrade wrote:** `<after minus before in binlog_bytes>`
-  against a catalogue of `<catalogue_size>` rows; `binlog_format` `<value>`.
+- **Binary log the upgrade wrote:** default to `not recorded — replica-before.json
+  is read before the first phase and replica-after.json after the last, with a
+  snapshot restore between them, so their difference is not one upgrade's
+  binlog`. Give a figure only where the lab measured one upgrade's binlog some
+  other way — the document then names that measurement and quotes its output.
   Purges during the window (`PURGE BINARY LOGS`, `binlog_expire_logs_seconds`)
-  make this figure an undercount — `<whether any ran>`.
+  make any figure an undercount — `<whether any ran>`. The catalogue size at the
+  run's start and the mode are in `replica-before.json`:
+  `<catalogue_size>` rows, `binlog_format` `<value>`.
 - **Lag after the upgrade:** `<seconds and how it was measured>`
 
 ## Falsifier 2 — a replica read by Magento changes nothing the old servers serve

@@ -471,9 +471,11 @@ bin/zdt-fleet replica-check
 {"timestamp": "2026-09-26T18:00:00Z", "binlog_format": "ROW", "catalogue_size": 1984, "binlog_bytes": 490, "seconds_behind": 0, "last_sql_errno": 0, "last_io_errno": 0, "last_sql_error": "", "last_io_error": ""}
 ```
 
-A later arm takes this before and after a migration; the difference in
-`binlog_bytes` is what the upgrade wrote, and `catalogue_size` is what a
-checksum pair is judged against.
+A later arm takes this before its first phase and again after each phase, and
+`catalogue_size` is what a checksum pair is judged against. `binlog_bytes`
+counts everything binlogged between two calls — the migration, the snapshot
+restore that separates two phases, and the traffic's own writes — so the
+difference between two calls is not one upgrade's binary log.
 
 ### `bin/zdt-fleet table-checksums TABLE…`
 

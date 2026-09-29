@@ -53,6 +53,7 @@ The arms' settings live in `lab.env` (gitignored; `lab.env.example` is committed
 | `ZDT_NEW_NODE`, `ZDT_ADMIN_NODE` | `web1` |
 | `ZDT_LB_URL` | `http://lb` |
 | `ZDT_LB_STATS_URL` | `http://lb:8404/stats;csv`, HAProxy's stats page, reached on the fleet network only |
+| `ZDT_LB_DRAIN` | unset; `lab/zdt-fleet/bin/lb-state` for a run that takes the new node out of HAProxy while it migrates, through HAProxy's runtime API on `lb:9999`, also on the fleet network only |
 | `ZDT_NODE_URLS` | `http://web1,http://web2,http://web3` |
 | `ZDT_ENV_PHP` | `/var/www/magento/shared/app/etc/env.php` |
 | `ZDT_FPM_RELOAD` | `zdtfleet-fpm-reload`, shipped in the web image |

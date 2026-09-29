@@ -40,6 +40,7 @@ DEFAULT_TAIL=60      # traffic runs this long after the migration step ends
 # Traffic's absolute bound, whatever the migration does: nothing holds the arm longer.
 HARD_TRAFFIC_LIMIT=1200
 LAG_WAIT_LIMIT=300   # falsifier 1: lag back to zero within five minutes
+LB_BACK_WAIT=300     # how long a node taken out may take to serve again
 
 SECRET_VALUES=()
 declare -A ENV_BACKED_UP=()
@@ -593,6 +594,62 @@ restore_maintenance() {
     MAINT_FLAGS=()
 }
 
+# ------------------------------------------------------------------ rotation
+
+lb_take_out() {
+    # With ZDT_LB_DRAIN set, the new node leaves the load balancer before its
+    # release lands and stays out through the migration, so no customer is
+    # sent to a node whose code and schema do not match yet.
+    [[ -n ${ZDT_LB_DRAIN:-} ]] || return 0
+    echo "RUN   control: $ZDT_LB_DRAIN $ZDT_NEW_NODE maint"
+    # shellcheck disable=SC2086  # ZDT_LB_DRAIN is a command line, split on purpose
+    $ZDT_LB_DRAIN "$ZDT_NEW_NODE" maint \
+        || die "$ZDT_NEW_NODE could not be taken out of the load balancer; the migration did not happen"
+    LB_OUT="$ZDT_NEW_NODE"
+}
+
+lb_put_back() {
+    # After the migration: back in once the node answers 200 on its own URL,
+    # home page and health check both. A node that never does stays out until
+    # the arm ends, when the exit trap puts it back.
+    [[ -n ${LB_OUT:-} ]] || return 0
+    local i url=""
+    for i in "${!WEB_HOSTS[@]}"; do
+        [[ ${WEB_HOSTS[$i]} == "$LB_OUT" ]] && url="${NODE_URLS[$i]%/}"
+    done
+    for (( i = 0; i < LB_BACK_WAIT; i += 2 )); do
+        if [[ $(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url/" 2>/dev/null) == 200 \
+            && $(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url/health_check.php" 2>/dev/null) == 200 ]]; then
+            echo "RUN   control: $ZDT_LB_DRAIN $LB_OUT ready (it answered 200 after ${i}s)"
+            # shellcheck disable=SC2086  # as in lb_take_out
+            $ZDT_LB_DRAIN "$LB_OUT" ready && LB_OUT=""
+            return 0
+        fi
+        sleep 2
+    done
+    echo "zdt-arm/$ARM_NAME: $LB_OUT did not answer 200 within ${LB_BACK_WAIT}s of the migration; it stays out of the load balancer until the arm ends" >&2
+}
+
+lb_restore() {
+    # The trap's half: a node the arm took out goes back in, whichever way the
+    # arm leaves.
+    [[ -n ${LB_OUT:-} ]] || return 0
+    # shellcheck disable=SC2086  # as in lb_take_out
+    $ZDT_LB_DRAIN "$LB_OUT" ready >/dev/null 2>&1 \
+        || echo "zdt-arm/$ARM_NAME: $LB_OUT is still out of the load balancer; run: $ZDT_LB_DRAIN $LB_OUT ready" >&2
+    LB_OUT=""
+}
+
+plan_lb_out() {
+    [[ -n ${ZDT_LB_DRAIN:-} ]] || return 0
+    printf 'PLAN  control: %s %s maint (out of the load balancer before its release lands)\n' "$ZDT_LB_DRAIN" "$ZDT_NEW_NODE"
+}
+
+plan_lb_back() {
+    [[ -n ${ZDT_LB_DRAIN:-} ]] || return 0
+    printf 'PLAN  control: %s %s ready, once it answers 200 on / and /health_check.php (up to %ss)\n' "$ZDT_LB_DRAIN" "$ZDT_NEW_NODE" "$LB_BACK_WAIT"
+}
+
 # ------------------------------------------------------------------ replica
 
 replica_gate() {
@@ -908,6 +965,7 @@ run_phase() {
     lb_rotation_mark
     traffic_run &
     local traffic_pid=$!
+    lb_take_out
     if ! place_new_release; then
         kill "$traffic_pid" 2>/dev/null || true
         die "the new release did not land on $ZDT_NEW_NODE; the migration did not happen"
@@ -916,6 +974,7 @@ run_phase() {
         kill "$traffic_pid" 2>/dev/null || true
         die "setup:upgrade failed on $ZDT_ADMIN_NODE; the migration did not happen"
     fi
+    lb_put_back
     traffic_tail
     wait "$traffic_pid" 2>/dev/null || true
     traffic_verdicts
@@ -969,7 +1028,9 @@ plan_phase() {
     snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
     printf 'PLAN  control: traffic at %s/s per target for at least %ss and until %ss after the migration (%s web nodes + the load balancer)\n' "$RATE" "$DURATION" "$TAIL" "${#WEB_HOSTS[@]}"
     printf 'PLAN  control: HAProxy stats at %s before and after the traffic: how many times it took each node out (falsifier 5)\n' "$ZDT_LB_STATS_URL"
+    plan_lb_out
     printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
+    plan_lb_back
     printf 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1)\n'
 }
 
@@ -1036,6 +1097,7 @@ crossing_phase() {
     lb_rotation_mark
     traffic_run &
     local traffic_pid=$!
+    lb_take_out
     if ! place_new_release "$tarball" "$rel"; then
         kill "$traffic_pid" 2>/dev/null || true
         die "the release did not land on $ZDT_NEW_NODE; the crossing did not happen"
@@ -1044,6 +1106,7 @@ crossing_phase() {
         kill "$traffic_pid" 2>/dev/null || true
         die "setup:upgrade failed on $ZDT_ADMIN_NODE; the crossing did not happen"
     fi
+    lb_put_back
     traffic_tail
     wait "$traffic_pid" 2>/dev/null || true
     traffic_verdicts
@@ -1170,7 +1233,9 @@ plan_phase_crossing() {
     snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
     printf 'PLAN  control: traffic at %s/s per target for at least %ss and until %ss after the migration, including the read path %s (%s web nodes + the load balancer)\n' "$RATE" "$DURATION" "$TAIL" "$ZDT_READ_PATH" "${#WEB_HOSTS[@]}"
     printf 'PLAN  control: HAProxy stats at %s before and after the traffic: how many times it took each node out (falsifier 5)\n' "$ZDT_LB_STATS_URL"
+    plan_lb_out
     printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
+    plan_lb_back
     printf 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1); saved failure bodies under %s/evidence-%s/ (falsifier 3)\n' "$OUT" "$label"
 }
 
@@ -1387,7 +1452,7 @@ plan_all_outage() {
 arm_main() {
     require_env
     parse_common_flags "$@"
-    trap 'traffic_abort; restore_env_files; restore_maintenance; relink_linked_hosts_old' EXIT
+    trap 'traffic_abort; restore_env_files; restore_maintenance; relink_linked_hosts_old; lb_restore' EXIT
     if [[ ${ARM_CROSSING:-0} == 1 ]]; then
         TRAFFIC_TYPES+=(read)
         run_crossing

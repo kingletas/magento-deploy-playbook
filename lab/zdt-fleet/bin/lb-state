@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Takes one web node out of the lab's load balancer, or puts it back, through
+# HAProxy's runtime API on the fleet network. The arms call it as ZDT_LB_DRAIN.
+#
+#   lab/zdt-fleet/bin/lb-state web1 maint    # out: HAProxy sends it nothing
+#   lab/zdt-fleet/bin/lb-state web1 ready    # back in rotation
+#
+# The node is named as HAProxy names its server, which in the lab is the name
+# in ZDT_WEB_HOSTS. ZDT_LB_ADMIN is the API's host:port (default lb:9999).
+# HAProxy answers a command that worked with nothing, so any reply is the
+# error, and this exits 1 with it.
+set -euo pipefail
+
+if [[ $# -ne 2 || ! $2 =~ ^(maint|ready)$ ]]; then
+    echo "lb-state: usage: lb-state NODE maint|ready" >&2
+    exit 2
+fi
+node="$1" state="$2"
+admin="${ZDT_LB_ADMIN:-lb:9999}"
+
+if ! exec 3<>"/dev/tcp/${admin%%:*}/${admin##*:}"; then
+    echo "lb-state: cannot reach HAProxy's runtime API at $admin" >&2
+    exit 1
+fi
+printf 'set server web/%s state %s\n' "$node" "$state" >&3
+reply=$(timeout 5 cat <&3 || true)
+exec 3<&-
+if [[ -n ${reply//[[:space:]]/} ]]; then
+    echo "lb-state: HAProxy refused 'set server web/$node state $state': $reply" >&2
+    exit 1
+fi

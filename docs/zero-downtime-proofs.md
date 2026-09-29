@@ -651,6 +651,7 @@ arguments, so no password lands in a shell history or a transcript.
 | `ZDT_ADMIN_NODE` | the node that runs Magento's commands and the snapshot; must be `ZDT_NEW_NODE` — the migration runs from `current`, so a split between the two is refused, naming both |
 | `ZDT_LB_URL` | the load balancer's base URL |
 | `ZDT_LB_STATS_URL` | HAProxy's stats page as CSV (the lab's is `http://lb:8404/stats;csv`). Falsifier 5 is judged from how many times HAProxy took each node out of rotation during a phase, so its server names must be the names in `ZDT_WEB_HOSTS`; a stats page that does not answer, or lacks one of them, stops the arm before its traffic. No default |
+| `ZDT_LB_DRAIN` | optional, arms 1 to 3: a command run on the control machine as `$ZDT_LB_DRAIN NODE maint` and `$ZDT_LB_DRAIN NODE ready` (the lab's is `lab/zdt-fleet/bin/lb-state`). When set, the new node leaves the load balancer once traffic starts and before its release lands, and goes back after the migration once it answers 200 on its home page and `health_check.php`, waiting up to 300 s; the exit trap puts it back on every other path. Unset, the new node serves throughout, as it always did |
 | `ZDT_NODE_URLS` | comma-separated per-node base URLs, same order as `ZDT_WEB_HOSTS`; traffic goes to each node directly, so a refusing node is attributed to that node |
 | `ZDT_RELEASE_TARBALL` | the new release, a path on the control machine |
 | `ZDT_LABEL_NEW` / `ZDT_LABEL_OLD` | release directory names under `ZDT_RELEASES_DIR`; `ZDT_LABEL_OLD` must already be deployed on every node |

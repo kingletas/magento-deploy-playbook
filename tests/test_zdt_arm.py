@@ -129,6 +129,14 @@ fi
 exit 0
 """
 
+FAKE_LB_DRAIN = """#!/usr/bin/env bash
+# ZDT_LB_DRAIN's stand-in, logged beside the ssh calls so a test sees the
+# order. FAKE_LB_DRAIN_FAIL names a state (maint or ready) that fails.
+printf 'DRAIN|%s\\n' "$*" >> "$FAKE_SSH_CALLS"
+[[ ${FAKE_LB_DRAIN_FAIL:-} == "$2" ]] && exit 1
+exit 0
+"""
+
 FAKE_RSYNC = """#!/usr/bin/env bash
 printf 'RSYNC|%s\\n' "$*" >> "$FAKE_SSH_CALLS"
 exit 0
@@ -234,11 +242,13 @@ class ZdtArmTest(unittest.TestCase):
             ("ssh", FAKE_SSH),
             ("rsync", FAKE_RSYNC),
             ("curl", FAKE_CURL),
+            ("lb-drain", FAKE_LB_DRAIN),
         ):
             fake = stubs / name
             fake.write_text(text)
             fake.chmod(0o755)
         self.calls_file = self.dir / "calls.log"
+        self.lb_drain = str(stubs / "lb-drain")
         self.curl_calls = self.dir / "curl.log"
         self.tarball = self.dir / "release-new.tgz"
         self.tarball.write_text(
@@ -353,6 +363,7 @@ class ZdtArmTest(unittest.TestCase):
             "ZDT_ADMIN_NODE",
             "ZDT_LB_URL",
             "ZDT_LB_STATS_URL",
+            "ZDT_LB_DRAIN",
             "ZDT_NODE_URLS",
             "ZDT_RELEASE_TARBALL",
             "ZDT_LABEL_NEW",
@@ -859,6 +870,64 @@ class ZdtArmTest(unittest.TestCase):
         self.assertIn("PASS  falsifier 1", result.stdout)
         # Two phases, two falsifiers each.
         self.assertIn("summary: 4 pass, 0 fail", result.stdout)
+
+    # ------------------------------------------------------ taking a node out
+
+    def _drain_order(self) -> list[str]:
+        # The run's steps that matter here, in order: the node out, its
+        # release unpacked, the migration, the node back in.
+        steps = []
+        for line in self.calls().splitlines():
+            if line.startswith("DRAIN|"):
+                steps.append(line.removeprefix("DRAIN|"))
+            elif line.startswith("SSH|node1|") and "tar -xzf" in line:
+                steps.append("unpack")
+            elif line.startswith("SSH|node1|") and "setup:upgrade" in line:
+                steps.append("upgrade")
+        return steps
+
+    def test_without_lb_drain_no_node_leaves_the_load_balancer(self) -> None:
+        result = self.run_arm("arm1", "-y")
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        self.assertNotIn("DRAIN|", self.calls())
+
+    def test_lb_drain_takes_the_new_node_out_before_its_release_and_back_after(self) -> None:
+        result = self.run_arm("arm1", "-y", ZDT_LB_DRAIN=self.lb_drain)
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        phase = ["node1 maint", "unpack", "upgrade", "node1 ready"]
+        self.assertEqual(self._drain_order(), phase + phase)
+
+    def test_lb_drain_covers_both_crossings_of_arm3(self) -> None:
+        result = self.run_arm("arm3", "-y", ZDT_LB_DRAIN=self.lb_drain)
+        self.assertIn("summary:", result.stdout, f"{result.stdout}{result.stderr}")
+        phase = ["node1 maint", "unpack", "upgrade", "node1 ready"]
+        self.assertEqual(self._drain_order(), phase + phase)
+
+    def test_a_failed_upgrade_still_puts_the_node_back(self) -> None:
+        failfile = self.dir / "ssh-fail"
+        failfile.write_text("node1|bin/magento setup:upgrade\n")
+        result = self.run_arm(
+            "arm1", "-y", ZDT_LB_DRAIN=self.lb_drain, FAKE_SSH_FAIL=str(failfile)
+        )
+        self.assertEqual(result.returncode, 2)
+        drains = [s for s in self._drain_order() if s.startswith("node1 ")]
+        self.assertEqual(drains, ["node1 maint", "node1 ready"])
+
+    def test_a_node_that_will_not_leave_stops_the_arm_before_its_release(self) -> None:
+        result = self.run_arm(
+            "arm1", "-y", ZDT_LB_DRAIN=self.lb_drain, FAKE_LB_DRAIN_FAIL="maint"
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("could not be taken out of the load balancer", result.stderr)
+        self.assertNotIn("unpack", self._drain_order())
+
+    def test_plan_names_the_take_out_and_the_return_only_when_set(self) -> None:
+        plain = self.run_arm("arm1", "-n")
+        self.assertNotIn("maint (out of the load balancer", plain.stdout)
+        drained = self.run_arm("arm1", "-n", ZDT_LB_DRAIN=self.lb_drain)
+        self.assertIn(f"{self.lb_drain} node1 maint (out of the load balancer", drained.stdout)
+        self.assertIn(f"{self.lb_drain} node1 ready, once it answers 200", drained.stdout)
+        self.assertNotIn("DRAIN|", self.calls(), "-n must take nothing out")
 
     # ------------------------------------------------------------- replica gate
 

@@ -13,7 +13,7 @@ It runs on one Docker host. Every container has a CPU and memory limit, and noth
 | `opensearch` | `opensearchproject/opensearch:2.19.6` | Search, single node, security plugin off, heap 1 GiB | 0.75 | 2 GiB |
 | `valkey` | `valkey/valkey:8` | Cache, full-page cache and sessions, one database each | 0.25 | 512 MiB |
 | `web1`, `web2`, `web3` | built here, `zdtfleet-web` | nginx, PHP-FPM 8.4 and sshd in one container, as a web server would have them | 1.0 each | 1.25 GiB each |
-| `lb` | `haproxy:3.2.24-alpine` | Round robin over the three nodes, active check on `/health_check.php` every 2 s | 0.1 | 128 MiB |
+| `lb` | `haproxy:3.2.24-alpine` | Round robin over the three nodes, active check on `/health_check.php` every 2 s, node names looked up again every 10 s so a recreated node keeps its name | 0.1 | 128 MiB |
 | `control` | built here, `zdtfleet-control` | Where the arms run: bash, ssh, rsync, curl, the MariaDB client, Python 3 | 0.15 | 512 MiB |
 | `builder` | `zdtfleet-web` | Builds release tarballs. Compose profile `build`, so it runs only when called, with no network | 1.0 | 3 GiB |
 

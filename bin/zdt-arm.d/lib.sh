@@ -36,6 +36,9 @@ DEFAULT_RATE=2
 DEFAULT_DURATION=120
 MAX_RATE=20
 MAX_DURATION=600
+DEFAULT_TAIL=60      # traffic runs this long after the migration step ends
+# Traffic's absolute bound, whatever the migration does: nothing holds the arm longer.
+HARD_TRAFFIC_LIMIT=1200
 LAG_WAIT_LIMIT=300   # falsifier 1: lag back to zero within five minutes
 
 SECRET_VALUES=()
@@ -109,6 +112,10 @@ require_env() {
         || die "ZDT_RATE=$RATE exceeds the hard maximum $MAX_RATE/s per target: the lab machine runs other things too, keep it modest"
     (( DURATION <= MAX_DURATION )) \
         || die "ZDT_DURATION=$DURATION exceeds the hard maximum ${MAX_DURATION}s"
+    TAIL="${ZDT_TRAFFIC_TAIL:-$DEFAULT_TAIL}"
+    [[ $TAIL =~ ^[0-9]+$ ]] || die "ZDT_TRAFFIC_TAIL must be a whole number of seconds (default $DEFAULT_TAIL)"
+    (( TAIL <= MAX_DURATION )) \
+        || die "ZDT_TRAFFIC_TAIL=$TAIL exceeds the hard maximum ${MAX_DURATION}s"
     ZDT_RELEASES_DIR="${ZDT_RELEASES_DIR:-/var/www/magento/releases}"
     ZDT_CURRENT_LINK="${ZDT_CURRENT_LINK:-/var/www/magento/current}"
     ZDT_SNAPSHOT_DIR="${ZDT_SNAPSHOT_DIR:-/var/www/magento/zdt-snapshots}"
@@ -680,11 +687,15 @@ traffic_path() {
 }
 
 traffic_run() {
-    # traffic_run -- RATE requests per second PER TARGET, stopped on its own
-    # at DURATION seconds. Nothing can hold the arm longer: each generator
-    # stops at its end time and every request carries curl --max-time, so a
-    # stuck request costs at most 25s, not the run.
+    # traffic_run -- RATE requests per second PER TARGET, for at least
+    # DURATION seconds and until TAIL seconds after the phase's migration step
+    # ends (traffic_tail). A fixed window stopped before a slow migration did,
+    # and a falsifier that judges old servers after the change then saw none.
+    # Nothing can hold the arm longer than HARD_TRAFFIC_LIMIT: each generator
+    # stops there, and every request carries curl --max-time, so a stuck
+    # request costs at most 25s, not the run.
     mkdir -p "$OUT"
+    rm -f "$(traffic_stop_file)"
     # Append, never truncate: a phase's log belongs to that phase alone
     # (TRAFFIC_LOG), and the run directory is fresh per RUN_ID anyway.
     touch "$TRAFFIC_LOG"
@@ -702,17 +713,45 @@ traffic_run() {
 
 traffic_one_target() {
     local target="$1"
-    local total=$((DURATION * RATE)) sent=0 end t type status
-    end=$(( $(date +%s) + DURATION ))
-    while (( sent < total )); do
-        (( $(date +%s) >= end )) && break
-        for (( t = 0; t < RATE && sent < total; t++ )); do
+    local sent=0 start now stop t type
+    start=$(date +%s)
+    while :; do
+        now=$(date +%s)
+        if [[ -s $(traffic_stop_file) ]]; then
+            stop=$(<"$(traffic_stop_file)")
+            [[ $stop == abort ]] && break
+            (( now >= start + DURATION && now >= stop )) && break
+        fi
+        (( now >= start + HARD_TRAFFIC_LIMIT )) && break
+        for (( t = 0; t < RATE; t++ )); do
             type="${TRAFFIC_TYPES[$(( sent % ${#TRAFFIC_TYPES[@]} ))]}"
             send_one "$target" "$type" "$(traffic_path "$type")"
             sent=$((sent + 1))
         done
         sleep 1
     done
+}
+
+traffic_stop_file() {
+    # Where the arm tells its generators when to stop. Derived from the
+    # phase's own log, which is set before the generators start, because they
+    # run in a background subshell: a variable set there never reaches the arm.
+    printf '%s' "$TRAFFIC_LOG.stop"
+}
+
+traffic_abort() {
+    # The arm is leaving, by whatever path: its generators stop now. Watching
+    # the arm's process instead failed, since an exited arm whose parent is
+    # still reading this output stays a zombie, and a zombie still "exists".
+    [[ -n ${TRAFFIC_LOG:-} && -d $OUT ]] || return 0
+    printf 'abort\n' > "$(traffic_stop_file)"
+}
+
+traffic_tail() {
+    # The phase's migration step is over: traffic keeps going TAIL seconds
+    # more, so the window covers the servers after the change as well as
+    # during it.
+    printf '%s\n' "$(( $(date +%s) + TAIL ))" > "$(traffic_stop_file)"
 }
 
 save_evidence() {
@@ -820,6 +859,7 @@ run_phase() {
         kill "$traffic_pid" 2>/dev/null || true
         die "setup:upgrade failed on $ZDT_ADMIN_NODE; the migration did not happen"
     fi
+    traffic_tail
     wait "$traffic_pid" 2>/dev/null || true
     traffic_verdicts
     replica_after
@@ -870,7 +910,7 @@ plan_phase() {
     printf 'PLAN  %s\n' "$ZDT_NEW_NODE: rsync $ZDT_RELEASE_TARBALL -> $ZDT_RELEASES_DIR/$ZDT_LABEL_NEW.tar.gz"
     printf 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $ZDT_LABEL_NEW"
     snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
-    printf 'PLAN  control: traffic %ss at %s/s per target (%s web nodes + the load balancer)\n' "$DURATION" "$RATE" "${#WEB_HOSTS[@]}"
+    printf 'PLAN  control: traffic at %s/s per target for at least %ss and until %ss after the migration (%s web nodes + the load balancer)\n' "$RATE" "$DURATION" "$TAIL" "${#WEB_HOSTS[@]}"
     printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
     printf 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1)\n'
 }
@@ -945,6 +985,7 @@ crossing_phase() {
         kill "$traffic_pid" 2>/dev/null || true
         die "setup:upgrade failed on $ZDT_ADMIN_NODE; the crossing did not happen"
     fi
+    traffic_tail
     wait "$traffic_pid" 2>/dev/null || true
     traffic_verdicts
     replica_after
@@ -1068,7 +1109,7 @@ plan_phase_crossing() {
     printf 'PLAN  %s\n' "$ZDT_NEW_NODE: rsync $tarball -> $ZDT_RELEASES_DIR/$rel.tar.gz"
     printf 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $rel"
     snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
-    printf 'PLAN  control: traffic %ss at %s/s per target, including the read path %s (%s web nodes + the load balancer)\n' "$DURATION" "$RATE" "$ZDT_READ_PATH" "${#WEB_HOSTS[@]}"
+    printf 'PLAN  control: traffic at %s/s per target for at least %ss and until %ss after the migration, including the read path %s (%s web nodes + the load balancer)\n' "$RATE" "$DURATION" "$TAIL" "$ZDT_READ_PATH" "${#WEB_HOSTS[@]}"
     printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
     printf 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1); saved failure bodies under %s/evidence-%s/ (falsifier 3)\n' "$OUT" "$label"
 }
@@ -1205,6 +1246,8 @@ outage_phase() {
             maintenance_disable "${spec%%|*}" "${spec##*|}"
         done
     fi
+    # After the page comes down, so the tail is the fleet serving the new release.
+    traffic_tail
     wait "$traffic_pid" 2>/dev/null || true
     if [[ $maint == maint ]]; then
         relink_linked_hosts_old
@@ -1256,7 +1299,7 @@ plan_phase_outage() {
         printf 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $rel"
     fi
     snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
-    printf 'PLAN  control: traffic %ss at %s/s per target (%s web nodes + the load balancer)\n' "$DURATION" "$RATE" "${#WEB_HOSTS[@]}"
+    printf 'PLAN  control: traffic at %s/s per target for at least %ss and until %ss after the migration (%s web nodes + the load balancer)\n' "$RATE" "$DURATION" "$TAIL" "${#WEB_HOSTS[@]}"
     printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
     if [[ $maint == maint ]]; then
         for h in "${WEB_HOSTS[@]}"; do
@@ -1282,7 +1325,7 @@ plan_all_outage() {
 arm_main() {
     require_env
     parse_common_flags "$@"
-    trap 'restore_env_files; restore_maintenance; relink_linked_hosts_old' EXIT
+    trap 'traffic_abort; restore_env_files; restore_maintenance; relink_linked_hosts_old' EXIT
     if [[ ${ARM_CROSSING:-0} == 1 ]]; then
         TRAFFIC_TYPES+=(read)
         run_crossing

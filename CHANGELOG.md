@@ -11,6 +11,7 @@ changed, because there's nothing before it.
 
 - A lab fleet for the zero-downtime arms in `lab/zdt-fleet`: three real Magento Open Source 2.4.8-p2 web nodes reached over ssh, HAProxy with a health check, a MariaDB primary with a replica following it by GTID, OpenSearch, Valkey, and a control container the arms run from. Every container has a CPU and memory limit, and only the load balancer publishes a port, on `127.0.0.1`. Its scripts build releases without a database, install the store, seed the replica and prove it keeps up, and put the first release on every node.
 - The zero-downtime arms reload PHP-FPM on every node after they edit or restore `env.php`, with the command set in `ZDT_FPM_RELOAD`, which every arm now requires. On a host whose OPcache never rechecks a file, as a zero-downtime host is set up, an edited `env.php` otherwise never reaches a request, and the arm would measure the settings it started with. The lab fleet runs PHP-FPM as `deploy` and ships the command as `zdtfleet-fpm-reload`.
+- The arms' traffic runs until a minute after each migration step ends (`ZDT_TRAFFIC_TAIL`, default 60 seconds), not only for `ZDT_DURATION`, so a migration slower than the window is still watched through the change and after it. An arm that stops early stops its traffic at once.
 
 ### Fixed
 

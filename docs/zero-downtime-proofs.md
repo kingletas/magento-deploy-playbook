@@ -657,7 +657,8 @@ arguments, so no password lands in a shell history or a transcript.
 | `ZDT_FPM_RELOAD` | the command, run on a node as the ssh user, that reloads PHP-FPM and returns once it serves again (the lab's is `zdtfleet-fpm-reload`; a host's might be `sudo systemctl reload php8.4-fpm`). Run after every `env.php` edit and restore: with OPcache never rechecking a file, an edit is otherwise invisible to requests. No default |
 | `ZDT_DB_HOST` / `ZDT_DB_USER` / `ZDT_DB_PASSWORD` / `ZDT_DB_NAME` | the primary's connection, for the snapshot |
 | `ZDT_SNAPSHOT_DIR` | where the admin node keeps snapshots (default `/var/www/magento/zdt-snapshots`) |
-| `ZDT_RATE` / `ZDT_DURATION` | traffic per target: requests/s (default 2, max 20) and seconds (default 120, max 600) |
+| `ZDT_RATE` / `ZDT_DURATION` | traffic per target: requests/s (default 2, max 20) and seconds, at least (default 120, max 600) |
+| `ZDT_TRAFFIC_TAIL` | seconds traffic goes on after a phase's migration step ends (default 60, max 600). A migration slower than `ZDT_DURATION` is still watched through the change and after it; without it, arm 3's breaking leg once stopped its traffic 73 s before the column was renamed |
 | `ZDT_GUARD_PATTERN` | extended regex; a response body matching it is logged as a guard message |
 | `ZDT_CATEGORY_PATH` / `ZDT_PRODUCT_PATH` | paths of a real category and a real product page (e.g. `/mens.html`, `/products/gt.html`). No default: a guessed path a stock store does not serve would record every target as refusing |
 | `ZDT_TOUCHED_TABLES` | comma-separated tables to checksum once the lag reaches zero (default `catalog_product_entity`) |

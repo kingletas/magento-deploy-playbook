@@ -52,7 +52,9 @@
 #   ZDT_SNAPSHOT_DIR  where the admin node keeps snapshots (default
 #                     /var/www/magento/zdt-snapshots)
 #   ZDT_RATE          requests per second per target (default 2, max 20)
-#   ZDT_DURATION      seconds of traffic per phase (default 120, max 600)
+#   ZDT_DURATION      seconds of traffic per phase, at least (default 120, max 600)
+#   ZDT_TRAFFIC_TAIL  seconds traffic goes on after the migration step ends
+#                     (default 60, max 600), so it covers the change and after
 #   ZDT_GUARD_PATTERN extended regex; a response body matching it is logged
 #                     as a guard message (e.g. 'Please refresh|config was
 #                     changed|Setup must be run')

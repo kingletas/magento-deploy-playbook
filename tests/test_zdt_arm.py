@@ -260,6 +260,7 @@ class ZdtArmTest(unittest.TestCase):
                 "ZDT_SCHEMA_OBJECT": "gift_registry_id",
                 "ZDT_DURATION": "1",
                 "ZDT_RATE": "1",
+                "ZDT_TRAFFIC_TAIL": "0",
                 "ZDT_RUN_DIR": str(self.dir / "run"),
             }
         )
@@ -338,6 +339,7 @@ class ZdtArmTest(unittest.TestCase):
             "ZDT_SNAPSHOT_DIR",
             "ZDT_RATE",
             "ZDT_DURATION",
+            "ZDT_TRAFFIC_TAIL",
             "ZDT_GUARD_PATTERN",
             "ZDT_CATEGORY_PATH",
             "ZDT_PRODUCT_PATH",
@@ -693,6 +695,34 @@ class ZdtArmTest(unittest.TestCase):
         for log in logs:
             self.assertEqual(len(log), 4, "the generator must stop at the duration")
         self.assertLess(elapsed, 30, "a short run must finish at once")
+
+    def test_traffic_outlasts_a_migration_slower_than_the_duration(self) -> None:
+        # A fixed window stopped before a slow migration did, and arm 3's
+        # evidence leg then saw no old server after the change. Every fake ssh
+        # round-trip takes a second here, so the migration ends well past the
+        # one-second duration; traffic must still be running after it.
+        events = self.dir / "maint-events"
+        result = self.run_arm(
+            "arm1", "-y", FAKE_SSH_SLEEP="1", ZDT_TRAFFIC_TAIL="1",
+            FAKE_MAINT_EVENTS=str(events),
+        )
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        upgrades = [float(line.split("|")[0]) for line in events.read_text().splitlines()
+                    if "|setup:upgrade|" in line]
+        self.assertEqual(len(upgrades), 2, "one migration per phase")
+        log = (self.dir / "run" / "traffic-shared-prefix.log").read_text().splitlines()
+        last = max(int(line.split()[0]) for line in log)
+        # The fake records the upgrade when its one-second call ends; the old
+        # fixed window had stopped a second or more before that.
+        self.assertGreaterEqual(last, int(upgrades[0]),
+                                "traffic stopped before the migration was over")
+
+    def test_a_bad_traffic_tail_is_refused(self) -> None:
+        for value in ("abc", "601"):
+            result = self.run_arm("arm1", "-y", ZDT_TRAFFIC_TAIL=value)
+            self.assertEqual(result.returncode, 2, value)
+            self.assertIn("ZDT_TRAFFIC_TAIL", result.stderr)
+            self.assertEqual(self.calls(), "", f"{value}: refused before any server")
 
     def test_traffic_asks_for_the_configured_paths(self) -> None:
         result = self.run_arm("arm1", "-y", ZDT_RATE="7")

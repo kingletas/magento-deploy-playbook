@@ -411,10 +411,14 @@ relink_linked_hosts_old() {
 }
 
 run_setup_upgrade() {
-    remote_script "$ZDT_ADMIN_NODE" "php bin/magento setup:upgrade --no-interaction" >/dev/null <<REMOTE
+    # --keep-generated, as the playbook's deploy runs it: in production mode a
+    # plain setup:upgrade deletes the release's compiled code and deployed
+    # static files, and the new node then serves 500s and stalls while it
+    # rebuilds them on live requests, which is the arm's doing, not the deploy's.
+    remote_script "$ZDT_ADMIN_NODE" "php bin/magento setup:upgrade --keep-generated --no-interaction" >/dev/null <<REMOTE
 set -euo pipefail
 cd "$ZDT_CURRENT_LINK"
-php bin/magento setup:upgrade --no-interaction
+php bin/magento setup:upgrade --keep-generated --no-interaction
 REMOTE
 }
 
@@ -1029,7 +1033,7 @@ plan_phase() {
     printf 'PLAN  control: traffic at %s/s per target for at least %ss and until %ss after the migration (%s web nodes + the load balancer)\n' "$RATE" "$DURATION" "$TAIL" "${#WEB_HOSTS[@]}"
     printf 'PLAN  control: HAProxy stats at %s before and after the traffic: how many times it took each node out (falsifier 5)\n' "$ZDT_LB_STATS_URL"
     plan_lb_out
-    printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
+    printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --keep-generated --no-interaction"
     plan_lb_back
     printf 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1)\n'
 }
@@ -1234,7 +1238,7 @@ plan_phase_crossing() {
     printf 'PLAN  control: traffic at %s/s per target for at least %ss and until %ss after the migration, including the read path %s (%s web nodes + the load balancer)\n' "$RATE" "$DURATION" "$TAIL" "$ZDT_READ_PATH" "${#WEB_HOSTS[@]}"
     printf 'PLAN  control: HAProxy stats at %s before and after the traffic: how many times it took each node out (falsifier 5)\n' "$ZDT_LB_STATS_URL"
     plan_lb_out
-    printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
+    printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --keep-generated --no-interaction"
     plan_lb_back
     printf 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1); saved failure bodies under %s/evidence-%s/ (falsifier 3)\n' "$OUT" "$label"
 }
@@ -1427,7 +1431,7 @@ plan_phase_outage() {
     snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
     printf 'PLAN  control: traffic at %s/s per target for at least %ss and until %ss after the migration (%s web nodes + the load balancer)\n' "$RATE" "$DURATION" "$TAIL" "${#WEB_HOSTS[@]}"
     printf 'PLAN  control: HAProxy stats at %s before and after the traffic: how many times it took each node out (falsifier 5)\n' "$ZDT_LB_STATS_URL"
-    printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
+    printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --keep-generated --no-interaction"
     if [[ $maint == maint ]]; then
         for h in "${WEB_HOSTS[@]}"; do
             printf 'PLAN  %s\n' "$h: php bin/magento maintenance:disable in $ZDT_RELEASES_DIR/$rel (after the migration, on every node, in one step)"

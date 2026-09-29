@@ -588,6 +588,17 @@ class ZdtArmTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, f"{rule}: {result.stdout}")
         self.assertNotIn("PASS", result.stdout, f"{rule}: a PASS line after a dead step")
 
+    def test_the_migration_keeps_the_releases_compiled_code(self) -> None:
+        # The playbook's deploy runs setup:upgrade with --keep-generated; a plain
+        # one deletes generated/ and pub/static/ in production mode, so the new
+        # node would fail on the arm's command rather than on the deploy.
+        result = self.run_arm("arm1", "-y")
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        upgrades = [line for line in self.calls().splitlines() if "bin/magento setup:upgrade" in line]
+        self.assertEqual(len(upgrades), 2, "one migration per phase")
+        for line in upgrades:
+            self.assertIn("setup:upgrade --keep-generated --no-interaction", line)
+
     def test_failed_setup_upgrade_stops_the_arm(self) -> None:
         self._assert_arm_dies_on("node1|bin/magento setup:upgrade")
 

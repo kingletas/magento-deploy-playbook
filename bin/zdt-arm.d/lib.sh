@@ -38,6 +38,48 @@ MAX_RATE=20
 MAX_DURATION=600
 LAG_WAIT_LIMIT=300   # falsifier 1: lag back to zero within five minutes
 
+# ------------------------------------------------------------------ transcript
+#
+# Every line the arm prints goes through say(), so the run directory keeps the
+# whole transcript — the plan, each RUN as it happens, each verdict and the
+# banners — and the operator still sees the same text, on the same stream, at
+# the same moment. Without this the PLAN/RUN lines went to stderr and nowhere
+# else: the evidence existed only if the operator redirected it themselves.
+#
+# Empty until a run starts: `-n` prints the plan and keeps nothing, and a run
+# directory is never created for a plan.
+TRANSCRIPT=""
+# Lines printed before the transcript exists — the plan phase. Kept so the
+# confirmed plan is in the file the run leaves behind, and dropped when the run
+# never starts (a plan, or a declined prompt), so a transcript is always the
+# record of a run that happened.
+PLAN_BUFFER=()
+
+say() {
+    # say STREAM LINE — STREAM is 1 (stdout) or 2 (stderr), exactly as the
+    # call site printed before. The line reaches the transcript first (or the
+    # plan buffer, while there is no transcript yet), so a line the operator
+    # saw is a line the file kept.
+    local stream="$1" line="$2"
+    if [[ -n $TRANSCRIPT ]]; then
+        printf '%s\n' "$line" >> "$TRANSCRIPT"
+    else
+        PLAN_BUFFER+=("$line")
+    fi
+    if [[ $stream == 2 ]]; then printf '%s\n' "$line" >&2; else printf '%s\n' "$line"; fi
+}
+
+plan() {
+    # plan FORMAT [ARGS] — a plan line, formatted exactly as each call site
+    # used to (the call sites were `printf 'PLAN ...' ...` to stdout). FORMAT
+    # is a literal at every call site and the values travel as arguments, so
+    # the format is never data.
+    local line
+    # shellcheck disable=SC2059  # the format is a literal at every call site.
+    line="$(printf "$@")"
+    say 1 "$line"
+}
+
 SECRET_VALUES=()
 declare -A ENV_BACKED_UP=()
 ENV_BACKUP_HOSTS=()
@@ -52,12 +94,142 @@ MAINT_LINKED_HOSTS=()
 LINK_PAGE_UP=0
 SNAPSHOT=""
 
-die() { echo "zdt-arm/$ARM_NAME: $*" >&2; exit 2; }
+die() { say 2 "zdt-arm/$ARM_NAME: $*"; exit 2; }
 
 falsifier() {
     local verdict="$1"; shift
     if [[ $verdict == PASS ]]; then PASSES=$((PASSES + 1)); else FAILS=$((FAILS + 1)); fi
-    printf '%s  %s\n' "$verdict" "$*"
+    say 1 "$verdict  $*"
+}
+
+transcript_open() {
+    # The run's transcript, opened once the plan is CONFIRMED and before the
+    # first remote write. The plan the operator just read is flushed into the
+    # file first, so its PLAN lines are as much a part of the record as the
+    # RUN lines — the docs' claim is "every PLAN/RUN line". Secret-free: a
+    # line that could carry a secret goes through redact() at its call site,
+    # and the rest carry labels only. `-n` and a declined prompt never reach
+    # here, so those runs leave no file at all.
+    mkdir -p "$OUT"
+    TRANSCRIPT="$OUT/transcript.log"
+    : > "$TRANSCRIPT"
+    printf '%s\n' "== transcript: bin/zdt-arm $ARM_NAME, run $RUN_ID ==" >> "$TRANSCRIPT"
+    if [[ ${#PLAN_BUFFER[@]} -gt 0 ]]; then
+        printf '%s\n' "${PLAN_BUFFER[@]}" >> "$TRANSCRIPT"
+    fi
+    PLAN_BUFFER=()
+}
+
+# ------------------------------------------------------------ platform facts
+#
+# The results document issue #5 asks for opens with the platform: Magento
+# edition and version, PHP, the database server and its version, the
+# replication mode, the number of web servers. Nothing recorded any of it, so
+# the header would come from the operator's memory rather than from the run.
+# These are READ-ONLY facts about the lab, read once, after the plan is
+# confirmed and before the first remote write, and written as facts to
+# $OUT/platform.json. A fact that cannot be read is recorded as null with the
+# reason and printed as a WARN line: the run goes on, and the document says
+# "not recorded" rather than a guess.
+
+json_string() {
+    # json_string VALUE — a JSON string with the escapes JSON needs, or null
+    # for an empty value (so a missing fact is null, never "").
+    [[ -n $1 ]] || { printf 'null'; return; }
+    printf '"%s"' "$(printf '%s' "$1" | tr -d '\n' | sed 's/\\/\\\\/g; s/"/\\"/g')"
+}
+
+record_platform_facts() {
+    local replay="" probe="" phpv="" edition="" version="" cli="" pkgs="" dbserver=""
+    # The replication mode is the fleet gate's own read of the primary, already
+    # on disk: replica-before.json carries binlog_format. Taken from there
+    # rather than asked again.
+    if [[ -f $OUT/replica-before.json ]]; then
+        replay=$(sed -n 's/.*"binlog_format": *"\([^"]*\)".*/\1/p' "$OUT/replica-before.json" | head -1)
+    fi
+    # One read-only script on the admin node: the PHP the store runs, the
+    # release's own edition packages and Magento CLI line, and the database
+    # server's version. The DB password travels inside the body, as the
+    # snapshot's does, so it reaches no argv and no transcript line.
+    probe=$(remote_script "$ZDT_ADMIN_NODE" "record the platform facts (read-only: php, Magento, database server)" <<REMOTE
+set -uo pipefail
+printf 'php_version=%s\n' "\$(php -r 'echo PHP_VERSION;' 2>/dev/null || echo '')"
+rel="$ZDT_CURRENT_LINK"
+pkg=""
+if [[ -r "\$rel/composer.json" ]]; then
+    pkg=\$(php -r '\$c = json_decode(file_get_contents(\$argv[1]), true); \$r = \$c["require"] ?? []; echo implode(",", array_intersect(array_keys(\$r), ["magento/product-community-edition", "mage-os/product-community-edition", "magento/product-enterprise-edition"]));' "\$rel/composer.json" 2>/dev/null || true)
+fi
+printf 'edition_packages=%s\n' "\$pkg"
+cli=""
+if [[ -x "\$rel/bin/magento" ]]; then cli=\$("\$rel/bin/magento" --version 2>/dev/null | head -1); fi
+printf 'magento_cli=%s\n' "\$cli"
+printf 'db_server=%s\n' "\$(MYSQL_PWD='$ZDT_DB_PASSWORD' mysql -h '$ZDT_DB_HOST' -u '$ZDT_DB_USER' -N -B -e 'SELECT VERSION();' 2>/dev/null || echo '')"
+REMOTE
+) || true
+    phpv=$(printf '%s\n' "$probe" | sed -n 's/^php_version=//p' | head -1)
+    pkgs=$(printf '%s\n' "$probe" | sed -n 's/^edition_packages=//p' | head -1)
+    cli=$(printf '%s\n' "$probe" | sed -n 's/^magento_cli=//p' | head -1)
+    dbserver=$(printf '%s\n' "$probe" | sed -n 's/^db_server=//p' | head -1)
+    # The edition, named only when the packages identify exactly ONE. A release
+    # whose composer.json names two edition packages does not say which platform
+    # the lab runs, so it records null and the raw list, and the reason names the
+    # ambiguity — a label guessed here would put a platform in the document that
+    # the lab does not have.
+    local pkg_list=()
+    if [[ -n $pkgs ]]; then
+        IFS=',' read -r -a pkg_list <<< "$pkgs"
+    fi
+    edition_reason=""
+    if [[ ${#pkg_list[@]} -eq 1 ]]; then
+        case "${pkg_list[0]}" in
+            magento/product-community-edition) edition="Open Source" ;;
+            mage-os/product-community-edition) edition="Mage-OS" ;;
+            magento/product-enterprise-edition) edition="Commerce" ;;
+        esac
+    elif [[ ${#pkg_list[@]} -gt 1 ]]; then
+        edition_reason="the release's composer.json names more than one edition package ($pkgs)"
+    fi
+    # The CLI line is "Magento CLI 2.4.8" (Mage-OS names itself likewise); its
+    # last field is the version. Both are recorded, so the document can quote
+    # the line it came from.
+    case "$cli" in
+        *CLI*) version="${cli##* }" ;;
+    esac
+    local reason=""
+    [[ -n $phpv ]] || reason="the admin node did not answer 'php -r echo PHP_VERSION'"
+    [[ -n $dbserver ]] || reason="${reason:+$reason; }the primary did not answer SELECT VERSION()"
+    [[ -n $replay ]] || reason="${reason:+$reason; }replica-before.json carries no binlog_format"
+    # A named-but-ambiguous list says something different from "no known
+    # package at all", so the reason carries the ambiguity, not the default.
+    if [[ -z $edition ]]; then
+        if [[ -n $edition_reason ]]; then
+            reason="${reason:+$reason; }$edition_reason"
+        else
+            reason="${reason:+$reason; }the release's composer.json did not name a known edition package"
+        fi
+    fi
+
+    {
+        printf '{\n'
+        printf '  "arm": %s,\n' "$(json_string "$ARM_NAME")"
+        printf '  "run_id": %s,\n' "$(json_string "$RUN_ID")"
+        printf '  "web_node_count": %s,\n' "${#WEB_HOSTS[@]}"
+        printf '  "web_nodes": %s,\n' "$(json_string "$ZDT_WEB_HOSTS")"
+        printf '  "new_node": %s,\n' "$(json_string "$ZDT_NEW_NODE")"
+        printf '  "replication_mode": %s,\n' "$(json_string "$replay")"
+        printf '  "magento_edition": %s,\n' "$(json_string "$edition")"
+        printf '  "magento_version": %s,\n' "$(json_string "$version")"
+        printf '  "magento_cli": %s,\n' "$(json_string "$cli")"
+        printf '  "edition_packages": %s,\n' "$(json_string "$pkgs")"
+        printf '  "php_version": %s,\n' "$(json_string "$phpv")"
+        printf '  "db_server": %s,\n' "$(json_string "$dbserver")"
+        printf '  "release_old": %s,\n' "$(json_string "$ZDT_LABEL_OLD")"
+        printf '  "release_new": %s,\n' "$(json_string "${ZDT_LABEL_NEW:-${ZDT_LABEL_BREAKING:-}}")"
+        printf '  "not_recorded": %s\n' "$(json_string "$reason")"
+        printf '}\n'
+    } > "$OUT/platform.json"
+    say 1 "platform: $OUT/platform.json (edition ${edition:-not recorded}, Magento ${version:-not recorded}, PHP ${phpv:-not recorded}, database ${dbserver:-not recorded}, replication ${replay:-not recorded}, ${#WEB_HOSTS[@]} web nodes)"
+    [[ -z $reason ]] || say 1 "WARN  platform: not recorded — $reason"
 }
 
 # ------------------------------------------------------------------ settings
@@ -193,8 +365,8 @@ remote_cmd() {
     line="$host: $(redact "$*")"
     # PLAN/RUN are transcript lines, not data: they go to stderr, so a
     # caller silencing the remote command's stdout cannot silence them.
-    if [[ $PLAN_ONLY == 1 ]]; then printf 'PLAN  %s\n' "$line" >&2; return 0; fi
-    printf 'RUN   %s\n' "$line" >&2
+    if [[ $PLAN_ONLY == 1 ]]; then say 2 "PLAN  $line"; return 0; fi
+    say 2 "RUN   $line"
     local errf rc
     errf="$(mktemp "${TMPDIR:-/tmp}/zdt-arm-ssh.XXXXXX")"
     # shellcheck disable=SC2029  # client-side expansion is the point: the command runs there.
@@ -214,8 +386,8 @@ remote_script() {
     local host="$1" label="$2"
     local line
     line="$host: $(redact "$label")"
-    if [[ $PLAN_ONLY == 1 ]]; then printf 'PLAN  %s\n' "$line" >&2; return 0; fi
-    printf 'RUN   %s\n' "$line" >&2
+    if [[ $PLAN_ONLY == 1 ]]; then say 2 "PLAN  $line"; return 0; fi
+    say 2 "RUN   $line"
     local errf out rc
     errf="$(mktemp "${TMPDIR:-/tmp}/zdt-arm-ssh.XXXXXX")"
     out="$(mktemp "${TMPDIR:-/tmp}/zdt-arm-out.XXXXXX")"
@@ -232,8 +404,8 @@ remote_script() {
 
 confirm_plan() {
     [[ $PLAN_ONLY == 1 || $ASSUME_YES == 1 ]] && return 0
-    echo "The plan above is everything this run does; nothing has run yet," >&2
-    echo "and the first RUN line is the first remote write." >&2
+    say 2 "The plan above is everything this run does; nothing has run yet,"
+    say 2 "and the first RUN line is the first remote write."
     local answer=""
     read -r answer || answer=""
     [[ $answer == y || $answer == Y ]] || die "plan declined; nothing ran"
@@ -253,7 +425,7 @@ snapshot_gate() {
     # the upgrade: no snapshot, no way back. The file lives on the admin node
     # under ZDT_SNAPSHOT_DIR, where restore-snapshot reads it from.
     local snap="$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz"
-    if [[ $PLAN_ONLY == 1 ]]; then printf 'PLAN  %s\n' "$(snapshot_line "$snap")"; return 0; fi
+    if [[ $PLAN_ONLY == 1 ]]; then say 1 "PLAN  $(snapshot_line "$snap")"; return 0; fi
     if ! remote_script "$ZDT_ADMIN_NODE" "snapshot database $ZDT_DB_NAME (password $ZDT_DB_PASSWORD) to $snap" >/dev/null <<REMOTE
 set -euo pipefail
 export MYSQL_PWD='$ZDT_DB_PASSWORD'
@@ -267,8 +439,8 @@ REMOTE
     fi
     SNAPSHOT="$snap"
     WRITTEN=1
-    echo "Restorable snapshot (on $ZDT_ADMIN_NODE): $snap"
-    echo "Restore it with:  bin/zdt-arm restore-snapshot $snap -y"
+    say 1 "Restorable snapshot (on $ZDT_ADMIN_NODE): $snap"
+    say 1 "Restore it with:  bin/zdt-arm restore-snapshot $snap -y"
 }
 
 restore_snapshot() {
@@ -277,7 +449,7 @@ restore_snapshot() {
     # replaces the database, so it plans, and without -y it asks.
     [[ -n $1 && $1 == /* ]] || die "usage: bin/zdt-arm restore-snapshot /absolute/path/on/$ZDT_ADMIN_NODE [-y]"
     if [[ $PLAN_ONLY == 1 ]]; then
-        printf 'PLAN  %s\n' "$(redact "$ZDT_ADMIN_NODE: restore database $ZDT_DB_NAME from $1 (password $ZDT_DB_PASSWORD)")"
+        say 1 "PLAN  $(redact "$ZDT_ADMIN_NODE: restore database $ZDT_DB_NAME from $1 (password $ZDT_DB_PASSWORD)")"
         return 0
     fi
     if ! remote_script "$ZDT_ADMIN_NODE" "restore database $ZDT_DB_NAME from $1 (password $ZDT_DB_PASSWORD)" >/dev/null <<REMOTE
@@ -301,8 +473,8 @@ place_new_release() {
     # the new release before the link.
     local tarball="${1:-$ZDT_RELEASE_TARBALL}" label="${2:-$ZDT_LABEL_NEW}"
     if [[ $PLAN_ONLY == 1 ]]; then
-        printf 'PLAN  %s\n' "$ZDT_NEW_NODE: rsync $tarball -> $ZDT_RELEASES_DIR/$label.tar.gz"
-        printf 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $label"
+        say 1 "PLAN  $ZDT_NEW_NODE: rsync $tarball -> $ZDT_RELEASES_DIR/$label.tar.gz"
+        say 1 "PLAN  $ZDT_NEW_NODE: unpack and link release $label"
         return 0
     fi
     [[ -f $tarball ]] || die "no release tarball at $tarball on the control machine"
@@ -392,7 +564,7 @@ relink_linked_hosts_old() {
         if ssh "${ssh_opts[@]}" "$h" "cd $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD && php bin/magento maintenance:disable && ln -sfn $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD $ZDT_CURRENT_LINK" >/dev/null 2>&1; then
             maint_flags_drop_host "$h"
         else
-            echo "zdt-arm/$ARM_NAME: could not relink $h to $ZDT_LABEL_OLD; run: ssh -o BatchMode=yes $h 'cd $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD && php bin/magento maintenance:disable && ln -sfn $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD $ZDT_CURRENT_LINK'" >&2
+            say 2 "zdt-arm/$ARM_NAME: could not relink $h to $ZDT_LABEL_OLD; run: ssh -o BatchMode=yes $h 'cd $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD && php bin/magento maintenance:disable && ln -sfn $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD $ZDT_CURRENT_LINK'"
         fi
     done
     MAINT_LINKED_HOSTS=()
@@ -434,7 +606,7 @@ env_set() {
     local host="$1" keys="$2" json="$3"
     [[ -n ${ENV_BACKED_UP[$host]:-} ]] || env_backup "$host" || return 1
     if [[ $PLAN_ONLY == 1 ]]; then
-        printf 'PLAN  %s\n' "$(redact "$host: set $keys to $json in $ZDT_ENV_PHP")"
+        say 1 "PLAN  $(redact "$host: set $keys to $json in $ZDT_ENV_PHP")"
         return 0
     fi
     remote_script "$host" "set $keys to $json in $ZDT_ENV_PHP" >/dev/null <<REMOTE
@@ -451,10 +623,13 @@ REMOTE
 }
 
 print_restores() {
-    echo
-    echo "If the run was cut short in a way no trap could handle (kill -9, a"
-    echo "power cut), put it back by running, on the control machine:"
-    [[ -n $SNAPSHOT ]] && echo "  bin/zdt-arm restore-snapshot $SNAPSHOT -y"
+    say 1 ""
+    say 1 "If the run was cut short in a way no trap could handle (kill -9, a"
+    say 1 "power cut), put it back by running, on the control machine:"
+    # `[[ -z … ]] ||` rather than `[[ -n … ]] &&`: with `&&` an empty SNAPSHOT
+    # would leave the function with status 1, which `set -e` reads as a failure
+    # in the middle of printing the restores.
+    [[ -z $SNAPSHOT ]] || say 1 "  bin/zdt-arm restore-snapshot $SNAPSHOT -y"
     local spec h rel
     # One line per flag actually raised, naming the release that holds it:
     # `cd $ZDT_CURRENT_LINK` would disable whatever release the node happens
@@ -462,15 +637,15 @@ print_restores() {
     for spec in "${MAINT_FLAGS[@]:-}"; do
         [[ -n $spec ]] || continue
         h="${spec%%|*}"; rel="${spec##*|}"
-        echo "  ssh -o BatchMode=yes $h 'cd $ZDT_RELEASES_DIR/$rel && php bin/magento maintenance:disable'"
+        say 1 "  ssh -o BatchMode=yes $h 'cd $ZDT_RELEASES_DIR/$rel && php bin/magento maintenance:disable'"
     done
     for h in "${MAINT_LINKED_HOSTS[@]:-}"; do
         [[ -n $h ]] || continue
-        echo "  ssh -o BatchMode=yes $h 'cd $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD && php bin/magento maintenance:disable && ln -sfn $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD $ZDT_CURRENT_LINK'"
+        say 1 "  ssh -o BatchMode=yes $h 'cd $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD && php bin/magento maintenance:disable && ln -sfn $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD $ZDT_CURRENT_LINK'"
     done
     for h in "${ENV_BACKUP_HOSTS[@]:-}"; do
         [[ -n $h ]] || continue
-        echo "  ssh -o BatchMode=yes $h cp --preserve=mode,ownership,timestamps $ZDT_ENV_PHP.bak-$RUN_ID $ZDT_ENV_PHP"
+        say 1 "  ssh -o BatchMode=yes $h cp --preserve=mode,ownership,timestamps $ZDT_ENV_PHP.bak-$RUN_ID $ZDT_ENV_PHP"
     done
 }
 
@@ -560,12 +735,12 @@ replica_gate() {
     out=$("$FLEET_BIN" replica-check 2>&1)
     rc=$?
     if [[ $rc -eq 2 ]]; then
-        printf '%s\n' "$out" >&2
+        say 2 "$out"
         die "bin/zdt-fleet replica-check could not run; the arm does not start without it"
     fi
     if [[ $rc -ne 0 ]]; then
-        echo "NOT RUN: the fleet missed condition 1 (a replica replicating continuously)." >&2
-        printf '%s\n' "$out" >&2
+        say 2 "NOT RUN: the fleet missed condition 1 (a replica replicating continuously)."
+        say 2 "$out"
         exit 1
     fi
     mkdir -p "$OUT"
@@ -579,7 +754,7 @@ replica_after() {
     local out rc lag waited=0
     out=$("$FLEET_BIN" replica-check 2>&1)
     rc=$?
-    [[ $rc -eq 2 ]] && { printf '%s\n' "$out" >&2; die "bin/zdt-fleet replica-check could not run after the migration"; }
+    [[ $rc -eq 2 ]] && { say 2 "$out"; die "bin/zdt-fleet replica-check could not run after the migration"; }
     printf '%s\n' "$out" > "$OUT/replica-after.json"
     if [[ $rc -ne 0 ]]; then
         falsifier FAIL "falsifier 1: the replica stopped or errored during the migration"
@@ -661,7 +836,7 @@ traffic_run() {
     wait "${pids[@]}" 2>/dev/null || true
     local n
     n=$(grep -c . "$TRAFFIC_LOG" 2>/dev/null || echo 0)
-    echo "traffic: $n requests logged to $TRAFFIC_LOG" >&2
+    say 2 "traffic: $n requests logged to $TRAFFIC_LOG"
 }
 
 traffic_one_target() {
@@ -737,7 +912,7 @@ traffic_verdicts() {
     [[ $bad -eq 0 ]] && falsifier PASS "falsifier 5: health_check.php answered 200 on every target that refused (targets that refused: ${refused:-none})"
     local guarded
     guarded=$(awk '$5 == 1' "$TRAFFIC_LOG" | wc -l | tr -d ' ')
-    echo "traffic: $guarded responses matched ZDT_GUARD_PATTERN (see $TRAFFIC_LOG)"
+    say 1 "traffic: $guarded responses matched ZDT_GUARD_PATTERN (see $TRAFFIC_LOG)"
 }
 
 # ------------------------------------------------------------------ the run
@@ -745,8 +920,8 @@ traffic_verdicts() {
 run_phase() {
     local label="$1" with_blue_green="$2"
     TRAFFIC_LOG="$OUT/traffic-$label.log"
-    echo
-    echo "== phase: $label =="
+    say 1 ""
+    say 1 "== phase: $label =="
     local h pfx
     for h in "${WEB_HOSTS[@]}"; do
         if [[ $label == shared-* ]]; then
@@ -796,16 +971,17 @@ run_arms() {
     plan_all "$with_blue_green"
     [[ $PLAN_ONLY == 1 ]] && return 0
     confirm_plan
-    mkdir -p "$OUT"
+    transcript_open
     replica_gate
+    record_platform_facts
     run_phase "shared-prefix" "$with_blue_green"
     # Between the two phases, back to the start: the next phase repeats the
     # same migration under different cache settings.
     restore_snapshot "$SNAPSHOT"
     link_old_release "$ZDT_LABEL_OLD" || die "could not relink $ZDT_NEW_NODE to $ZDT_LABEL_OLD; check that node by hand before re-running an arm"
     run_phase "per-release-prefix" "$with_blue_green"
-    echo
-    echo "== summary: $PASSES pass, $FAILS fail =="
+    say 1 ""
+    say 1 "== summary: $PASSES pass, $FAILS fail =="
     print_restores
     [[ $FAILS -eq 0 ]] || exit 1
 }
@@ -813,26 +989,26 @@ run_arms() {
 plan_phase() {
     # One phase's plan lines, in the order run_phase does them.
     local label="$1" with_blue_green="$2" h pfx
-    printf 'PLAN  == phase: %s ==\n' "$label"
+    plan 'PLAN  == phase: %s ==\n' "$label"
     for h in "${WEB_HOSTS[@]}"; do
-        printf 'PLAN  %s: cp -L --preserve=mode,ownership,timestamps %s %s.bak-%s\n' "$h" "$ZDT_ENV_PHP" "$ZDT_ENV_PHP" "$RUN_ID"
+        plan 'PLAN  %s: cp -L --preserve=mode,ownership,timestamps %s %s.bak-%s\n' "$h" "$ZDT_ENV_PHP" "$ZDT_ENV_PHP" "$RUN_ID"
         if [[ $label == shared-* ]]; then
-            printf 'PLAN  %s\n' "$h: set cache prefixes (id_prefix) to zdt-shared in $ZDT_ENV_PHP"
+            plan 'PLAN  %s\n' "$h: set cache prefixes (id_prefix) to zdt-shared in $ZDT_ENV_PHP"
         else
             pfx="old"
             [[ $h == "$ZDT_NEW_NODE" ]] && pfx="$ZDT_LABEL_NEW"
-            printf 'PLAN  %s\n' "$h: set cache prefixes (id_prefix) to zdt-$pfx in $ZDT_ENV_PHP"
+            plan 'PLAN  %s\n' "$h: set cache prefixes (id_prefix) to zdt-$pfx in $ZDT_ENV_PHP"
         fi
         if [[ $with_blue_green == 1 && $h != "$ZDT_NEW_NODE" ]]; then
-            printf 'PLAN  %s\n' "$h: set deployment.blue_green.enabled to true in $ZDT_ENV_PHP"
+            plan 'PLAN  %s\n' "$h: set deployment.blue_green.enabled to true in $ZDT_ENV_PHP"
         fi
     done
-    printf 'PLAN  %s\n' "$ZDT_NEW_NODE: rsync $ZDT_RELEASE_TARBALL -> $ZDT_RELEASES_DIR/$ZDT_LABEL_NEW.tar.gz"
-    printf 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $ZDT_LABEL_NEW"
-    snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
-    printf 'PLAN  control: traffic %ss at %s/s per target (%s web nodes + the load balancer)\n' "$DURATION" "$RATE" "${#WEB_HOSTS[@]}"
-    printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
-    printf 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1)\n'
+    plan 'PLAN  %s\n' "$ZDT_NEW_NODE: rsync $ZDT_RELEASE_TARBALL -> $ZDT_RELEASES_DIR/$ZDT_LABEL_NEW.tar.gz"
+    plan 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $ZDT_LABEL_NEW"
+    say 1 "$(snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /')"
+    plan 'PLAN  control: traffic %ss at %s/s per target (%s web nodes + the load balancer)\n' "$DURATION" "$RATE" "${#WEB_HOSTS[@]}"
+    plan 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
+    plan 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1)\n'
 }
 
 plan_all() {
@@ -840,13 +1016,13 @@ plan_all() {
     # destructive steps between them (restore over the primary, relink), so
     # what -y would do is fully reviewable from the plan alone.
     local with_blue_green="$1"
-    echo "== plan (nothing runs) =="
-    printf 'PLAN  control: bin/zdt-fleet replica-check (the gate; it stops a run whose replica is not live)\n'
+    say 1 "== plan (nothing runs) =="
+    plan 'PLAN  control: bin/zdt-fleet replica-check (the gate; it stops a run whose replica is not live)\n'
     plan_phase "shared-prefix" "$with_blue_green"
-    printf 'PLAN  %s\n' "$(redact "$ZDT_ADMIN_NODE: restore database $ZDT_DB_NAME from $ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz (password $ZDT_DB_PASSWORD)")"
-    printf 'PLAN  %s\n' "$ZDT_NEW_NODE: link release $ZDT_LABEL_OLD back in"
+    plan 'PLAN  %s\n' "$(redact "$ZDT_ADMIN_NODE: restore database $ZDT_DB_NAME from $ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz (password $ZDT_DB_PASSWORD)")"
+    plan 'PLAN  %s\n' "$ZDT_NEW_NODE: link release $ZDT_LABEL_OLD back in"
     plan_phase "per-release-prefix" "$with_blue_green"
-    printf 'PLAN  control: restore env.php from the dated backups on every node\n'
+    plan 'PLAN  control: restore env.php from the dated backups on every node\n'
 }
 
 # --------------------------------------------------- arm 3: crossing releases
@@ -873,8 +1049,8 @@ crossing_phase() {
     local label="$1" tarball="$2" rel="$3"
     TRAFFIC_LOG="$OUT/traffic-$label.log"
     EVIDENCE_DIR="$OUT/evidence-$label"
-    echo
-    echo "== crossing: $label ($rel) =="
+    say 1 ""
+    say 1 "== crossing: $label ($rel) =="
     local h pfx
     for h in "${WEB_HOSTS[@]}"; do
         pfx="old"
@@ -1000,43 +1176,44 @@ run_crossing() {
     plan_all_crossing
     [[ $PLAN_ONLY == 1 ]] && return 0
     confirm_plan
-    mkdir -p "$OUT"
+    transcript_open
     replica_gate
+    record_platform_facts
     crossing_phase "additive-control" "$ZDT_RELEASE_ADDITIVE" "$ZDT_LABEL_ADDITIVE"
     restore_snapshot "$SNAPSHOT"
     link_old_release "$ZDT_LABEL_OLD" || die "could not relink $ZDT_NEW_NODE to $ZDT_LABEL_OLD; check that node by hand before re-running the arm"
     crossing_phase "breaking-evidence" "$ZDT_RELEASE_BREAKING" "$ZDT_LABEL_BREAKING"
-    echo
-    echo "== summary: $PASSES pass, $FAILS fail =="
+    say 1 ""
+    say 1 "== summary: $PASSES pass, $FAILS fail =="
     print_restores
     [[ $FAILS -eq 0 ]] || exit 1
 }
 
 plan_phase_crossing() {
     local label="$1" tarball="$2" rel="$3" h pfx
-    printf 'PLAN  == crossing: %s (%s) ==\n' "$label" "$rel"
+    plan 'PLAN  == crossing: %s (%s) ==\n' "$label" "$rel"
     for h in "${WEB_HOSTS[@]}"; do
-        printf 'PLAN  %s: cp -L --preserve=mode,ownership,timestamps %s %s.bak-%s\n' "$h" "$ZDT_ENV_PHP" "$ZDT_ENV_PHP" "$RUN_ID"
+        plan 'PLAN  %s: cp -L --preserve=mode,ownership,timestamps %s %s.bak-%s\n' "$h" "$ZDT_ENV_PHP" "$ZDT_ENV_PHP" "$RUN_ID"
         pfx="old"
         [[ $h == "$ZDT_NEW_NODE" ]] && pfx="$rel"
-        printf 'PLAN  %s\n' "$h: set cache prefixes (id_prefix) to zdt-$pfx and deployment.blue_green.enabled to true (old nodes only) in $ZDT_ENV_PHP"
+        plan 'PLAN  %s\n' "$h: set cache prefixes (id_prefix) to zdt-$pfx and deployment.blue_green.enabled to true (old nodes only) in $ZDT_ENV_PHP"
     done
-    printf 'PLAN  %s\n' "$ZDT_NEW_NODE: rsync $tarball -> $ZDT_RELEASES_DIR/$rel.tar.gz"
-    printf 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $rel"
-    snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
-    printf 'PLAN  control: traffic %ss at %s/s per target, including the read path %s (%s web nodes + the load balancer)\n' "$DURATION" "$RATE" "$ZDT_READ_PATH" "${#WEB_HOSTS[@]}"
-    printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
-    printf 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1); saved failure bodies under %s/evidence-%s/ (falsifier 3)\n' "$OUT" "$label"
+    plan 'PLAN  %s\n' "$ZDT_NEW_NODE: rsync $tarball -> $ZDT_RELEASES_DIR/$rel.tar.gz"
+    plan 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $rel"
+    say 1 "$(snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /')"
+    plan 'PLAN  control: traffic %ss at %s/s per target, including the read path %s (%s web nodes + the load balancer)\n' "$DURATION" "$RATE" "$ZDT_READ_PATH" "${#WEB_HOSTS[@]}"
+    plan 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
+    plan 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1); saved failure bodies under %s/evidence-%s/ (falsifier 3)\n' "$OUT" "$label"
 }
 
 plan_all_crossing() {
-    echo "== plan (nothing runs) =="
-    printf 'PLAN  control: bin/zdt-fleet replica-check (the gate; it stops a run whose replica is not live)\n'
+    say 1 "== plan (nothing runs) =="
+    plan 'PLAN  control: bin/zdt-fleet replica-check (the gate; it stops a run whose replica is not live)\n'
     plan_phase_crossing "additive-control" "$ZDT_RELEASE_ADDITIVE" "$ZDT_LABEL_ADDITIVE"
-    printf 'PLAN  %s\n' "$(redact "$ZDT_ADMIN_NODE: restore database $ZDT_DB_NAME from $ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz (password $ZDT_DB_PASSWORD)")"
-    printf 'PLAN  %s\n' "$ZDT_NEW_NODE: link release $ZDT_LABEL_OLD back in"
+    plan 'PLAN  %s\n' "$(redact "$ZDT_ADMIN_NODE: restore database $ZDT_DB_NAME from $ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz (password $ZDT_DB_PASSWORD)")"
+    plan 'PLAN  %s\n' "$ZDT_NEW_NODE: link release $ZDT_LABEL_OLD back in"
     plan_phase_crossing "breaking-evidence" "$ZDT_RELEASE_BREAKING" "$ZDT_LABEL_BREAKING"
-    printf 'PLAN  control: restore env.php from the dated backups on every node\n'
+    plan 'PLAN  control: restore env.php from the dated backups on every node\n'
 }
 
 # ---------------------------------------------------------------- outage (arm 4)
@@ -1108,8 +1285,8 @@ outage_phase() {
     local label="$1" tarball="$2" rel="$3" maint="${4:-}"
     TRAFFIC_LOG="$OUT/traffic-$label.log"
     EVIDENCE_DIR="$OUT/evidence-$label"
-    echo
-    echo "== outage: $label ($rel) =="
+    say 1 ""
+    say 1 "== outage: $label ($rel) =="
     [[ $PLAN_ONLY == 1 ]] && return 0
 
     snapshot_gate
@@ -1176,8 +1353,9 @@ run_outage() {
     plan_all_outage
     [[ $PLAN_ONLY == 1 ]] && return 0
     confirm_plan
-    mkdir -p "$OUT"
+    transcript_open
     replica_gate
+    record_platform_facts
     outage_phase "rollout" "$ZDT_RELEASE_BREAKING" "$ZDT_LABEL_BREAKING"
     restore_snapshot "$SNAPSHOT"
     link_old_release "$ZDT_LABEL_OLD" || die "could not relink $ZDT_NEW_NODE to $ZDT_LABEL_OLD; check that node by hand before re-running the arm"
@@ -1190,49 +1368,49 @@ run_outage() {
     mf="${m#failed=}"; mf="${mf%% *}"
     ms="${m##*seconds=}"
     falsifier4_verdict "$rf" "$rs" "$mf" "$ms"
-    echo "outage: rollout failed $rf requests in $rs seconds; maintenance mode failed $mf in $ms (per-second shares: $OUT/outage-report-rollout.txt, $OUT/outage-report-maintenance.txt)"
-    echo
-    echo "== summary: $PASSES pass, $FAILS fail =="
+    say 1 "outage: rollout failed $rf requests in $rs seconds; maintenance mode failed $mf in $ms (per-second shares: $OUT/outage-report-rollout.txt, $OUT/outage-report-maintenance.txt)"
+    say 1 ""
+    say 1 "== summary: $PASSES pass, $FAILS fail =="
     print_restores
     [[ $FAILS -eq 0 ]] || exit 1
 }
 
 plan_phase_outage() {
     local label="$1" tarball="$2" rel="$3" maint="${4:-}" h
-    printf 'PLAN  == outage: %s (%s) ==\n' "$label" "$rel"
+    plan 'PLAN  == outage: %s (%s) ==\n' "$label" "$rel"
     if [[ $maint == maint ]]; then
         for h in "${WEB_HOSTS[@]}"; do
-            printf 'PLAN  %s\n' "$h: php bin/magento maintenance:enable in $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD (before anything moves)"
+            plan 'PLAN  %s\n' "$h: php bin/magento maintenance:enable in $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD (before anything moves)"
         done
         for h in "${WEB_HOSTS[@]}"; do
-            printf 'PLAN  %s\n' "$h: rsync $tarball -> $ZDT_RELEASES_DIR/$rel.tar.gz, unpack release $rel, php bin/magento maintenance:enable in $ZDT_RELEASES_DIR/$rel, link it (under the page, before the migration)"
+            plan 'PLAN  %s\n' "$h: rsync $tarball -> $ZDT_RELEASES_DIR/$rel.tar.gz, unpack release $rel, php bin/magento maintenance:enable in $ZDT_RELEASES_DIR/$rel, link it (under the page, before the migration)"
         done
     else
-        printf 'PLAN  %s\n' "$ZDT_NEW_NODE: rsync $tarball -> $ZDT_RELEASES_DIR/$rel.tar.gz"
-        printf 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $rel"
+        plan 'PLAN  %s\n' "$ZDT_NEW_NODE: rsync $tarball -> $ZDT_RELEASES_DIR/$rel.tar.gz"
+        plan 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $rel"
     fi
-    snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
-    printf 'PLAN  control: traffic %ss at %s/s per target (%s web nodes + the load balancer)\n' "$DURATION" "$RATE" "${#WEB_HOSTS[@]}"
-    printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
+    say 1 "$(snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /')"
+    plan 'PLAN  control: traffic %ss at %s/s per target (%s web nodes + the load balancer)\n' "$DURATION" "$RATE" "${#WEB_HOSTS[@]}"
+    plan 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
     if [[ $maint == maint ]]; then
         for h in "${WEB_HOSTS[@]}"; do
-            printf 'PLAN  %s\n' "$h: php bin/magento maintenance:disable in $ZDT_RELEASES_DIR/$rel (after the migration, on every node, in one step)"
+            plan 'PLAN  %s\n' "$h: php bin/magento maintenance:disable in $ZDT_RELEASES_DIR/$rel (after the migration, on every node, in one step)"
         done
         for h in "${WEB_HOSTS[@]}"; do
-            printf 'PLAN  %s\n' "$h: php bin/magento maintenance:disable in $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD, then link release $ZDT_LABEL_OLD back in (after the traffic window)"
+            plan 'PLAN  %s\n' "$h: php bin/magento maintenance:disable in $ZDT_RELEASES_DIR/$ZDT_LABEL_OLD, then link release $ZDT_LABEL_OLD back in (after the traffic window)"
         done
     fi
-    printf 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1)\n'
+    plan 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1)\n'
 }
 
 plan_all_outage() {
-    echo "== plan (nothing runs) =="
-    printf 'PLAN  control: bin/zdt-fleet replica-check (the gate; it stops a run whose replica is not live)\n'
+    say 1 "== plan (nothing runs) =="
+    plan 'PLAN  control: bin/zdt-fleet replica-check (the gate; it stops a run whose replica is not live)\n'
     plan_phase_outage "rollout" "$ZDT_RELEASE_BREAKING" "$ZDT_LABEL_BREAKING"
-    printf 'PLAN  %s\n' "$(redact "$ZDT_ADMIN_NODE: restore database $ZDT_DB_NAME from $ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz (password $ZDT_DB_PASSWORD)")"
-    printf 'PLAN  %s\n' "$ZDT_NEW_NODE: link release $ZDT_LABEL_OLD back in"
+    plan 'PLAN  %s\n' "$(redact "$ZDT_ADMIN_NODE: restore database $ZDT_DB_NAME from $ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz (password $ZDT_DB_PASSWORD)")"
+    plan 'PLAN  %s\n' "$ZDT_NEW_NODE: link release $ZDT_LABEL_OLD back in"
     plan_phase_outage "maintenance" "$ZDT_RELEASE_BREAKING" "$ZDT_LABEL_BREAKING" maint
-    printf 'PLAN  control: every maintenance flag raised by the run, lifted in the release that holds it; env.php restored from the dated backups\n'
+    plan 'PLAN  control: every maintenance flag raised by the run, lifted in the release that holds it; env.php restored from the dated backups\n'
 }
 
 arm_main() {

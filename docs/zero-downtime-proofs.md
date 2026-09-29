@@ -672,7 +672,18 @@ The replica connection (`ZDT_PRIMARY_*` / `ZDT_REPLICA_*`) belongs to
 
 ### What the run leaves behind
 
-The transcript (every `PLAN`/`RUN` line, secret-free), `traffic-<phase>.log`
+`transcript.log` — the arm writes it itself: the plan the run was confirmed
+against, every `RUN` line as it happens, the banners, the `PASS`/`FAIL`
+verdicts and the printed restore commands, secret-free (every line that could
+carry a secret goes through `redact()` first, and the `-n` plan leaves no file
+at all) — `platform.json` (the facts the results document has to open with:
+Magento edition and version, PHP, database server and version, replication
+mode, the number of web servers; a fact the lab does not answer is `null`
+with the reason in `not_recorded`, never a guess — including the edition,
+which is named only when the release's `composer.json` lists exactly one
+edition package: with two, the run cannot say which platform the lab has, so
+`edition_packages` keeps the raw list and the reason says the list was
+ambiguous)`, `traffic-<phase>.log`
 — one per phase, so no verdict ever counts another phase's lines; each line
 one request: epoch second, target, request type, status, guard flag —
 `replica-before.json` and `replica-after.json` from the gate, `evidence-<leg>/` (arm 3: the saved failure bodies),
@@ -702,4 +713,11 @@ about — runs nothing, a failed snapshot, a failed release placement, a failed
 it report success, the backup precedes every edit and survives the
 `env.php` symlink, the printed restores are right, the rate cap and the
 duration stop hold, a 404 on one route is not read as a refusing target, and
-the transcript never carries a password.
+the transcript never carries a password. The recording gaps have their own
+tests too: a run leaves `transcript.log` holding the `RUN` lines, the
+verdicts and the printed restore commands, a plan (`-n`) and a declined plan
+leave none, a failed run's transcript keeps the `FAIL` and the step that
+died, `platform.json` carries the lab's answers with `null` and a reason when
+one is unreadable (and `null` with an ambiguity reason when the release names
+two edition packages), and the platform probe reaches no `ssh` argv with the
+password.

@@ -145,6 +145,23 @@ changed, because there's nothing before it.
 
 ### Added
 
+- The fleet arms record what a run has to carry into a results document.
+  Each arm now writes `transcript.log` into its run directory — the plan it
+  was confirmed against, every `RUN` line as it happens, the banners, the
+  `PASS`/`FAIL` verdicts and the printed restore commands — secret-free, and
+  only for a run (a `-n` plan leaves no file). Until now those lines went to
+  stderr and existed in a file only if the operator redirected them, while
+  `docs/zero-downtime-proofs.md` described a transcript the code did not
+  write. Each arm also records `platform.json`: Magento edition and version,
+  PHP, the database server and its version, the replication mode and the
+  number of web servers — the facts issue #5's results document has to open
+  with, which nothing recorded before, so its header came from memory. A fact
+  the lab does not answer is `null`, with the reason in `not_recorded` and a
+  `WARN` in the transcript: the run goes on and the document says what could
+  not be read rather than a guess. An edition is named only when the release's
+  `composer.json` lists exactly one edition package — with two, the run cannot
+  say which platform the lab has, so the fact stays `null` and the raw list
+  and the reason are recorded instead of one of the two labels.
 - `bin/zdt-arm arm4`, the outage arm of issue #5: the breaking release
   (`ZDT_RELEASE_BREAKING` / `ZDT_LABEL_BREAKING`) rolls out twice — once
   with no maintenance mode, old servers serving while the migration runs,

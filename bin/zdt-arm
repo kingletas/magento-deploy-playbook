@@ -44,6 +44,9 @@
 #                     ZDT_LABEL_OLD must already be deployed on every node
 #   ZDT_ENV_PHP       path of each node's env.php (e.g.
 #                     /var/www/magento/current/app/etc/env.php)
+#   ZDT_FPM_RELOAD    command run on a node, as the ssh user, that reloads
+#                     PHP-FPM and returns once it serves again; run after
+#                     every env.php edit and restore (lab: zdtfleet-fpm-reload)
 #   ZDT_DB_HOST / ZDT_DB_USER / ZDT_DB_PASSWORD / ZDT_DB_NAME
 #                     the PRIMARY's connection, for the snapshot
 #   ZDT_SNAPSHOT_DIR  where the admin node keeps snapshots (default

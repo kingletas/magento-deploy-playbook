@@ -40,6 +40,11 @@
 #                         /var/www/magento/current)
 #   ZDT_ENV_PHP             each node's env.php path (default
 #                         /var/www/magento/shared/app/etc/env.php)
+#   ZDT_FPM_RELOAD          the command that reloads PHP-FPM on a node
+#                         (zdtfleet-fpm-reload in the lab); run on each node
+#                         once its release and env.php are in place, because
+#                         OPcache never rechecks a file and r0 lands at the
+#                         path the install-only r0 had
 #   ZDT_CATEGORY_PATH / ZDT_PRODUCT_PATH   printed by install-store; no
 #                         default, since a guessed path a stock store does
 #                         not serve would mark every target as failing
@@ -64,6 +69,7 @@ die() { echo "deploy-r0: $*" >&2; exit 2; }
 : "${ZDT_ADMIN_NODE:?set ZDT_ADMIN_NODE}"
 : "${ZDT_NODE_URLS:?set ZDT_NODE_URLS}"
 : "${ZDT_LB_URL:?set ZDT_LB_URL}"
+: "${ZDT_FPM_RELOAD:?set ZDT_FPM_RELOAD, the command that reloads PHP-FPM on a node}"
 : "${ZDT_CATEGORY_PATH:?set ZDT_CATEGORY_PATH, a real category page (see install-store output)}"
 : "${ZDT_PRODUCT_PATH:?set ZDT_PRODUCT_PATH, a real product page (see install-store output)}"
 
@@ -126,8 +132,10 @@ for h in "${WEB_HOSTS[@]}"; do
     # web1 already holds the env.php every other node copies from; copying
     # it onto itself would race the read this script just did on the same
     # host, so it is the one node skipped here.
-    [[ $h == "$ZDT_ADMIN_NODE" ]] && continue
-    copy_env_php "$h"
+    [[ $h != "$ZDT_ADMIN_NODE" ]] && copy_env_php "$h"
+    echo "RUN   $h: $ZDT_FPM_RELOAD" >&2
+    # shellcheck disable=SC2086  # the setting is a command line, split on purpose.
+    ssh "${ssh_opts[@]}" "$h" $ZDT_FPM_RELOAD || die "PHP-FPM on $h did not reload"
 done
 
 echo

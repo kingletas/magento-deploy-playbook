@@ -47,6 +47,9 @@
 #   ZDT_DB_HOST / ZDT_DB_USER / ZDT_DB_NAME   the primary's connection
 #   ZDT_SEARCH_HOST (default opensearch) / ZDT_SEARCH_PORT (default 9200)
 #   ZDT_CACHE_HOST  (default valkey)    / ZDT_CACHE_PORT  (default 6379)
+#   ZDT_FPM_RELOAD         the command that reloads PHP-FPM on a node
+#                         (zdtfleet-fpm-reload in the lab), run on the admin
+#                         node once the store is installed
 #   ZDT_BASE_URL           default http://lb/
 #   ZDT_ADMIN_USER          default zdtadmin
 #   ZDT_ADMIN_EMAIL         default zdtadmin@example.test
@@ -87,6 +90,7 @@ die() { echo "install-store: $*" >&2; exit 2; }
 : "${ZDT_DB_HOST:?set ZDT_DB_HOST}"
 : "${ZDT_DB_USER:?set ZDT_DB_USER}"
 : "${ZDT_DB_NAME:?set ZDT_DB_NAME}"
+: "${ZDT_FPM_RELOAD:?set ZDT_FPM_RELOAD, the command that reloads PHP-FPM on a node}"
 : "${ZDT_DB_PASSWORD:?set ZDT_DB_PASSWORD; run this script through bin/with-secrets, which reads it from the db_app_password Compose secret}"
 
 ZDT_LABEL_OLD="${ZDT_LABEL_OLD:-r0}"
@@ -206,6 +210,13 @@ test -s '$ZDT_ENV_PHP'
 REMOTE
 
 echo "$ZDT_ADMIN_NODE: env.php written to $ZDT_ENV_PHP (through the release's own symlink to it)"
+
+# PHP-FPM may have served a request while the install was half done, and
+# OPcache never rechecks a file, so without this it keeps that env.php and
+# sends every page to /setup/.
+echo "RUN   $ZDT_ADMIN_NODE: $ZDT_FPM_RELOAD" >&2
+# shellcheck disable=SC2086  # the setting is a command line, split on purpose.
+ssh "${ssh_opts[@]}" "$ZDT_ADMIN_NODE" $ZDT_FPM_RELOAD || die "PHP-FPM on $ZDT_ADMIN_NODE did not reload after the install"
 
 remote_script "$ZDT_ADMIN_NODE" "app:config:dump scopes themes" <<REMOTE
 set -euo pipefail

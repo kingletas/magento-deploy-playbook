@@ -7,7 +7,7 @@ FROM php:8.4-fpm
 ARG BUILD_JOBS=2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        nginx openssh-server rsync mariadb-client \
+        nginx openssh-server rsync mariadb-client procps \
         libfreetype-dev libjpeg62-turbo-dev libpng-dev libicu-dev \
         libxml2-dev libxslt1-dev libzip-dev libsodium-dev \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
@@ -24,8 +24,8 @@ RUN for ext in bcmath ctype curl dom ftp gd intl mbstring pdo_mysql SimpleXML so
 RUN useradd -m -s /bin/bash deploy \
     && mkdir -p /var/www/magento/releases /var/www/magento/shared/app/etc \
         /var/www/magento/shared/pub/media /var/www/magento/zdt-snapshots \
-        /home/deploy/.ssh /run/sshd /releases \
-    && chown -R deploy:deploy /var/www/magento /home/deploy/.ssh /releases \
+        /home/deploy/.ssh /run/sshd /run/php-fpm /var/log/php-fpm /releases \
+    && chown -R deploy:deploy /var/www/magento /home/deploy/.ssh /run/php-fpm /var/log/php-fpm /releases \
     && chmod 700 /home/deploy/.ssh \
     && printf '%s\n' 'PasswordAuthentication no' 'KbdInteractiveAuthentication no' \
         'PermitRootLogin no' 'AllowUsers deploy' > /etc/ssh/sshd_config.d/zdtfleet.conf \
@@ -35,7 +35,8 @@ COPY nginx.conf /etc/nginx/conf.d/magento.conf
 COPY php.ini /usr/local/etc/php/conf.d/99-zdtfleet.ini
 COPY fpm-pool.conf /usr/local/etc/php-fpm.d/zz-zdtfleet.conf
 COPY entrypoint.sh /usr/local/bin/zdtfleet-entrypoint
-RUN chmod 755 /usr/local/bin/zdtfleet-entrypoint && nginx -t
+COPY fpm-reload /usr/local/bin/zdtfleet-fpm-reload
+RUN chmod 755 /usr/local/bin/zdtfleet-entrypoint /usr/local/bin/zdtfleet-fpm-reload && nginx -t
 
 EXPOSE 22 80
 ENTRYPOINT ["/usr/local/bin/zdtfleet-entrypoint"]

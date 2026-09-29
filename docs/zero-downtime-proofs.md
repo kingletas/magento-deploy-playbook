@@ -654,6 +654,7 @@ arguments, so no password lands in a shell history or a transcript.
 | `ZDT_RELEASE_TARBALL` | the new release, a path on the control machine |
 | `ZDT_LABEL_NEW` / `ZDT_LABEL_OLD` | release directory names under `ZDT_RELEASES_DIR`; `ZDT_LABEL_OLD` must already be deployed on every node |
 | `ZDT_ENV_PHP` | each node's `env.php` path (they are edited by `php -r`, backed up first) |
+| `ZDT_FPM_RELOAD` | the command, run on a node as the ssh user, that reloads PHP-FPM and returns once it serves again (the lab's is `zdtfleet-fpm-reload`; a host's might be `sudo systemctl reload php8.4-fpm`). Run after every `env.php` edit and restore: with OPcache never rechecking a file, an edit is otherwise invisible to requests. No default |
 | `ZDT_DB_HOST` / `ZDT_DB_USER` / `ZDT_DB_PASSWORD` / `ZDT_DB_NAME` | the primary's connection, for the snapshot |
 | `ZDT_SNAPSHOT_DIR` | where the admin node keeps snapshots (default `/var/www/magento/zdt-snapshots`) |
 | `ZDT_RATE` / `ZDT_DURATION` | traffic per target: requests/s (default 2, max 20) and seconds (default 120, max 600) |

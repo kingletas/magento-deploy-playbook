@@ -244,9 +244,10 @@ class ZdtArmTest(unittest.TestCase):
                 "ZDT_LABEL_NEW": "rel-new",
                 "ZDT_LABEL_OLD": "rel-old",
                 "ZDT_ENV_PHP": "/srv/magento/current/app/etc/env.php",
+                "ZDT_FPM_RELOAD": "fpm-reload-cmd",
                 "ZDT_DB_HOST": "primary.db",
                 "ZDT_DB_USER": "dbu",
-                "ZDT_DB_PASSWORD": "Sup3rSecretPw",
+                "ZDT_DB_PASSWORD": "Sup3rSecretPw",  # pragma: allowlist secret (invented for the tests)
                 "ZDT_DB_NAME": "magento",
                 "ZDT_GUARD_PATTERN": "Please refresh",
                 "ZDT_CATEGORY_PATH": "/mens.html",
@@ -329,6 +330,7 @@ class ZdtArmTest(unittest.TestCase):
             "ZDT_LABEL_NEW",
             "ZDT_LABEL_OLD",
             "ZDT_ENV_PHP",
+            "ZDT_FPM_RELOAD",
             "ZDT_DB_HOST",
             "ZDT_DB_USER",
             "ZDT_DB_PASSWORD",
@@ -453,6 +455,24 @@ class ZdtArmTest(unittest.TestCase):
         # The key Magento reads is id_prefix; backend_options is ignored.
         self.assertIn("id_prefix", transcript)
         self.assertNotIn("backend_options", transcript)
+        # Every node reloads PHP-FPM after its env.php edit, in both phases.
+        self.assertEqual(transcript.count("fpm-reload-cmd (so PHP-FPM reads the edited env.php)"), 6)
+        self.assertIn("restore env.php from the dated backups on every node, and fpm-reload-cmd on each", transcript)
+
+    def test_every_node_reloads_php_fpm_before_the_migration_and_after_the_restore(self) -> None:
+        # OPcache never rechecks a file, so an env.php edit that is not
+        # followed by a reload leaves the node on the settings the arm
+        # started with, and the phase measures nothing it claims.
+        result = self.run_arm("arm1", "-y")
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        lines = self.calls().splitlines()
+        upgrade = next(i for i, line in enumerate(lines) if "setup:upgrade" in line)
+        for node in ("node1", "node2", "node3"):
+            reloads = [i for i, line in enumerate(lines) if line.startswith(f"SSH|{node}|") and "fpm-reload-cmd" in line]
+            # Two phases, each after the edit and after the restore, and once
+            # more after the exit trap's own restore.
+            self.assertEqual(len(reloads), 5, f"{node} reloads: {reloads}")
+            self.assertLess(reloads[0], upgrade, f"{node} must serve the phase's settings before the migration")
 
     def test_declined_prompt_runs_nothing(self) -> None:
         result = self.run_arm("arm1", stdin="n\n")
@@ -1000,7 +1020,7 @@ class ZdtArmTest(unittest.TestCase):
         for node in ("node1", "node2", "node3"):
             own = [i for i, l in enumerate(lines) if l.startswith(f"SSH|{node}|") and "maintenance:enable" in l]
             self.assertEqual(len(own), 2, f"{node}: want 2 enables, got {own}")
-            self.assertIn(f"releases/rel-old", lines[own[0]], f"{node}: the first enable is the old release's")
+            self.assertIn("releases/rel-old", lines[own[0]], f"{node}: the first enable is the old release's")
             self.assertNotIn("rel-break", lines[own[0]], f"{node}: the first enable is the old release's")
         upgrades = [i for i, l in enumerate(lines) if "setup:upgrade" in l]
         self.assertEqual(len(upgrades), 2)

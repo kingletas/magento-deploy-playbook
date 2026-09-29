@@ -75,7 +75,7 @@ require_env() {
     if [[ ${ARM_OUTAGE:-0} == 1 ]]; then release_vars=(); fi
     for v in ZDT_WEB_HOSTS ZDT_NEW_NODE ZDT_ADMIN_NODE ZDT_LB_URL ZDT_NODE_URLS \
              "${release_vars[@]}" ZDT_LABEL_OLD \
-             ZDT_ENV_PHP ZDT_DB_HOST ZDT_DB_USER ZDT_DB_PASSWORD ZDT_DB_NAME; do
+             ZDT_ENV_PHP ZDT_FPM_RELOAD ZDT_DB_HOST ZDT_DB_USER ZDT_DB_PASSWORD ZDT_DB_NAME; do
         [[ -n ${!v:-} ]] || missing+=("$v")
     done
     [[ ${#missing[@]} -eq 0 ]] \
@@ -450,6 +450,27 @@ file_put_contents(\$f, "<?php\nreturn " . var_export(\$env, true) . ";\n");
 REMOTE
 }
 
+fpm_reload() {
+    # fpm_reload HOST -- run ZDT_FPM_RELOAD on the node, so PHP-FPM reads the
+    # env.php just edited. With OPcache set never to recheck a file, as a
+    # zero-downtime host sets it, an edit to env.php (one shared path in every
+    # release) is otherwise invisible to requests, and the arm would measure
+    # the settings it started with. The command must return only once the
+    # reloaded pool serves (the lab's zdtfleet-fpm-reload does).
+    local host="$1"
+    # shellcheck disable=SC2086  # the setting is a command line, split on purpose.
+    remote_cmd "$host" $ZDT_FPM_RELOAD
+}
+
+reload_web_hosts() {
+    # After a phase's env.php edits, before its traffic: every node serves the
+    # settings the phase is about.
+    local h
+    for h in "${WEB_HOSTS[@]}"; do
+        fpm_reload "$h" || die "PHP-FPM on $h did not reload after the env.php edit; the arm stops here"
+    done
+}
+
 print_restores() {
     echo
     echo "If the run was cut short in a way no trap could handle (kill -9, a"
@@ -483,6 +504,9 @@ restore_env_files() {
         # following the destination symlink writes the original bytes back
         # into the shared copy — where env.php points.
         ssh "${ssh_opts[@]}" "$h" cp --preserve=mode,ownership,timestamps "$ZDT_ENV_PHP.bak-$RUN_ID" "$ZDT_ENV_PHP" >/dev/null 2>&1 || true
+        # shellcheck disable=SC2029,SC2086  # the setting is a command line for the node.
+        ssh "${ssh_opts[@]}" "$h" $ZDT_FPM_RELOAD >/dev/null 2>&1 \
+            || echo "zdt-arm/$ARM_NAME: PHP-FPM on $h did not reload after env.php was restored; run: ssh -o BatchMode=yes $h $ZDT_FPM_RELOAD" >&2
     done
 }
 
@@ -771,6 +795,7 @@ run_phase() {
         fi
     done
     [[ $PLAN_ONLY == 1 ]] && return 0
+    reload_web_hosts
 
     snapshot_gate
     traffic_run &
@@ -827,6 +852,9 @@ plan_phase() {
             printf 'PLAN  %s\n' "$h: set deployment.blue_green.enabled to true in $ZDT_ENV_PHP"
         fi
     done
+    for h in "${WEB_HOSTS[@]}"; do
+        printf 'PLAN  %s\n' "$h: $ZDT_FPM_RELOAD (so PHP-FPM reads the edited env.php)"
+    done
     printf 'PLAN  %s\n' "$ZDT_NEW_NODE: rsync $ZDT_RELEASE_TARBALL -> $ZDT_RELEASES_DIR/$ZDT_LABEL_NEW.tar.gz"
     printf 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $ZDT_LABEL_NEW"
     snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
@@ -846,7 +874,7 @@ plan_all() {
     printf 'PLAN  %s\n' "$(redact "$ZDT_ADMIN_NODE: restore database $ZDT_DB_NAME from $ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz (password $ZDT_DB_PASSWORD)")"
     printf 'PLAN  %s\n' "$ZDT_NEW_NODE: link release $ZDT_LABEL_OLD back in"
     plan_phase "per-release-prefix" "$with_blue_green"
-    printf 'PLAN  control: restore env.php from the dated backups on every node\n'
+    printf 'PLAN  control: restore env.php from the dated backups on every node, and %s on each\n' "$ZDT_FPM_RELOAD"
 }
 
 # --------------------------------------------------- arm 3: crossing releases
@@ -892,6 +920,7 @@ crossing_phase() {
         fi
     done
     [[ $PLAN_ONLY == 1 ]] && return 0
+    reload_web_hosts
 
     snapshot_gate
     traffic_run &
@@ -1021,6 +1050,9 @@ plan_phase_crossing() {
         [[ $h == "$ZDT_NEW_NODE" ]] && pfx="$rel"
         printf 'PLAN  %s\n' "$h: set cache prefixes (id_prefix) to zdt-$pfx and deployment.blue_green.enabled to true (old nodes only) in $ZDT_ENV_PHP"
     done
+    for h in "${WEB_HOSTS[@]}"; do
+        printf 'PLAN  %s\n' "$h: $ZDT_FPM_RELOAD (so PHP-FPM reads the edited env.php)"
+    done
     printf 'PLAN  %s\n' "$ZDT_NEW_NODE: rsync $tarball -> $ZDT_RELEASES_DIR/$rel.tar.gz"
     printf 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $rel"
     snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
@@ -1036,7 +1068,7 @@ plan_all_crossing() {
     printf 'PLAN  %s\n' "$(redact "$ZDT_ADMIN_NODE: restore database $ZDT_DB_NAME from $ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz (password $ZDT_DB_PASSWORD)")"
     printf 'PLAN  %s\n' "$ZDT_NEW_NODE: link release $ZDT_LABEL_OLD back in"
     plan_phase_crossing "breaking-evidence" "$ZDT_RELEASE_BREAKING" "$ZDT_LABEL_BREAKING"
-    printf 'PLAN  control: restore env.php from the dated backups on every node\n'
+    printf 'PLAN  control: restore env.php from the dated backups on every node, and %s on each\n' "$ZDT_FPM_RELOAD"
 }
 
 # ---------------------------------------------------------------- outage (arm 4)

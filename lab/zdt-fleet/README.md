@@ -54,6 +54,7 @@ The arms' settings live in `lab.env` (gitignored; `lab.env.example` is committed
 | `ZDT_LB_URL` | `http://lb` |
 | `ZDT_NODE_URLS` | `http://web1,http://web2,http://web3` |
 | `ZDT_ENV_PHP` | `/var/www/magento/shared/app/etc/env.php` |
+| `ZDT_FPM_RELOAD` | `zdtfleet-fpm-reload`, shipped in the web image |
 | `ZDT_DB_HOST`, `ZDT_PRIMARY_HOST` | `db-primary` |
 | `ZDT_REPLICA_HOST` | `db-replica` |
 | `ZDT_CATEGORY_PATH`, `ZDT_PRODUCT_PATH` | a category and a product the fixtures created, read from the store after install |
@@ -65,7 +66,7 @@ The arms' settings live in `lab.env` (gitignored; `lab.env.example` is committed
 - Installed once, from `web1`, against `db-primary`: search on `opensearch`, cache, page cache and sessions on `valkey`, base URL `http://lb/`, `web/url/redirect_to_base` 0 so a request to a node by name is served rather than redirected, admin on an invented user.
 - **Data**: `setup:performance:generate-fixtures` with the small profile, so categories and products exist without sample data or a download.
 - **The replica** is seeded from the primary after the install and follows it by GTID from then on.
-- **Restart the three web nodes from the Docker host after `bin/deploy-r0`**: `docker compose --env-file lab.env restart web1 web2 web3`. OPcache never rechecks a file, so web1 keeps the `env.php` it saw mid-install and sends every page to `/setup/`, and `r0` unpacked again at the same path keeps the install-only copy's scripts. Control cannot do it: PHP-FPM runs as root on the node, and control connects as `deploy`.
+- **PHP-FPM runs as `deploy`**, master and workers, so control can reload it over the ssh it already uses: `zdtfleet-fpm-reload` on a node, which is `ZDT_FPM_RELOAD` in `lab.env`. OPcache never rechecks a file, and `env.php` is one shared path in every release, so an edit to it reaches requests only after a reload. `install-store` reloads web1 after the install, `deploy-r0` reloads every node once `r0` and its `env.php` are in place, and every arm reloads each node after it edits or restores `env.php`.
 
 ## The releases
 

@@ -11,7 +11,8 @@ install -d -o root -g root -m 700 "$host_keys"
 install -o deploy -g deploy -m 600 /run/zdtfleet/authorized_keys /home/deploy/.ssh/authorized_keys
 
 /usr/sbin/sshd -D -e -h "$host_keys/ssh_host_ed25519_key" &
-php-fpm -F &
+# As deploy, so the arms (which ssh in as deploy) can reload it.
+setpriv --reuid=deploy --regid=deploy --init-groups php-fpm -F &
 nginx -g 'daemon off;' &
 
 wait -n

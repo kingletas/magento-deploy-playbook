@@ -9,7 +9,10 @@ x-web: &web
     context: ./web
   image: zdtfleet-web
   networks: [fleet]
-  cpus: "0.5"
+  # A whole core: at half of one, the node running setup:upgrade answered
+  # nothing for the migration's length, health check included, and arm 1's
+  # falsifier 5 measured the cap instead of the deploy.
+  cpus: "1.0"
   mem_limit: 1250m
   depends_on:
     db-primary:

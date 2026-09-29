@@ -145,6 +145,13 @@ changed, because there's nothing before it.
 
 ### Added
 
+- `docs/results/_template.md` is the shape of the results document issue #5
+  asks for: the platform facts the run records as its header, the three
+  conditions a run has to meet to count, and one section per falsifier, each
+  opening at `NOT RUN — <condition missed>`. It is committed so nothing in the
+  document has to be invented while a run is fresh, and it says of itself that
+  it is not a result. The filled `docs/results/<date>-<platform>.md` follows a
+  real run, from that run's own files under `ZDT_RUN_DIR`.
 - The fleet arms record what a run has to carry into a results document.
   Each arm now writes `transcript.log` into its run directory — the plan it
   was confirmed against, every `RUN` line as it happens, the banners, the

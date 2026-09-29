@@ -27,6 +27,7 @@ them and keep the transcript.
 - [Running the framework proofs on a production store](#running-the-framework-proofs-on-a-production-store)
 - [The fleet checks: `bin/zdt-fleet`](#the-fleet-checks-binzdt-fleet)
 - [The fleet arms: `bin/zdt-arm`](#the-fleet-arms-binzdt-arm)
+- [The results document](#the-results-document)
 
 ## Running the proofs
 
@@ -721,3 +722,19 @@ died, `platform.json` carries the lab's answers with `null` and a reason when
 one is unreadable (and `null` with an ambiguity reason when the release names
 two edition packages), and the platform probe reaches no `ssh` argv with the
 password.
+
+## The results document
+
+What a run is for is a document that can be read without the run: issue #5's
+results document, one per run, at `docs/results/<date>-<platform>.md`
+([`docs/results/_template.md`](results/_template.md) is the shape). It opens
+with the platform — the facts `platform.json` records — and carries each of
+the five falsifiers as PASS or FAIL with the one output line that decides it.
+
+**The template is not a result.** It is committed so nothing in the document
+has to be invented while a run is fresh; every placeholder is filled from the
+run's own files under `ZDT_RUN_DIR`, and a falsifier with nothing behind it
+reads `NOT RUN — <condition missed>`. A run that missed a condition of
+validity is reported as not run, naming the condition, rather than dropped or
+filled in from a run that met it. Raw output is attached or linked unedited:
+a summary that does not match the transcript is the summary that is wrong.

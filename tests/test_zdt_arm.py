@@ -509,6 +509,9 @@ class ZdtArmTest(unittest.TestCase):
         # checks: no argv field and no transcript line ever carries it; the
         # body does, and that body is never echoed.
         self.assertIn("mysqldump", self.calls())
+        # A restore must also remove what the migration created, or the next
+        # phase finds the new table already there.
+        self.assertIn("--add-drop-database", self.calls())
         for line in self.calls().splitlines():
             if line.startswith("SSH|"):
                 argv_field = "|".join(line.split("|")[0:3])

@@ -247,11 +247,15 @@ snapshot_line() {
 }
 
 snapshot_gate() {
-    # A dated mysqldump on the admin node, before setup:upgrade. The password
-    # is embedded inside a script piped over stdin (never argv, never echoed:
-    # only the label is, redacted). A failed snapshot stops the arm BEFORE
-    # the upgrade: no snapshot, no way back. The file lives on the admin node
-    # under ZDT_SNAPSHOT_DIR, where restore-snapshot reads it from.
+    # A dated mysqldump on the admin node, before setup:upgrade. It drops the
+    # database on restore: a table the migration created is not in the dump,
+    # and a restore that only recreates what the dump holds would leave it for
+    # the next phase to find already there, so that phase's migration would
+    # not be the one measured. The password is embedded inside a script piped
+    # over stdin (never argv, never echoed: only the label is, redacted). A
+    # failed snapshot stops the arm BEFORE the upgrade: no snapshot, no way
+    # back. The file lives on the admin node under ZDT_SNAPSHOT_DIR, where
+    # restore-snapshot reads it from.
     local snap="$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz"
     if [[ $PLAN_ONLY == 1 ]]; then printf 'PLAN  %s\n' "$(snapshot_line "$snap")"; return 0; fi
     if ! remote_script "$ZDT_ADMIN_NODE" "snapshot database $ZDT_DB_NAME (password $ZDT_DB_PASSWORD) to $snap" >/dev/null <<REMOTE
@@ -259,7 +263,7 @@ set -euo pipefail
 export MYSQL_PWD='$ZDT_DB_PASSWORD'
 command -v mysqldump >/dev/null || { echo "no mysqldump on this node" >&2; exit 1; }
 mkdir -p "$ZDT_SNAPSHOT_DIR"
-mysqldump --single-transaction --routines --triggers --events \
+mysqldump --single-transaction --routines --triggers --events --add-drop-database \
     -h '$ZDT_DB_HOST' -u '$ZDT_DB_USER' --databases '$ZDT_DB_NAME' | gzip > "$snap"
 REMOTE
     then

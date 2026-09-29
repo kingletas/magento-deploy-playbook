@@ -76,7 +76,7 @@ require_env() {
     local release_vars=(ZDT_RELEASE_TARBALL ZDT_LABEL_NEW)
     if [[ ${ARM_CROSSING:-0} == 1 ]]; then release_vars=(); fi
     if [[ ${ARM_OUTAGE:-0} == 1 ]]; then release_vars=(); fi
-    for v in ZDT_WEB_HOSTS ZDT_NEW_NODE ZDT_ADMIN_NODE ZDT_LB_URL ZDT_NODE_URLS \
+    for v in ZDT_WEB_HOSTS ZDT_NEW_NODE ZDT_ADMIN_NODE ZDT_LB_URL ZDT_LB_STATS_URL ZDT_NODE_URLS \
              "${release_vars[@]}" ZDT_LABEL_OLD \
              ZDT_ENV_PHP ZDT_FPM_RELOAD ZDT_DB_HOST ZDT_DB_USER ZDT_DB_PASSWORD ZDT_DB_NAME; do
         [[ -n ${!v:-} ]] || missing+=("$v")
@@ -794,22 +794,78 @@ send_one() {
     rm -f "$body"
 }
 
-traffic_verdicts() {
-    # Falsifier 5 from the log: health_check.php answered 200 on every target
-    # that refused anything. The guard-message count is reported as a fact;
-    # arms 3 and 4 judge the guard claims, arms 1 and 2 record them.
-    # "Refused" means the server was not serving: 5xx, no answer at all, or
-    # a guard message. A 4xx is a fact for the log, not a refusal — a route
-    # that goes missing mid-migration still shows there.
-    local refused t bad=0
-    refused=$(awk '$3 != "health" && ($4 ~ /^5/ || $4 == "000" || $5 == 1)' "$TRAFFIC_LOG" | awk '{print $2}' | sort -u)
-    for t in $refused; do
-        if awk -v t="$t" '$3 == "health" && $2 == t && $4 != "200"' "$TRAFFIC_LOG" | grep -q .; then
-            falsifier FAIL "falsifier 5: $t refused requests and its health_check.php answered non-200"
-            bad=1
-        fi
+lb_downs() {
+    # lb_downs FILE -- HAProxy's stats CSV (ZDT_LB_STATS_URL) written to FILE
+    # as "server times-taken-out seconds-out", one line per server. chkdown
+    # counts UP-to-DOWN transitions and downtime the seconds spent DOWN; both
+    # only grow while HAProxy runs, so two readings bracket a phase.
+    local file="$1" csv status
+    csv=$(mktemp "${TMPDIR:-/tmp}/zdt-arm-lbstats.XXXXXX")
+    status=$(curl -s -o "$csv" -w '%{http_code}' --max-time 10 "$ZDT_LB_STATS_URL" 2>/dev/null) || status=000
+    if [[ $status != 200 ]]; then
+        rm -f "$csv"
+        return 1
+    fi
+    awk -F, 'NR == 1 { sub(/^# */, ""); for (i = 1; i <= NF; i++) col[$i] = i; next }
+             col["type"] && $col["type"] == 2 { print $col["svname"], $col["chkdown"] + 0, $col["downtime"] + 0 }' \
+        "$csv" > "$file"
+    rm -f "$csv"
+    [[ -s $file ]]
+}
+
+lb_rotation_mark() {
+    # Before a phase's traffic: HAProxy's counts as they stand, so the verdict
+    # judges only what this phase did. Each web host must be one of HAProxy's
+    # servers by name, or there is no count to judge it by.
+    mkdir -p "$OUT"
+    local before="$TRAFFIC_LOG.lb-before" h
+    lb_downs "$before" \
+        || die "HAProxy's stats did not answer at ZDT_LB_STATS_URL ($ZDT_LB_STATS_URL); falsifier 5 is judged from them, so the phase does not start"
+    for h in "${WEB_HOSTS[@]}"; do
+        awk -v h="$h" '$1 == h { found = 1 } END { exit !found }' "$before" \
+            || die "HAProxy has no server named $h: its server names must be the names in ZDT_WEB_HOSTS, or falsifier 5 has nothing to judge $h by"
     done
-    [[ $bad -eq 0 ]] && falsifier PASS "falsifier 5: health_check.php answered 200 on every target that refused (targets that refused: ${refused:-none})"
+}
+
+traffic_verdicts() {
+    # Falsifier 5: the health check never takes a refusing server out of
+    # rotation. Judged from HAProxy's own count of the times it took each
+    # server out during the phase, because HAProxy's fall setting decides
+    # rotation: one slow probe of ours is not a server leaving it.
+    # "Refused" means the node was not serving: 5xx, no answer at all, or a
+    # guard message. A 4xx is a fact for the log, not a refusal: a route
+    # that goes missing mid-migration still shows there.
+    local refused before="$TRAFFIC_LOG.lb-before" after="$TRAFFIC_LOG.lb-after"
+    refused=$(awk '$3 != "health" && ($4 ~ /^5/ || $4 == "000" || $5 == 1)' "$TRAFFIC_LOG" \
+        | awk '{print $2}' | sort -u | paste -sd' ' -)
+    if ! lb_downs "$after"; then
+        falsifier FAIL "falsifier 5: not judged; HAProxy's stats did not answer at $ZDT_LB_STATS_URL after the traffic"
+    else
+        local i h downs secs taken=() bad=() backwards=()
+        for i in "${!WEB_HOSTS[@]}"; do
+            h=${WEB_HOSTS[$i]}
+            read -r downs secs < <(awk -v h="$h" 'FNR == 1 { f++ } $1 == h { d[f] += $2; s[f] += $3 }
+                END { print d[2] - d[1], s[2] - s[1] }' "$before" "$after")
+            if (( downs < 0 )); then
+                backwards+=("$h")
+            elif (( downs > 0 )); then
+                taken+=("$h ${downs}x ${secs}s")
+                [[ " $refused " == *" ${NODE_URLS[$i]#http://} "* ]] && bad+=("$h:$downs:$secs")
+            fi
+        done
+        echo "lb: HAProxy took out of rotation this phase: $(IFS=,; echo "${taken[*]:-none}")"
+        local b
+        if [[ ${#backwards[@]} -gt 0 ]]; then
+            falsifier FAIL "falsifier 5: not judged; HAProxy's counts went backwards for ${backwards[*]} (did it restart during the phase?)"
+        elif [[ ${#bad[@]} -gt 0 ]]; then
+            for b in "${bad[@]}"; do
+                IFS=: read -r h downs secs <<< "$b"
+                falsifier FAIL "falsifier 5: HAProxy took $h out of rotation $downs time(s), ${secs}s out in all, while it refused requests"
+            done
+        else
+            falsifier PASS "falsifier 5: HAProxy never took a refusing server out of rotation (targets that refused: ${refused:-none})"
+        fi
+    fi
     local guarded
     guarded=$(awk '$5 == 1' "$TRAFFIC_LOG" | wc -l | tr -d ' ')
     echo "traffic: $guarded responses matched ZDT_GUARD_PATTERN (see $TRAFFIC_LOG)"
@@ -849,6 +905,7 @@ run_phase() {
     reload_web_hosts
 
     snapshot_gate
+    lb_rotation_mark
     traffic_run &
     local traffic_pid=$!
     if ! place_new_release; then
@@ -911,6 +968,7 @@ plan_phase() {
     printf 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $ZDT_LABEL_NEW"
     snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
     printf 'PLAN  control: traffic at %s/s per target for at least %ss and until %ss after the migration (%s web nodes + the load balancer)\n' "$RATE" "$DURATION" "$TAIL" "${#WEB_HOSTS[@]}"
+    printf 'PLAN  control: HAProxy stats at %s before and after the traffic: how many times it took each node out (falsifier 5)\n' "$ZDT_LB_STATS_URL"
     printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
     printf 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1)\n'
 }
@@ -975,6 +1033,7 @@ crossing_phase() {
     reload_web_hosts
 
     snapshot_gate
+    lb_rotation_mark
     traffic_run &
     local traffic_pid=$!
     if ! place_new_release "$tarball" "$rel"; then
@@ -1110,6 +1169,7 @@ plan_phase_crossing() {
     printf 'PLAN  %s\n' "$ZDT_NEW_NODE: unpack and link release $rel"
     snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
     printf 'PLAN  control: traffic at %s/s per target for at least %ss and until %ss after the migration, including the read path %s (%s web nodes + the load balancer)\n' "$RATE" "$DURATION" "$TAIL" "$ZDT_READ_PATH" "${#WEB_HOSTS[@]}"
+    printf 'PLAN  control: HAProxy stats at %s before and after the traffic: how many times it took each node out (falsifier 5)\n' "$ZDT_LB_STATS_URL"
     printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
     printf 'PLAN  control: bin/zdt-fleet replica-check + table-checksums (falsifier 1); saved failure bodies under %s/evidence-%s/ (falsifier 3)\n' "$OUT" "$label"
 }
@@ -1138,15 +1198,15 @@ plan_all_crossing() {
 
 # One rule, used by the verdict, the TOTAL line and the per-second table: a
 # request failed when it was REFUSED — 5xx, no answer at all, or a guard
-# match. Health is excluded (falsifier 5 judges it) and a 4xx is a fact for
-# the log, not a refusal, exactly as traffic_verdicts defines it.
+# match. Health is excluded (it is not a customer request) and a 4xx is a
+# fact for the log, not a refusal, exactly as traffic_verdicts defines it.
 outage_is_fail() { awk '$3 != "health" && ($4 ~ /^5/ || $4 == "000" || $5 == 1)'; }
 
 summarize_outage() {
     # summarize_outage LOG REPORT LABEL — writes REPORT: per second and
     # request type the share of requests that failed ("what the customer
-    # sees" second by second; health excluded — falsifier 5 judges it), then
-    # one TOTAL line. Echoes "failed=<n> seconds=<n>": the failed requests,
+    # sees" second by second; health excluded, as no customer asks for it),
+    # then one TOTAL line. Echoes "failed=<n> seconds=<n>": the failed requests,
     # and the distinct seconds in which at least one failed (the outage's
     # length, not the run's).
     local log="$1" report="$2" label="$3"
@@ -1198,6 +1258,7 @@ outage_phase() {
     [[ $PLAN_ONLY == 1 ]] && return 0
 
     snapshot_gate
+    lb_rotation_mark
     traffic_run &
     local traffic_pid=$!
     if [[ $maint == maint ]]; then
@@ -1300,6 +1361,7 @@ plan_phase_outage() {
     fi
     snapshot_line "$ZDT_SNAPSHOT_DIR/zdt-snapshot-$RUN_ID.sql.gz" | sed 's/^/PLAN  /'
     printf 'PLAN  control: traffic at %s/s per target for at least %ss and until %ss after the migration (%s web nodes + the load balancer)\n' "$RATE" "$DURATION" "$TAIL" "${#WEB_HOSTS[@]}"
+    printf 'PLAN  control: HAProxy stats at %s before and after the traffic: how many times it took each node out (falsifier 5)\n' "$ZDT_LB_STATS_URL"
     printf 'PLAN  %s\n' "$ZDT_ADMIN_NODE: php bin/magento setup:upgrade --no-interaction"
     if [[ $maint == maint ]]; then
         for h in "${WEB_HOSTS[@]}"; do

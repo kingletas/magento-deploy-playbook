@@ -8,7 +8,7 @@
 # setup:upgrade against the primary, while at least one node stays on the old
 # code and the always-new node carries the new release.
 #
-# What it records: falsifier 5 from the traffic log (the health check never
+# What it records: falsifier 5 from HAProxy's stats (the health check never
 # takes a refusing server out of rotation), falsifier 1 from the replica
 # after the migration (live, lag back to zero within five minutes, checksums
 # of the touched tables match), and the guard-message counts as facts for the

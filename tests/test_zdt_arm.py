@@ -137,7 +137,13 @@ exit 0
 FAKE_CURL = """#!/usr/bin/env bash
 # Default 200. FAKE_CURL_DOWN: a target substring whose NON-health requests
 # answer 503 with a guard message. FAKE_CURL_HEALTH_DOWN: a target whose
-# health_check.php itself answers 503 — falsifier 5's failure mode.
+# health_check.php itself answers 503.
+#
+# ZDT_LB_STATS_URL answers HAProxy's stats CSV. Every read counts, and each
+# server named in FAKE_LB_TAKEN_OUT has been taken out once more per read, 5 s
+# each, so a phase's two reads show it taken out once. FAKE_LB_BACKWARDS
+# counts down instead (HAProxy restarted), FAKE_LB_SERVERS replaces the
+# server list, and FAKE_LB_STATS_DOWN makes the page answer 503.
 out="" ; url=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -149,6 +155,25 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 printf 'CURL|%s\\n' "$url" >> "$FAKE_CURL_CALLS"
+if [[ -n ${ZDT_LB_STATS_URL:-} && $url == "$ZDT_LB_STATS_URL" ]]; then
+    if [[ -n ${FAKE_LB_STATS_DOWN:-} ]]; then echo 503; exit 0; fi
+    reads="$FAKE_DIR/lb-stats-reads"
+    n=$(( $(cat "$reads" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$reads"
+    {
+        echo "# pxname,svname,qcur,status,chkdown,downtime,type,"
+        echo "stats,FRONTEND,0,OPEN,,,0,"
+        IFS=',' read -r -a servers <<< "${FAKE_LB_SERVERS:-node1,node2,node3}"
+        for sv in "${servers[@]}"; do
+            downs=0
+            [[ ,${FAKE_LB_TAKEN_OUT:-}, == *",$sv,"* ]] && downs=$n
+            [[ ,${FAKE_LB_BACKWARDS:-}, == *",$sv,"* ]] && downs=$(( 100 - n ))
+            echo "web,$sv,0,UP,$downs,$(( downs * 5 )),2,"
+        done
+        echo "web,BACKEND,0,UP,0,0,1,"
+    } > "${out:-/dev/stdout}"
+    echo 200
+    exit 0
+fi
 # How many ssh calls had been logged when this request STARTED. Read
 # here, before the response is decided: the answer reflects the flags as
 # they were then, so a request that started before an enable and was
@@ -239,6 +264,7 @@ class ZdtArmTest(unittest.TestCase):
                 "ZDT_NEW_NODE": "node1",
                 "ZDT_ADMIN_NODE": "node1",
                 "ZDT_LB_URL": "http://lb.example/",
+                "ZDT_LB_STATS_URL": "http://lb.example:8404/stats;csv",
                 "ZDT_NODE_URLS": "http://node1.example/,http://node2.example/,http://node3.example/",
                 "ZDT_RELEASE_TARBALL": str(self.tarball),
                 "ZDT_LABEL_NEW": "rel-new",
@@ -326,6 +352,7 @@ class ZdtArmTest(unittest.TestCase):
             "ZDT_NEW_NODE",
             "ZDT_ADMIN_NODE",
             "ZDT_LB_URL",
+            "ZDT_LB_STATS_URL",
             "ZDT_NODE_URLS",
             "ZDT_RELEASE_TARBALL",
             "ZDT_LABEL_NEW",
@@ -750,11 +777,27 @@ class ZdtArmTest(unittest.TestCase):
         log = (self.dir / "run" / "traffic-shared-prefix.log").read_text()
         self.assertIn(" 404 ", log)
 
-    def test_health_check_failure_on_a_refusing_node_is_a_falsifier_5_fail(
-        self,
-    ) -> None:
+    def test_refusing_node_taken_out_by_haproxy_is_a_falsifier_5_fail(self) -> None:
         # rate 7 x duration 1 sends one of each of the 7 request types to
-        # every target, health included — the mix the issue names.
+        # every target, health included: the mix the issue names.
+        result = self.run_arm(
+            "arm1",
+            "-y",
+            ZDT_RATE="7",
+            FAKE_CURL_DOWN="node2.example",
+            FAKE_LB_TAKEN_OUT="node2",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "FAIL  falsifier 5: HAProxy took node2 out of rotation 1 time(s), 5s out in all",
+            result.stdout,
+        )
+        # Guard messages are reported as facts, attributed per target.
+        self.assertIn("matched ZDT_GUARD_PATTERN", result.stdout)
+
+    def test_a_failed_health_probe_alone_is_not_a_falsifier_5_fail(self) -> None:
+        # Our own probe of health_check.php failing is not the node leaving
+        # rotation: only HAProxy's count decides, and here it took nothing out.
         result = self.run_arm(
             "arm1",
             "-y",
@@ -762,10 +805,50 @@ class ZdtArmTest(unittest.TestCase):
             FAKE_CURL_DOWN="node2.example",
             FAKE_CURL_HEALTH_DOWN="node2.example",
         )
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        self.assertIn("PASS  falsifier 5", result.stdout)
+        self.assertIn("HAProxy took out of rotation this phase: none", result.stdout)
+
+    def test_a_node_taken_out_that_refused_nothing_passes_and_is_listed(self) -> None:
+        result = self.run_arm(
+            "arm1", "-y", ZDT_RATE="7", FAKE_CURL_DOWN="node2.example", FAKE_LB_TAKEN_OUT="node3"
+        )
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        self.assertIn("PASS  falsifier 5", result.stdout)
+        self.assertIn("HAProxy took out of rotation this phase: node3 1x 5s", result.stdout)
+
+    def test_unanswered_haproxy_stats_stop_the_arm_before_its_traffic(self) -> None:
+        result = self.run_arm("arm1", "-y", FAKE_LB_STATS_DOWN="1")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("ZDT_LB_STATS_URL", result.stderr)
+        sent = self.curl_calls.read_text() if self.curl_calls.exists() else ""
+        self.assertNotIn("health_check", sent, "no traffic may start without the stats")
+
+    def test_haproxy_without_a_web_host_stops_the_arm_by_name(self) -> None:
+        result = self.run_arm("arm1", "-y", FAKE_LB_SERVERS="node1,node2")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("HAProxy has no server named node3", result.stderr)
+
+    def test_haproxy_counts_going_backwards_are_not_judged(self) -> None:
+        result = self.run_arm("arm1", "-y", FAKE_LB_BACKWARDS="node2")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("FAIL  falsifier 5", result.stdout)
-        # Guard messages are reported as facts, attributed per target.
-        self.assertIn("matched ZDT_GUARD_PATTERN", result.stdout)
+        self.assertIn("FAIL  falsifier 5: not judged", result.stdout)
+        self.assertIn("went backwards for node2", result.stdout)
+
+    def test_missing_haproxy_stats_url_is_refused_by_name(self) -> None:
+        env = {k: v for k, v in self.env.items() if k != "ZDT_LB_STATS_URL"}
+        result = subprocess.run(
+            [str(RUNNER), "arm1", "-y"],
+            env=env,
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("ZDT_LB_STATS_URL", result.stderr)
+        self.assertEqual(self.calls(), "")
 
     def test_healthy_run_passes_falsifier_5_and_records_guard_facts(self) -> None:
         result = self.run_arm(
@@ -1093,8 +1176,8 @@ class ZdtArmTest(unittest.TestCase):
             self.assertTrue(report.exists(), f"no report for {leg}")
             text = report.read_text()
             self.assertIn("TOTAL", text)
-            # Health rows never appear in the per-second shares: falsifier 5
-            # judges the health check, not the customer-facing outage.
+            # Health rows never appear in the per-second shares: no customer
+            # asks for the health check.
             self.assertNotIn(" health ", text)
 
     def test_arm4_verdict_math(self) -> None:

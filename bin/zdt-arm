@@ -35,6 +35,10 @@
 #                     from current, so it must run on the node that carries
 #                     the new release (a split is refused, naming both)
 #   ZDT_LB_URL        the load balancer's base URL (http://…)
+#   ZDT_LB_STATS_URL  HAProxy's stats page as CSV (e.g. http://lb:8404/stats;csv);
+#                     falsifier 5 is judged from how many times HAProxy took
+#                     each node out during a phase, so its server names must
+#                     be the names in ZDT_WEB_HOSTS
 #   ZDT_NODE_URLS     comma-separated per-node base URLs, same order as
 #                     ZDT_WEB_HOSTS (traffic to a node directly, so a
 #                     refusing node is attributed to that node)

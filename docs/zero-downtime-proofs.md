@@ -631,7 +631,7 @@ guard match. The maintenance page is itself a 503, so the mode's own outage
 is counted by the same rule. `outage-report-<leg>.txt` holds, for each
 second and request type, the share of requests that failed — the shape of
 what the customer sees, second by second (the health check is excluded:
-falsifier 5 judges it, and it is not a customer request). Falsifier 4
+it is not a customer request). Falsifier 4
 compares the legs on both totals: the rollout must fail **more requests**
 and for **more seconds** (seconds in which at least one request failed) than
 maintenance mode, or the claim "maintenance mode is the smaller outage" is
@@ -650,6 +650,7 @@ arguments, so no password lands in a shell history or a transcript.
 | `ZDT_NEW_NODE` | the always-new node; one of `ZDT_WEB_HOSTS` |
 | `ZDT_ADMIN_NODE` | the node that runs Magento's commands and the snapshot; must be `ZDT_NEW_NODE` — the migration runs from `current`, so a split between the two is refused, naming both |
 | `ZDT_LB_URL` | the load balancer's base URL |
+| `ZDT_LB_STATS_URL` | HAProxy's stats page as CSV (the lab's is `http://lb:8404/stats;csv`). Falsifier 5 is judged from how many times HAProxy took each node out of rotation during a phase, so its server names must be the names in `ZDT_WEB_HOSTS`; a stats page that does not answer, or lacks one of them, stops the arm before its traffic. No default |
 | `ZDT_NODE_URLS` | comma-separated per-node base URLs, same order as `ZDT_WEB_HOSTS`; traffic goes to each node directly, so a refusing node is attributed to that node |
 | `ZDT_RELEASE_TARBALL` | the new release, a path on the control machine |
 | `ZDT_LABEL_NEW` / `ZDT_LABEL_OLD` | release directory names under `ZDT_RELEASES_DIR`; `ZDT_LABEL_OLD` must already be deployed on every node |
@@ -682,7 +683,13 @@ one request: epoch second, target, request type, status, guard flag —
 and `checksums.txt`. `PASS`/`FAIL` lines for falsifier 1 (the replica survives
 the migration: live after it, lag back to zero within five minutes, the
 touched tables' checksums matching once the lag is zero) and falsifier 5
-(the health check never takes a refusing server out of rotation). Arm 4 adds
+(the health check never takes a refusing server out of rotation), judged
+from HAProxy's own count of the times it took each node out during the
+phase, read from `ZDT_LB_STATS_URL` before and after the traffic. A node
+that refused requests and was taken out even once fails it. HAProxy's fall
+setting decides when a node leaves rotation, so one slow request from the
+arm's own traffic is not counted as a node leaving; the `lb:` line lists
+every node taken out, refusing or not. Arm 4 adds
 falsifier 4 (maintenance mode is the smaller outage for the breaking
 release), judged on the two legs' totals. The guard
 counts are recorded as facts for the results document; falsifiers 2 and the

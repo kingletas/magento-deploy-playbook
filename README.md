@@ -924,6 +924,20 @@ how people find out the hard way:
   window, but every web host still flips at once: nginx and php-fpm are
   reloaded, not restarted, so requests in flight finish, and Varnish drops
   Magento's pages with a ban rather than a restart.
+- **The window is the larger outage, measured.** On a lab of three web nodes
+  running Open Source 2.4.8-p2, one release that renamed a column refused
+  1,266 requests over 318 seconds behind maintenance mode, and 16 over 6
+  seconds rolled out with the old release still serving. Across releases that
+  only added to the schema, the old release refused nothing: every refusal was
+  the node carrying the new code answering *Please upgrade your database* until
+  `setup:upgrade` finished. Taken out of the load balancer until it served
+  again, that node refused none of 310 requests. A release that renames or
+  drops a column still breaks the old release while it serves, so it goes out
+  in two steps: add the new column, then drop the old one a release later. This
+  playbook neither rolls out behind a serving old release nor takes a node out
+  of the load balancer: it takes the window, and every host flips at once. The
+  runs, and what they could not test, are in
+  [docs/results/2026-09-30-open-source.md](docs/results/2026-09-30-open-source.md).
 - **No secrets management.** Ansible Vault and a password file, which is the
   floor rather than the ceiling.
 - **No CI integration shipped.** It's a playbook; call it from whatever you

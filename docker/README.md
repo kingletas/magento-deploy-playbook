@@ -79,6 +79,7 @@ varnish   ── receives the page ban (`varnishadm` is a fake)
 | `make docker-deploy` | Run the deploy exactly as a real one runs: `ansible-playbook -i inventory/docker deployment.yml`, from this directory |
 | `make docker-verify` | Assert on what the deploy left behind |
 | `make docker-test` | All three, deploying twice so there is a replaced release to verify |
+| `make docker-test-shard SHARD=name` | One shard of that run on a fleet of its own, as CI runs them side by side. `bin/docker-suite shards` lists the names; `make docker-test` runs them all in order |
 | `make docker-reset` | Clear locks and releases so a run can be repeated |
 | `make docker-logs` | Print each container's fake-tool call log |
 | `make docker-down` | Stop and remove |

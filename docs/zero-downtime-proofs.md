@@ -25,6 +25,9 @@ them and keep the transcript.
 - [P1-4: a substituted schema writer emits exactly the stock SQL](#p1-4-a-substituted-schema-writer-emits-exactly-the-stock-sql)
 - [P1-5: a patch_list row written out of band marks a patch applied](#p1-5-a-patch_list-row-written-out-of-band-marks-a-patch-applied)
 - [Running the framework proofs on a production store](#running-the-framework-proofs-on-a-production-store)
+- [The fleet checks: `bin/zdt-fleet`](#the-fleet-checks-binzdt-fleet)
+- [The fleet arms: `bin/zdt-arm`](#the-fleet-arms-binzdt-arm)
+- [The results document](#the-results-document)
 
 ## Running the proofs
 
@@ -414,3 +417,336 @@ against it as the web server's user (`ZDT_EXEC_USER`, default `www-data`).
 Afterwards it flips back, reloads php-fpm, deletes the copy and the `fixture`
 snapshot, and restores the named snapshot. Each proof's output is kept in the
 site's `local.d/zdt-proof/out/fw-<proof>/`.
+
+## The fleet checks: `bin/zdt-fleet`
+
+`bin/zdt-proof` proves claims about one Magento install. The fleet arms of
+issue #5 need something narrower first: a standing check that the shape a run
+is performed on — a primary with a replica, replicating — is real, and the
+facts the falsifiers judge against, recorded. `bin/zdt-fleet` is that check.
+It deploys nothing and changes nothing; it verifies and records.
+
+Connection details come from the environment, never from arguments, so no
+password lands in a shell history or in a run transcript. The client is
+`mysql`, which speaks to MariaDB servers too, and the password travels in
+`MYSQL_PWD`, which keeps it out of `ps` output as well.
+
+| Variable | Meaning |
+|---|---|
+| `ZDT_PRIMARY_HOST` / `ZDT_PRIMARY_PORT` / `ZDT_PRIMARY_USER` / `ZDT_PRIMARY_PASSWORD` | the primary's connection (port defaults to 3306) |
+| `ZDT_PRIMARY_DATABASE` | required; where the tables live (`CHECKSUM TABLE` with no default database is error 1046) |
+| `ZDT_REPLICA_HOST` / `ZDT_REPLICA_PORT` / `ZDT_REPLICA_USER` / `ZDT_REPLICA_PASSWORD` | the replica's connection (port defaults to 3306) |
+| `ZDT_REPLICA_DATABASE` | required; as on the primary |
+
+### `bin/zdt-fleet replica-check`
+
+Asks the replica for its status and refuses to pass unless it is live: the IO
+thread `Yes`, the SQL thread `Yes`, `Last_SQL_Errno` 0, and the lag a number
+rather than `NULL`. Every failed condition prints with its value and the exit
+is 1. Column names depend on the server: MySQL 8.0.22+ answers with
+`Replica_…` and `Seconds_Behind_Source`; MariaDB keeps `Slave_…` and
+`Seconds_Behind_Master` in every version, including under `SHOW REPLICA
+STATUS`; and a server older than either only answers `SHOW SLAVE STATUS`, so
+the older command is tried when the newer returns nothing. Both spellings are
+read. The gate judges a *single-channel* replica: several status rows from
+one server (MySQL multi-source) are refused with exit 2 rather than partially
+read. Note that MariaDB answers `SHOW REPLICA STATUS` with only the default
+connection — named channels appear only under `SHOW ALL SLAVES STATUS` — so a
+MariaDB fleet with named multi-source channels is out of scope for this gate;
+the lab fleet is single-source by design. When neither status command answers,
+the refusal quotes each failed attempt's error, labelled with its command, so a
+wrong password or an unreachable host reads as itself.
+
+When the replica is live, it prints one JSON object on standard output:
+
+```bash
+ZDT_PRIMARY_HOST=primary.db ZDT_PRIMARY_USER=root ZDT_PRIMARY_PASSWORD=… \
+ZDT_PRIMARY_DATABASE=magento \
+ZDT_REPLICA_HOST=replica.db ZDT_REPLICA_USER=root ZDT_REPLICA_PASSWORD=… \
+ZDT_REPLICA_DATABASE=magento \
+bin/zdt-fleet replica-check
+```
+
+```json
+{"timestamp": "2026-09-26T18:00:00Z", "binlog_format": "ROW", "catalogue_size": 1984, "binlog_bytes": 490, "seconds_behind": 0, "last_sql_errno": 0, "last_io_errno": 0, "last_sql_error": "", "last_io_error": ""}
+```
+
+A later arm takes this before its first phase and again after each phase, and
+`catalogue_size` is what a checksum pair is judged against. `binlog_bytes`
+counts everything binlogged between two calls — the migration, the snapshot
+restore that separates two phases, and the traffic's own writes — so the
+difference between two calls is not one upgrade's binary log.
+
+### `bin/zdt-fleet table-checksums TABLE…`
+
+Runs `CHECKSUM TABLE` for each named table on both servers and prints one
+line per table, `MATCH` or `DIFFER` with both values; exit 1 if any pair
+differs. Falsifier 1 uses it once `seconds_behind` has returned to zero; a
+differing checksum makes that falsifier false. A `NULL` checksum — what a
+server answers for a table it does not have — never counts as a match, even
+when both sides answer `NULL`: a typo'd or wrong-database table is a failure
+of the check, not an agreement. A query that fails outright (unreachable
+server, missing privileges) exits 2, the "the check never happened" code, so
+it cannot masquerade as a DIFFER.
+
+A caveat for the arms that subtract: `binlog_bytes` is the sum of the binary
+log files that exist at the moment of the call. If a log is purged during the
+migration (`PURGE BINARY LOGS`, `binlog_expire_logs_seconds`), "after minus
+before" undercounts what the upgrade wrote and can even go negative. A run
+that needs an exact figure should disable expiry for its window or account
+for purges.
+
+### Exit codes
+
+0 is all good; 1 is a failed check — the fleet is not live, or a checksum
+differs; 2 is the tool could not run at all: no settings, a bad name, no
+client, or a query that failed outright (unreachable server, no privileges).
+A run records them differently: 1 is a FAIL of a falsifier, 2 means
+the run did not happen. On exit 2 stdout may hold partial output — a
+`table-checksums` that dies on a later table has already printed its earlier
+`MATCH` lines — so trust the exit code before parsing stdout.
+
+The tests (`tests/test_zdt_fleet.py`, run by `make check`) use a fake `mysql`
+client returning canned output.
+
+
+## The fleet arms: `bin/zdt-arm`
+
+`bin/zdt-fleet` checks and records; `bin/zdt-arm` runs things. It is the
+runner for the fleet arms of [issue #5](https://github.com/kingletas/magento-deploy-playbook/issues/5),
+built on the interface the maintainer approved: one command per step from the
+control machine over ssh, the arms driving the migration end to end on the
+admin node, a built-in traffic generator, and the cache prefixes and the
+blue/green flag set and restored by the scripts themselves. Arms 1, 2 and 3
+are here; arm 4 is in this build too.
+
+```bash
+bin/zdt-arm list
+bin/zdt-arm arm1 -n     # print the whole plan, run nothing
+bin/zdt-arm arm1        # show the plan, then ask before the first remote write
+bin/zdt-arm arm1 -y     # the same, without asking (for an operator who means it)
+```
+
+- **arm1** — the migration with `deployment/blue_green/enabled` off
+  everywhere: first with one shared cache prefix, then a prefix per release,
+  with traffic on every server throughout.
+- **arm2** — the same run with `deployment/blue_green/enabled` set in the
+  `env.php` of every server that stays on the old code.
+- **arm3** — two code versions against one database with the flag on, across
+  a release that changes the schema: first the additive **control**, then the
+  breaking **evidence** (see *Arm 3* below).
+- **arm4** — the outage: the breaking release's rollout measured second by
+  second against the same rollout behind maintenance mode (see *Arm 4*
+  below).
+- **restore-snapshot** — put a snapshot back on the primary. Destructive, so
+  it plans and asks like the arms.
+
+### How a run is kept safe
+
+- `-n` prints the whole plan, every command in order, and runs nothing.
+  Without `-y` the arm shows the plan and asks before its first remote write;
+  with no terminal to answer, it stops rather than guessing (exit 2).
+- Before `setup:upgrade` the arm takes a database snapshot on
+  `ZDT_ADMIN_NODE`, prints the exact command that restores it, and refuses to
+  go on if the snapshot fails.
+- Before the first edit, every node's `env.php` is copied to a dated backup
+  on its node, and the exact restore command is printed — because an exit
+  trap restores on the paths it can reach, and not on `SIGKILL` or a power
+  cut.
+- The traffic generator has a default rate of 2 requests a second per target
+  and a hard refusal above 20, and a default duration of 120 s with a hard
+  maximum of 600: the lab machine runs other things too. The mix asks routes a
+  stock store answers anonymously (home, `/checkout/cart/`,
+  `/rest/V1/directory/currency`, a real GraphQL query, `pub/health_check.php`)
+  plus the category and product pages you name in `ZDT_CATEGORY_PATH` and
+  `ZDT_PRODUCT_PATH`. A target counts as refusing only on a 5xx, no answer at
+  all, or a guard-pattern match; a 4xx is a fact in `traffic.log`, not a
+  refusal — a route that goes missing mid-migration still shows there.
+- Every remote command is echoed before it runs, and any secret in it is
+  echoed as `***`. Commands that carry the database password run it embedded
+  in a script piped over ssh stdin, so it is in no argv, no `ps`, no shell
+  history — and never in the transcript.
+- ssh runs with `BatchMode=yes` and normal host-key checking; an unknown
+  host stops the arm with its name. Nothing here can turn host key checking
+  off — `bin/check-structure` refuses it.
+- The replica gate from `bin/zdt-fleet replica-check` runs before anything:
+  a replica that is not live means the run is reported as NOT RUN, missing
+  condition 1, and no node is touched.
+
+### Arm 3: the crossing, and why its variables have no defaults
+
+Arm 3 is the arm the issue turns on, and its two legs are not symmetric. The
+**additive control** (`ZDT_RELEASE_ADDITIVE`) only adds: old servers with the
+flag on must serve pages, REST and GraphQL without a guard message. Per the
+issue, passing it alone proves nothing — a release with nothing to reconcile
+passes by construction — but a guard message here disproves the flag's claim
+on the cheapest possible release. The **breaking evidence**
+(`ZDT_RELEASE_BREAKING`) renames or drops a column the old code reads. Old
+servers must fail across it, the first failure's own words must name the
+changed object, and the read path must not sail through with a 200: an old
+server answering 200 across a schema it does not match fails the falsifier,
+not the run's silence passing it.
+
+The database is restored between the two legs (the same snapshot mechanism as
+arms 1 and 2), so the breaking leg starts from exactly the state the control
+started from. Response bodies of failing read requests and guard matches are
+saved under the run directory (`evidence-<leg>/`), named with the time so the
+chronologically first failure is unambiguous — the log line alone cannot show
+that the failure *names the column*.
+
+`ZDT_READ_PATH` and `ZDT_SCHEMA_OBJECT` have no defaults, and neither have
+the two releases: the breaking change and the route that reads it belong to
+the lab, and a guessed one would poison the evidence chain — the issue says
+the results "must name the request that reads that column and show it was
+sent to an old server". A missing one stops arm 3 by name (exit 2, nothing
+runs). Falsifier 2 on these editions stays a control reported in the results
+document: nothing on Open Source or Mage-OS reads the replica.
+
+### Arm 4: the outage, and what the two legs mean
+
+Arm 4 runs the breaking release (`ZDT_RELEASE_BREAKING` /
+`ZDT_LABEL_BREAKING` — the same variables as arm 3's evidence leg; arm 4
+needs no read path or schema object, it counts failures rather than reading
+their bodies) twice, with the database restored between the two so both legs
+start from the exact same state:
+
+- the **rollout** leg: no maintenance mode. Old servers serve while the
+  migration runs — what the customer sees when zero downtime is attempted on
+  a release that breaks them.
+- the **maintenance** leg: a real maintenance deploy. A maintenance flag is
+  `var/.maintenance.flag`, and `var/` is **not** shared between releases, so
+  the flag lives in the release that wrote it. `maintenance:enable` on every
+  web node in the release `current` points at before anything moves, then the
+  breaking release on every web node **under the page and before the
+  migration**: each node unpacks it, raises the flag inside it, and only then
+  moves the symlink — a release linked first would serve with no flag from the
+  moment `current` moved. `setup:upgrade` then runs behind the page, and
+  `maintenance:disable` follows on every node in one step, each flag lifted in
+  the release that carries it — the new release's right after the migration,
+  the old release's by path as part of the relink. The web nodes go back to
+  the old release only after the traffic window closes (old code against the
+  migrated schema would add the rollout leg's failures on top of the
+  measurement), and the exact relink and disable commands are printed, release
+  by release, for the paths no trap can reach.
+
+A request counts as failed when it was refused: 5xx, no answer at all, or a
+guard match. The maintenance page is itself a 503, so the mode's own outage
+is counted by the same rule. `outage-report-<leg>.txt` holds, for each
+second and request type, the share of requests that failed — the shape of
+what the customer sees, second by second (the health check is excluded:
+it is not a customer request). Falsifier 4
+compares the legs on both totals: the rollout must fail **more requests**
+and for **more seconds** (seconds in which at least one request failed) than
+maintenance mode, or the claim "maintenance mode is the smaller outage" is
+reported as disproved. Like arm 3's releases, these have no defaults: a
+missing one stops arm 4 by name.
+
+### Variables
+
+The hosts have no defaults: a missing one stops the arm by name rather than
+aiming at a guess. All values come from the environment, never from
+arguments, so no password lands in a shell history or a transcript.
+
+| Variable | Meaning |
+|---|---|
+| `ZDT_WEB_HOSTS` | comma-separated ssh names of the web nodes (at least three) |
+| `ZDT_NEW_NODE` | the always-new node; one of `ZDT_WEB_HOSTS` |
+| `ZDT_ADMIN_NODE` | the node that runs Magento's commands and the snapshot; must be `ZDT_NEW_NODE` — the migration runs from `current`, so a split between the two is refused, naming both |
+| `ZDT_LB_URL` | the load balancer's base URL |
+| `ZDT_LB_STATS_URL` | HAProxy's stats page as CSV (the lab's is `http://lb:8404/stats;csv`). Falsifier 5 is judged from how many times HAProxy took each node out of rotation during a phase, so its server names must be the names in `ZDT_WEB_HOSTS`; a stats page that does not answer, or lacks one of them, stops the arm before its traffic. No default |
+| `ZDT_LB_DRAIN` | optional, arms 1 to 3: a command run on the control machine as `$ZDT_LB_DRAIN NODE maint` and `$ZDT_LB_DRAIN NODE ready` (the lab's is `lab/zdt-fleet/bin/lb-state`). When set, the new node leaves the load balancer once traffic starts and before its release lands, and goes back after the migration once it answers 200 on its home page and `health_check.php`, waiting up to 300 s; the exit trap puts it back on every other path. HAProxy counts a node put into maintenance as taken out, so falsifier 5 leaves out the window from the arm's own take-out to its return, and says so on an `lb:` line; HAProxy runs no health check on a node in maintenance, so nothing it did is lost. Unset, the new node serves throughout, as it always did |
+| `ZDT_NODE_URLS` | comma-separated per-node base URLs, same order as `ZDT_WEB_HOSTS`; traffic goes to each node directly, so a refusing node is attributed to that node |
+| `ZDT_RELEASE_TARBALL` | the new release, a path on the control machine |
+| `ZDT_LABEL_NEW` / `ZDT_LABEL_OLD` | release directory names under `ZDT_RELEASES_DIR`; `ZDT_LABEL_OLD` must already be deployed on every node |
+| `ZDT_ENV_PHP` | each node's `env.php` path (they are edited by `php -r`, backed up first) |
+| `ZDT_FPM_RELOAD` | the command, run on a node as the ssh user, that reloads PHP-FPM and returns once it serves again (the lab's is `zdtfleet-fpm-reload`; a host's might be `sudo systemctl reload php8.4-fpm`). Run after every `env.php` edit and restore: with OPcache never rechecking a file, an edit is otherwise invisible to requests. No default |
+| `ZDT_DB_HOST` / `ZDT_DB_USER` / `ZDT_DB_PASSWORD` / `ZDT_DB_NAME` | the primary's connection, for the snapshot |
+| `ZDT_SNAPSHOT_DIR` | where the admin node keeps snapshots (default `/var/www/magento/zdt-snapshots`) |
+| `ZDT_RATE` / `ZDT_DURATION` | traffic per target: requests/s (default 2, max 20) and seconds, at least (default 120, max 600) |
+| `ZDT_TRAFFIC_TAIL` | seconds traffic goes on after a phase's migration step ends (default 60, max 600). A migration slower than `ZDT_DURATION` is still watched through the change and after it; without it, arm 3's breaking leg once stopped its traffic 73 s before the column was renamed |
+| `ZDT_GUARD_PATTERN` | extended regex; a response body matching it is logged as a guard message |
+| `ZDT_CATEGORY_PATH` / `ZDT_PRODUCT_PATH` | paths of a real category and a real product page (e.g. `/mens.html`, `/products/gt.html`). No default: a guessed path a stock store does not serve would record every target as refusing |
+| `ZDT_TOUCHED_TABLES` | comma-separated tables to checksum once the lag reaches zero (default `catalog_product_entity`) |
+| `ZDT_RELEASE_ADDITIVE` / `ZDT_LABEL_ADDITIVE` | arm 3 only: the additive control release (adds only) |
+| `ZDT_RELEASE_BREAKING` / `ZDT_LABEL_BREAKING` | the breaking release — renames or drops a column the old code reads: arm 3's evidence leg, and the release arm 4's outage is measured against |
+| `ZDT_READ_PATH` | arm 3 only: a route that really reads that column or table |
+| `ZDT_SCHEMA_OBJECT` | arm 3 only: the renamed or dropped name; the first old-server failure's body must contain it |
+| `ZDT_RUN_DIR` | where the run's evidence lands (default `local.d/zdt-arm/<run>-<arm>/`) |
+| `ZDT_FLEET_BIN` | path of `bin/zdt-fleet` (default beside `bin/zdt-arm`) |
+
+The replica connection (`ZDT_PRIMARY_*` / `ZDT_REPLICA_*`) belongs to
+`bin/zdt-fleet`, which the arms call as their gate.
+
+### What the run leaves behind
+
+`transcript.log` — the arm writes it itself: the plan the run was confirmed
+against, every `RUN` line as it happens, the banners, the `PASS`/`FAIL`
+verdicts and the printed restore commands, secret-free (every line that could
+carry a secret goes through `redact()` first, and the `-n` plan leaves no file
+at all) — `platform.json` (the facts the results document has to open with:
+Magento edition and version, PHP, database server and version, replication
+mode, the number of web servers; a fact the lab does not answer is `null`
+with the reason in `not_recorded`, never a guess — including the edition,
+which is named only when the release's `composer.json` lists exactly one
+edition package: with two, the run cannot say which platform the lab has, so
+`edition_packages` keeps the raw list and the reason says the list was
+ambiguous)`, `traffic-<phase>.log`
+— one per phase, so no verdict ever counts another phase's lines; each line
+one request: epoch second, target, request type, status, guard flag —
+`replica-before.json` and `replica-after.json` from the gate, `evidence-<leg>/` (arm 3: the saved failure bodies),
+`outage-report-<leg>.txt` (arm 4: the per-second, per-type failed shares)
+and `checksums.txt`. `PASS`/`FAIL` lines for falsifier 1 (the replica survives
+the migration: live after it, lag back to zero within five minutes, the
+touched tables' checksums matching once the lag is zero) and falsifier 5
+(the health check never takes a refusing server out of rotation), judged
+from HAProxy's own count of the times it took each node out during the
+phase, read from `ZDT_LB_STATS_URL` before and after the traffic. A node
+that refused requests and was taken out even once fails it. HAProxy's fall
+setting decides when a node leaves rotation, so one slow request from the
+arm's own traffic is not counted as a node leaving; the `lb:` line lists
+every node taken out, refusing or not. Arm 4 adds
+falsifier 4 (maintenance mode is the smaller outage for the breaking
+release), judged on the two legs' totals. The guard
+counts are recorded as facts for the results document; falsifiers 2 and the
+Commerce parts belong to Commerce runs, as issue #5 defines them.
+
+### Exit codes
+
+0 pass; 1 the run failed (a `FAIL` line); 2 the run never happened: missing
+settings, a declined or unanswerable plan, a refused gate, a failed
+snapshot. As with `bin/zdt-fleet`: 1 is a falsifier's FAIL, 2 means the run
+did not happen.
+
+The tests (`tests/test_zdt_arm.py`, run by `make check`) fake `ssh`, `curl`
+and `rsync` beside the fake `mysql` client, so no lab and no live server is
+touched: they show the plan runs nothing and names both phases and the
+restore and relink between them, a declined prompt — shown the plan it asks
+about — runs nothing, a failed snapshot, a failed release placement, a failed
+`setup:upgrade` or a failed `env.php` edit stops the arm rather than letting
+it report success, the backup precedes every edit and survives the
+`env.php` symlink, the printed restores are right, the rate cap and the
+duration stop hold, a 404 on one route is not read as a refusing target, and
+the transcript never carries a password. The recording gaps have their own
+tests too: a run leaves `transcript.log` holding the `RUN` lines, the
+verdicts and the printed restore commands, a plan (`-n`) and a declined plan
+leave none, a failed run's transcript keeps the `FAIL` and the step that
+died, `platform.json` carries the lab's answers with `null` and a reason when
+one is unreadable (and `null` with an ambiguity reason when the release names
+two edition packages), and the platform probe reaches no `ssh` argv with the
+password.
+
+## The results document
+
+What a run is for is a document that can be read without the run: issue #5's
+results document, one per run, at `docs/results/<date>-<platform>.md`
+([`docs/results/_template.md`](results/_template.md) is the shape). It opens
+with the platform — the facts `platform.json` records — and carries each of
+the five falsifiers as PASS or FAIL with the one output line that decides it.
+
+**The template is not a result.** It is committed so nothing in the document
+has to be invented while a run is fresh; every placeholder is filled from the
+run's own files under `ZDT_RUN_DIR`, and a falsifier with nothing behind it
+reads `NOT RUN — <condition missed>`. A run that missed a condition of
+validity is reported as not run, naming the condition, rather than dropped or
+filled in from a run that met it. Raw output is attached or linked unedited:
+a summary that does not match the transcript is the summary that is wrong.

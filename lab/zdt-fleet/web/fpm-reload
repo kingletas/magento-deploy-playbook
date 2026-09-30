@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# zdtfleet-fpm-reload: gracefully reload this node's PHP-FPM, and return only
+# once every worker has been replaced and the pool answers again.
+#
+# OPcache never rechecks a file here (validate_timestamps=0), and env.php sits
+# at one shared path in every release, so an edit to it reaches requests only
+# after the workers, and the OPcache they share, are started fresh. USR2 does
+# that without dropping the listening socket, and process_control_timeout lets
+# requests in flight finish first. Runs as deploy, the user PHP-FPM runs as.
+set -euo pipefail
+
+pidfile=/run/php-fpm/php-fpm.pid
+workers() { pgrep -P "$(cat "$pidfile")" | sort || true; }
+
+before=$(workers)
+kill -USR2 "$(cat "$pidfile")"
+
+for _ in $(seq 1 100); do
+    sleep 0.2
+    now=$(workers)
+    # Done when there are workers, none of them from before, and the pool answers.
+    if [[ -n $now && -z $(comm -12 <(echo "$before") <(echo "$now")) ]] \
+        && curl -fsS -o /dev/null http://127.0.0.1/fpm-ping; then
+        exit 0
+    fi
+done
+echo "zdtfleet-fpm-reload: PHP-FPM did not come back with fresh workers within 20 seconds" >&2
+exit 1

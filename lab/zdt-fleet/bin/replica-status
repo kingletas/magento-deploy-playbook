@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+#
+# replica-status: a read-only report of the fleet's replication state.
+#
+# Prints the replica's SHOW REPLICA STATUS (SHOW SLAVE STATUS on a server
+# that does not answer the newer name), the GTID position on both the
+# primary and the replica, and the replica's read_only setting. Changes
+# nothing.
+#
+# Settings come from the environment (lab.env), the same connection details
+# bin/zdt-fleet reads (see its --help):
+#
+#   ZDT_PRIMARY_HOST / ZDT_PRIMARY_PORT (default 3306) / ZDT_PRIMARY_USER /
+#   ZDT_PRIMARY_PASSWORD
+#   ZDT_REPLICA_HOST / ZDT_REPLICA_PORT (default 3306) / ZDT_REPLICA_USER /
+#   ZDT_REPLICA_PASSWORD
+#
+# The account named by ZDT_PRIMARY_USER/ZDT_REPLICA_USER needs REPLICATION
+# CLIENT on the server it reads, which replica-seed grants it.
+#
+# No password is ever printed or placed in argv; it travels in MYSQL_PWD,
+# the same convention bin/zdt-fleet uses, which keeps it out of ps output.
+#
+# Exit codes: 0 the report printed; 2 the tool could not run (missing
+# settings, no client, a query that failed outright). A replica that is not
+# configured to replicate is not itself an error here: the report says so
+# and exits 0, since replica-status only observes and never judges.
+
+set -euo pipefail
+
+die() { echo "replica-status: $*" >&2; exit 2; }
+
+MYSQL_BIN="$(command -v mariadb || command -v mysql || true)"
+[[ -n $MYSQL_BIN ]] || die "no mariadb or mysql client on PATH"
+
+: "${ZDT_PRIMARY_HOST:?set ZDT_PRIMARY_HOST}"
+: "${ZDT_PRIMARY_USER:?set ZDT_PRIMARY_USER}"
+: "${ZDT_REPLICA_HOST:?set ZDT_REPLICA_HOST}"
+: "${ZDT_REPLICA_USER:?set ZDT_REPLICA_USER}"
+ZDT_PRIMARY_PORT="${ZDT_PRIMARY_PORT:-3306}"
+ZDT_REPLICA_PORT="${ZDT_REPLICA_PORT:-3306}"
+
+# primary_sql/replica_sql SQL [--headers]: --headers keeps column names and
+# is used only for the vertical status dump, which needs its own line
+# labels; every other call reads a single scalar and skips them.
+primary_sql() {
+    local sql="$1" opts=(--batch --skip-column-names)
+    [[ ${2:-} == --headers ]] && opts=(--batch)
+    MYSQL_PWD="${ZDT_PRIMARY_PASSWORD:-}" "$MYSQL_BIN" --no-defaults --connect-timeout=10 \
+        "${opts[@]}" -h "$ZDT_PRIMARY_HOST" -P "$ZDT_PRIMARY_PORT" -u "$ZDT_PRIMARY_USER" -e "$sql"
+}
+replica_sql() {
+    local sql="$1" opts=(--batch --skip-column-names)
+    [[ ${2:-} == --headers ]] && opts=(--batch)
+    MYSQL_PWD="${ZDT_REPLICA_PASSWORD:-}" "$MYSQL_BIN" --no-defaults --connect-timeout=10 \
+        "${opts[@]}" -h "$ZDT_REPLICA_HOST" -P "$ZDT_REPLICA_PORT" -u "$ZDT_REPLICA_USER" -e "$sql"
+}
+
+echo "== replica status (SHOW REPLICA STATUS / SHOW SLAVE STATUS on $ZDT_REPLICA_HOST) =="
+status="$(replica_sql "SHOW REPLICA STATUS\G" --headers 2>/dev/null || true)"
+[[ -n $status ]] || status="$(replica_sql "SHOW SLAVE STATUS\G" --headers 2>/dev/null || true)"
+if [[ -n $status ]]; then
+    printf '%s\n' "$status"
+else
+    echo "(no status: $ZDT_REPLICA_HOST does not appear to be configured to replicate)"
+fi
+
+echo
+echo "== GTID positions =="
+primary_gtid="$(primary_sql "SELECT @@global.gtid_current_pos" 2>&1 || echo '<query failed>')"
+replica_gtid_current="$(replica_sql "SELECT @@global.gtid_current_pos" 2>&1 || echo '<query failed>')"
+replica_gtid_slave="$(replica_sql "SELECT @@global.gtid_slave_pos" 2>&1 || echo '<query failed>')"
+printf 'primary %-15s gtid_current_pos: %s\n' "($ZDT_PRIMARY_HOST)" "$primary_gtid"
+printf 'replica %-15s gtid_current_pos: %s\n' "($ZDT_REPLICA_HOST)" "$replica_gtid_current"
+printf 'replica %-15s gtid_slave_pos:   %s\n' "($ZDT_REPLICA_HOST)" "$replica_gtid_slave"
+
+echo
+echo "== replica read_only =="
+read_only="$(replica_sql "SELECT @@global.read_only" 2>&1 || echo '<query failed>')"
+printf 'read_only: %s\n' "$read_only"

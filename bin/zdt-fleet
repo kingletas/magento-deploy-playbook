@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+#
+# zdt-fleet: the checks a multi-server, multi-database run stands on.
+#
+# Unlike bin/zdt-proof, this tool deploys nothing and changes nothing. It
+# verifies and records. The arms of the fleet run (issue #5) call it before,
+# during and after a migration; a run whose replica was not live at those
+# points does not count.
+#
+# Usage:
+#   bin/zdt-fleet replica-check
+#   bin/zdt-fleet table-checksums TABLE [TABLE...]
+#
+# Connection details come from the environment, never from arguments, so no
+# password lands in a shell history or in a transcript of the run. The client
+# is `mysql` (it speaks to MariaDB servers too), and the password travels in
+# MYSQL_PWD so it also stays out of ps output.
+#
+#   ZDT_PRIMARY_HOST  ZDT_PRIMARY_PORT (default 3306)  ZDT_PRIMARY_USER
+#   ZDT_PRIMARY_PASSWORD  ZDT_PRIMARY_DATABASE
+#   ZDT_REPLICA_HOST  ZDT_REPLICA_PORT (default 3306)  ZDT_REPLICA_USER
+#   ZDT_REPLICA_PASSWORD  ZDT_REPLICA_DATABASE
+#
+# The database is where the tables live: CHECKSUM TABLE and COUNT(*) with no
+# default database answered error 1046, so the database is part of the
+# connection, not an afterthought. table-checksums requires it on both sides.
+#
+# replica-check refuses to pass unless the replica is live: IO thread Yes, SQL
+# thread Yes, Last_SQL_Errno 0, and the lag a number rather than NULL. Every
+# failed condition prints with its value and the exit is 1. Column names
+# depend on the server: MySQL 8.0.22+ answers with Replica_... and
+# Seconds_Behind_Source; MariaDB keeps Slave_... and Seconds_Behind_Master in
+# every version, including under SHOW REPLICA STATUS; and a server older than
+# either only answers SHOW SLAVE STATUS. Both spellings are read, and the
+# older command is tried when the newer returns nothing.
+#
+# When the replica is live, replica-check prints one JSON object on standard
+# output with the facts the falsifiers judge the run against: the primary's
+# binlog_format, the catalogue size, the primary's binary-log bytes, the lag,
+# the last SQL and IO errors, and a UTC timestamp. A later arm takes it before
+# and after a migration; the difference in binlog_bytes is what the upgrade
+# wrote.
+#
+# table-checksums runs CHECKSUM TABLE for each named table on both servers and
+# prints one line per table, MATCH or DIFFER with both values, exiting 1 if
+# any pair differs. Falsifier 1 uses it once the lag has reached zero; a
+# differing checksum makes that falsifier false.
+#
+# Exit codes: 0 all good; 1 a check failed; 2 the tool could not run (missing
+# settings, bad name, no client, a query that failed outright) -- so a run can
+# tell "the fleet is wrong" from "the check never happened".
+
+set -euo pipefail
+
+die() { echo "zdt-fleet: $*" >&2; exit 2; }
+
+if [[ ${1:-} == -h || ${1:-} == --help ]]; then
+    sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0"
+    exit 0
+fi
+if [[ $# -eq 0 ]]; then
+    # A gate called without arguments is a mistake, not a request for help:
+    # exit 2 ("the check never happened"), never the 0 a script would log as ok.
+    sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0" >&2
+    die "usage: bin/zdt-fleet replica-check | table-checksums TABLE..."
+fi
+
+command -v mysql >/dev/null || die "the mysql client is not on PATH"
+
+subcommand="$1"
+shift
+
+[[ $subcommand == replica-check || $subcommand == table-checksums ]] \
+    || die "'$subcommand' is not a subcommand; see bin/zdt-fleet --help"
+
+conn() {
+    # Echoes host, port, user, password and database for $1, one per line.
+    # Callers read them positionally; this prints at exactly these times, so
+    # the JSON of a passing replica-check stays the only stdout of that run.
+    case "$1" in
+        primary)
+            printf '%s\n%s\n%s\n%s\n%s\n' \
+                "${ZDT_PRIMARY_HOST:-}" "${ZDT_PRIMARY_PORT:-3306}" \
+                "${ZDT_PRIMARY_USER:-}" "${ZDT_PRIMARY_PASSWORD:-}" "${ZDT_PRIMARY_DATABASE:-}" ;;
+        replica)
+            printf '%s\n%s\n%s\n%s\n%s\n' \
+                "${ZDT_REPLICA_HOST:-}" "${ZDT_REPLICA_PORT:-3306}" \
+                "${ZDT_REPLICA_USER:-}" "${ZDT_REPLICA_PASSWORD:-}" "${ZDT_REPLICA_DATABASE:-}" ;;
+    esac
+}
+
+connect_fields() {
+    # DB_USER, not USER: USER is an exported environment variable and every
+    # later child process (the mysql client, the fakes in tests) inherits it.
+    local which="$1" line i=0
+    DB_HOST=""; DB_PORT=""; DB_USER=""; DB_PASSWORD=""; DB_DATABASE=""
+    # shellcheck disable=SC2034  # DB_DATABASE is read by run_sql's dynamic scope, not in this loop.
+    while IFS= read -r line; do
+        case $i in
+            0) DB_HOST="$line" ;;
+            1) DB_PORT="$line" ;;
+            2) DB_USER="$line" ;;
+            3) DB_PASSWORD="$line" ;;
+            4) DB_DATABASE="$line" ;;
+        esac
+        i=$((i + 1))
+    done < <(conn "$which")
+    [[ -n $DB_HOST && -n $DB_USER ]] \
+        || die "set ZDT_${which^^}_HOST and ZDT_${which^^}_USER (see bin/zdt-fleet --help)"
+}
+
+run_sql() {
+    # run_sql WHICH SQL [with-headers] -- rows in batch mode, with
+    # --database so CHECKSUM TABLE and COUNT(*) resolve (error 1046 otherwise
+    # under --no-defaults). A failed query is NOT swallowed here: the client's
+    # exit status is returned and its error text reaches the operator's
+    # stderr. Only the SHOW REPLICA/SLAVE STATUS fallback ignores the status,
+    # because "unknown command" there is a server-generation question, not a
+    # failure. Everywhere else a dead server must not look like an empty
+    # answer: callers go through query_or_die, which exits 2.
+    connect_fields "$1"
+    local sql="$2" dbargs=()
+    [[ -z $DB_DATABASE ]] || dbargs=(--database="$DB_DATABASE")
+    local opts=(--batch)
+    [[ ${3:-} == with-headers ]] || opts+=(--skip-column-names)
+    MYSQL_PWD="$DB_PASSWORD" mysql --no-defaults --connect-timeout=10 \
+        "${opts[@]}" "${dbargs[@]+"${dbargs[@]}"}" \
+        -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -e "$sql"
+}
+
+query_or_die() {
+    # query_or_die WHICH SQL [require-database]: rows on stdout, or exit 2
+    # naming the server and the SQL. A failed or unconfigured query means the
+    # check never happened (2), never a plausible-looking empty answer.
+    # Callers must assign this directly (x=$(query_or_die ...)), with no pipe
+    # inside $(): a pipe would hide the exit status set -e relies on.
+    local which="$1" sql="$2" out
+    connect_fields "$which"
+    [[ ${3:-} != require-database || -n $DB_DATABASE ]] \
+        || die "no database for $which: set ZDT_${which^^}_DATABASE"
+    out=$(run_sql "$which" "$sql") \
+        || die "$which query failed on $DB_HOST: $sql"
+    printf '%s\n' "$out"
+}
+
+# ---------------------------------------------------------------- replica-check
+
+if [[ $subcommand == replica-check ]]; then
+    status=""
+    # stderr goes to a file, not /dev/null: when BOTH attempts come back
+    # empty the operator needs to see why — a wrong password or an
+    # unreachable host would otherwise read as "is ZDT_REPLICA_HOST
+    # configured as a replica?". The retry stays quiet per attempt; BOTH
+    # attempts' error text reaches the die message. Truncating inside the
+    # loop would hide the real cause on MySQL 8.4, where SHOW SLAVE STATUS
+    # always fails 1064 and would overwrite e.g. an access-denied error from
+    # the first attempt.
+    status_err=$(mktemp "${TMPDIR:-/tmp}/zdt-fleet-XXXXXX" 2>/dev/null) || status_err="/dev/null"
+    attempt_err=$(mktemp "${TMPDIR:-/tmp}/zdt-fleet-XXXXXX" 2>/dev/null) || attempt_err="/dev/null"
+    trap '[[ -z ${status_err:-} || $status_err == /dev/null ]] || rm -f "$status_err";
+          [[ -z ${attempt_err:-} || $attempt_err == /dev/null ]] || rm -f "$attempt_err"' EXIT
+    for cmd in "SHOW REPLICA STATUS" "SHOW SLAVE STATUS"; do
+        # The one place a client failure is not fatal: an unknown command on
+        # an old server is how the fallback loop knows to try the next one.
+        # A FAILED attempt's stderr joins the refusal under a label naming
+        # the command that produced it, so the operator can tell an
+        # access-denied on SHOW REPLICA STATUS from 8.4's blanket "unknown
+        # command" on SHOW SLAVE STATUS. Only failed attempts are labelled:
+        # labelling an empty-but-successful answer (MySQL 8.0.22-8.3 that is
+        # not a replica) would leave the "no error output" fallback unable to
+        # ever fire.
+        status=$(run_sql replica "$cmd" with-headers 2>"$attempt_err") || status=""
+        if [[ -z $status && -s $attempt_err ]]; then
+            printf '%s: %s\n' "$cmd" "$(<"$attempt_err")" >>"$status_err"
+        fi
+        [[ -z $status ]] || break
+    done
+    if [[ -z $status ]]; then
+        reason=$(<"$status_err")
+        # DB_HOST is only set inside run_sql's subshell; bind it here so the
+        # message can name the server that failed. The server's text follows
+        # on its own — a paren wrapped around two labelled lines would close
+        # them on a line holding nothing else.
+        connect_fields replica
+        die "the replica answered neither SHOW REPLICA STATUS nor SHOW SLAVE STATUS; is ZDT_REPLICA_HOST configured as a replica? server $DB_HOST said: ${reason:-no error output}"
+    fi
+
+    # Only one status row can be judged here. Multi-source replication (one
+    # row per channel) would let a dead second channel pass this gate, so it
+    # is refused rather than partially read.
+    row_count=$(printf '%s\n' "$status" | tail -n +2 | grep -c . || true)
+    [[ $row_count -le 1 ]] \
+        || die "the replica returned $row_count status rows (multi-source?); this gate judges a single-channel replica"
+
+    declare -A F=()
+    headers=$(printf '%s\n' "$status" | head -n 1)
+    values=$(printf '%s\n' "$status" | tail -n +2 | head -n 1)
+    # paste pairs header with value one line at a time; bash read then splits
+    # on the tab. Doing it this way rather than `read -a` keeps empty fields
+    # (an empty Last_SQL_Error, say) in their positions.
+    while IFS=$'\t' read -r k v; do
+        [[ -n $k ]] && F["$k"]="$v"
+    done < <(paste <(printf '%s\n' "$headers" | tr '\t' '\n') \
+                  <(printf '%s\n' "$values" | tr '\t' '\n'))
+
+    # Returns in NAME/VALUE the first of the given columns the server
+    # answered. MariaDB never renamed the columns; MySQL did at 8.0.22; both
+    # spellings and the Seconds_Behind_{Source,Master} pair are handled here.
+    column="" value=""
+    get_column() {
+        local k
+        column="" value=""
+        for k in "$@"; do
+            if [[ -v F[$k] ]]; then column="$k"; value="${F[$k]}"; return 0; fi
+        done
+        column="$1/$2"  # neither name exists: report both as absent
+    }
+
+    problems=()
+    get_column Replica_IO_Running Slave_IO_Running
+    [[ $value == Yes ]] || problems+=("$column: '${value:-<missing>}' (want Yes)")
+    get_column Replica_SQL_Running Slave_SQL_Running
+    [[ $value == Yes ]] || problems+=("$column: '${value:-<missing>}' (want Yes)")
+    get_column Last_SQL_Errno Last_SQL_Errno
+    [[ $value == 0 ]] || problems+=("$column: '${value:-<missing>}' (want 0)")
+    get_column Seconds_Behind_Source Seconds_Behind_Master
+    [[ $value =~ ^[0-9]+$ ]] || problems+=("$column: '${value:-<missing>}' (want a number; NULL means the IO thread has never connected)")
+
+    if [[ ${#problems[@]} -gt 0 ]]; then
+        echo "zdt-fleet: replica is NOT live; a run from here would not count:" >&2
+        printf '  FAIL  %s\n' "${problems[@]}" >&2
+        exit 1
+    fi
+
+    # Live. Record the facts the falsifiers judge the run against.
+    lag="$value"
+    get_column Last_SQL_Errno Last_SQL_Errno; sql_errno="$value"
+    get_column Last_IO_Errno Last_IO_Errno; io_errno="$value"
+    get_column Last_SQL_Error Last_SQL_Error; sql_error="$value"
+    get_column Last_IO_Error Last_IO_Error; io_error="$value"
+
+    # No pipeline inside $(): a pipeline's status is the last command's, which
+    # would let a died-in-the-subshell query_or_die slip past set -e. Query
+    # first, then shape the kept rows.
+    rows=$(query_or_die primary "SELECT @@binlog_format"); binlog_format="${rows%%$'\n'*}"
+    rows=$(query_or_die primary "SELECT COUNT(*) FROM catalog_product_entity" require-database); catalogue_size="${rows%%$'\n'*}"
+    rows=$(query_or_die primary "SHOW BINARY LOGS")
+    binlog_bytes=$(printf '%s\n' "$rows" | awk '{ total += $2 } END { printf "%d", total + 0 }')
+
+    json_escape() { printf '%s' "$1" | tr -d '\n' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+    printf '{"timestamp": "%s", "binlog_format": "%s", "catalogue_size": %s, "binlog_bytes": %s, "seconds_behind": %s, "last_sql_errno": %s, "last_io_errno": %s, "last_sql_error": "%s", "last_io_error": "%s"}\n' \
+        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+        "$(json_escape "$binlog_format")" \
+        "${catalogue_size:-null}" \
+        "${binlog_bytes:-0}" \
+        "$lag" \
+        "${sql_errno:-null}" \
+        "${io_errno:-null}" \
+        "$(json_escape "$sql_error")" \
+        "$(json_escape "$io_error")"
+    exit 0
+fi
+
+# ------------------------------------------------------------- table-checksums
+
+[[ $# -ge 1 ]] || die "table-checksums needs at least one table name"
+for table in "$@"; do
+    [[ $table =~ ^[A-Za-z0-9_]+$ ]] || die "'$table' is not a table name (letters, digits, underscore only)"
+done
+
+differs=0
+for table in "$@"; do
+    # CHECKSUM TABLE on a server for a table that does not exist is not an
+    # error: it returns a row with a NULL checksum. NULL must never count as
+    # a match — a typo'd or wrong-database table missing on BOTH sides has to
+    # read as DIFFER, not MATCH.
+    rows=$(query_or_die primary "CHECKSUM TABLE $table" require-database) || exit $?
+    primary=$(printf '%s\n' "$rows" | head -n 1 | awk '{print $2}')
+    rows=$(query_or_die replica "CHECKSUM TABLE $table" require-database) || exit $?
+    replica=$(printf '%s\n' "$rows" | head -n 1 | awk '{print $2}')
+    if [[ -n $primary && $primary != NULL && $primary == "$replica" ]]; then
+        printf 'MATCH  %s primary=%s replica=%s\n' "$table" "$primary" "$replica"
+    else
+        printf 'DIFFER %s primary=%s replica=%s\n' "$table" "${primary:-<none>}" "${replica:-<none>}"
+        differs=1
+    fi
+done
+exit "$differs"

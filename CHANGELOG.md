@@ -9,6 +9,7 @@ changed, because there's nothing before it.
 
 ### Fixed
 
+- The zero-downtime arms run `setup:upgrade --keep-generated`, as the deploy does. A plain `setup:upgrade` in production mode deletes the new release's compiled code and deployed static files, so the new node served 500s and stalled while it rebuilt them on live requests, and falsifier 5 measured the arm's command rather than the deploy.
 - A deploy that stops no longer leaves the build lock behind for someone to find. One that stops before anything goes live releases it and records `deploy.failed` with the phase and step. One that stops after the switch in a state a person must see first, a web host lost at the switch or a failed health check left live or in maintenance, keeps it and writes why into it. The lock now says who took it and for which release, and the next deploy is refused with whatever it says. A prune that fails at the end still releases it.
 - A failure after the switch no longer ends the run with the lock held and no
   record. When the cache flush, the Varnish ban, `maint:disable` or the indexer
@@ -59,6 +60,7 @@ changed, because there's nothing before it.
 
 ### Changed
 
+- CI runs the end-to-end suite as seven shards side by side, each on a fleet of its own, so a pull request hears back in minutes rather than half an hour. `make docker-test` still runs every scenario in order on one fleet, and CI takes its list of shards from the suite itself, so the two can't drift apart.
 - After the cutover, every app host requests the storefront paths in
   `health.paths` from its own web server, bypassing Varnish. When any fails, the
   release it replaced is put back automatically, provided its code still fits
@@ -144,6 +146,90 @@ changed, because there's nothing before it.
 
 ### Added
 
+- A lab fleet for the zero-downtime arms in `lab/zdt-fleet`: three real Magento Open Source 2.4.8-p2 web nodes reached over ssh, HAProxy with a health check that looks the nodes' names up again while it runs, so a node recreated on a new address is still the one its name says, a MariaDB primary with a replica following it by GTID, OpenSearch, Valkey, and a control container the arms run from. Every container has a CPU and memory limit, and only the load balancer publishes a port, on `127.0.0.1`. Its scripts build releases without a database, install the store, seed the replica and prove it keeps up, and put the first release on every node.
+- The zero-downtime arms reload PHP-FPM on every node after they edit or restore `env.php`, with the command set in `ZDT_FPM_RELOAD`, which every arm now requires. On a host whose OPcache never rechecks a file, as a zero-downtime host is set up, an edited `env.php` otherwise never reaches a request, and the arm would measure the settings it started with. The lab fleet runs PHP-FPM as `deploy` and ships the command as `zdtfleet-fpm-reload`.
+- The arms' traffic runs until a minute after each migration step ends (`ZDT_TRAFFIC_TAIL`, default 60 seconds), not only for `ZDT_DURATION`, so a migration slower than the window is still watched through the change and after it. An arm that stops early stops its traffic at once.
+- The arms judge falsifier 5 by HAProxy's own count of the times it took each node out of rotation during a phase, read from its stats page before and after the traffic, not by one health check of their own: HAProxy's fall setting is what takes a node out, and a single slow probe is not a node leaving. Every arm now requires `ZDT_LB_STATS_URL`, whose server names must be the names in `ZDT_WEB_HOSTS`, and prints each phase's nodes taken out on an `lb:` line. The lab's HAProxy serves the page on port 8404, on the fleet network only.
+- Arms 1 to 3 can take the new node out of the load balancer while it migrates: with `ZDT_LB_DRAIN` set to a command that sets a node's state, the node leaves once traffic starts and before its release lands, and goes back once it answers 200 again after the migration. The exit trap puts it back on every other path. The lab ships the command as `lab/zdt-fleet/bin/lb-state`, which uses HAProxy's runtime API on the fleet network.
+- `docs/results/_template.md` is the shape of the results document issue #5
+  asks for: the platform facts the run records as its header, the three
+  conditions a run has to meet to count, and one section per falsifier, each
+  opening at `NOT RUN — <condition missed>`. It is committed so nothing in the
+  document has to be invented while a run is fresh, and it says of itself that
+  it is not a result. The filled `docs/results/<date>-<platform>.md` follows a
+  real run, from that run's own files under `ZDT_RUN_DIR`.
+- The fleet arms record what a run has to carry into a results document.
+  Each arm now writes `transcript.log` into its run directory — the plan it
+  was confirmed against, every `RUN` line as it happens, the banners, the
+  `PASS`/`FAIL` verdicts and the printed restore commands — secret-free, and
+  only for a run (a `-n` plan leaves no file). Until now those lines went to
+  stderr and existed in a file only if the operator redirected them, while
+  `docs/zero-downtime-proofs.md` described a transcript the code did not
+  write. Each arm also records `platform.json`: Magento edition and version,
+  PHP, the database server and its version, the replication mode and the
+  number of web servers — the facts issue #5's results document has to open
+  with, which nothing recorded before, so its header came from memory. A fact
+  the lab does not answer is `null`, with the reason in `not_recorded` and a
+  `WARN` in the transcript: the run goes on and the document says what could
+  not be read rather than a guess. An edition is named only when the release's
+  `composer.json` lists exactly one edition package — with two, the run cannot
+  say which platform the lab has, so the fact stays `null` and the raw list
+  and the reason are recorded instead of one of the two labels.
+- `bin/zdt-arm arm4`, the outage arm of issue #5: the breaking release
+  (`ZDT_RELEASE_BREAKING` / `ZDT_LABEL_BREAKING`) rolls out twice — once
+  with no maintenance mode, old servers serving while the migration runs,
+  and once behind `maintenance:enable` on every web node — with the
+  database restored between the two so both start from the same state.
+  Per second and request type the report carries the share of requests
+  that failed: what the customer sees, second by second. Falsifier 4 then
+  compares the legs — the rollout must fail more requests, and for more
+  seconds, than maintenance mode, or "maintenance mode is the smaller
+  outage" is reported as disproved. The maintenance leg is a real
+  maintenance deploy: the breaking release is put on every web node under
+  the page and the page comes down on every node in one step after the
+  migration, so the measured window is the outage maintenance mode actually
+  buys. A maintenance flag lives inside the release that wrote it (`var/` is
+  not shared between releases), so the arm raises it in the new release
+  before moving the symlink and lifts it in the release that holds it —
+  including the old release's, when the node is put back on it. Maintenance
+  is lifted again on every exit path the arm can reach, and the exact
+  commands, release by release, are printed for the paths it cannot.
+- `bin/zdt-arm arm3`, the crossing arm of issue #5: two code versions against
+  one database with `deployment/blue_green/enabled` on the old servers, first
+  across an additive control release (old servers must serve without a guard
+  message; passing it alone proves nothing) and then across a release that
+  renames or drops a column the old code reads — the evidence. The first
+  old-server failure must name the changed object, so failing read bodies are
+  saved under the run directory and the verdict greps the chronologically
+  first one; an old server answering 200 across a schema it does not match
+  fails the falsifier. The breaking change, the read route and the object's
+  name come only from you (`ZDT_RELEASE_ADDITIVE/_BREAKING`,
+  `ZDT_READ_PATH`, `ZDT_SCHEMA_OBJECT`): a missing one stops arm 3 by name
+  rather than guessing an evidence chain. The database is restored between
+  the two legs, so the breaking leg starts exactly where the control started.
+- `bin/zdt-arm`, the runner for the fleet arms of issue #5. `arm1` runs the
+  migration with the blue/green flag off — one shared cache prefix, then a
+  prefix per release, traffic on every server; `arm2` runs it again with the
+  flag on the old servers; `restore-snapshot` puts a database snapshot back.
+  `-n` prints the whole plan — both cache-prefix phases and the snapshot
+  restore and relink between them — and runs nothing; without `-y` the arm
+  asks about the plan it just printed, never one it did not. The snapshot
+  comes before `setup:upgrade` and stops the run when it fails, and so does
+  any failed release placement, upgrade or `env.php` edit — a step that
+  fails stops the arm instead of letting it report a migration that never
+  happened. Every `env.php` is backed up with its contents (the symlink to
+  the shared copy is followed, so the backup is the original bytes) and its
+  restore command printed. The traffic generator has a hard rate and
+  duration cap, asks only routes a stock store serves — name your category
+  and product pages in `ZDT_CATEGORY_PATH` / `ZDT_PRODUCT_PATH` — and reads
+  a refusal only from a 5xx, no answer, or a guard match. Settings come from
+  `ZDT_*` environment variables. See
+  [docs/zero-downtime-proofs.md](docs/zero-downtime-proofs.md).
+- `bin/zdt-fleet`, the checks the multi-database runs stand on. `replica-check`
+  refuses to pass unless the replica is replicating, and records the facts a
+  run is judged against as one JSON object; `table-checksums` compares tables
+  between the primary and the replica. Settings come from `ZDT_*` environment
+  variables. See [docs/zero-downtime-proofs.md](docs/zero-downtime-proofs.md).
 - `bin/zdt-proof` runs eight proofs of the assumptions a zero-downtime deploy
   rests on, against a Magento store running under Kapelos: which schema
   mismatches a live release survives, whether two releases sharing a cache read

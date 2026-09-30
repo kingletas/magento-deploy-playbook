@@ -8,6 +8,8 @@
 #   bin/docker-suite verify    assert on what the deploy actually produced
 #   bin/docker-suite audit     check the audit chain and write an evidence bundle
 #   bin/docker-suite test      up + deploy + verify (what `make docker-test` runs)
+#   bin/docker-suite test-shard <name>  one shard of `test` on a clean fleet, as CI runs it
+#   bin/docker-suite shards    the shard names, as a JSON list for CI's matrix
 #   bin/docker-suite test-lost-host  lose web3 mid-upload and mid-switch; the deploy must fail and say so
 #   bin/docker-suite test-admin-lost lose the admin host before and during setup:upgrade, and grade each criterion
 #   bin/docker-suite test-magento-host  no host can read the database, then a fallback can
@@ -671,14 +673,25 @@ print(finished[-1]['release'] if finished else '')
     echo "Audit chain intact, and ${release}'s evidence carries every event."
 }
 
-cmd_test() {
-    cmd_up || exit 1
-    # `up` on already-running containers is a no-op, so /tmp/build-log and any
-    # leftover lock survive from a previous run. verify-deploy.yml counts log
-    # entries, so a stale log makes it fail on a deploy that was fine.
-    echo ""
-    cmd_reset
-    echo ""
+# The whole suite, in shards so CI can run them side by side. This list is the
+# suite: `test` runs every shard, in this order, on one fleet, and CI builds its
+# matrix from `shards`, so a group added here is run everywhere or nowhere.
+SHARDS=(core rollback config-import lost-host admin-lost magento-host handlers)
+
+shard_groups() {
+    case "$1" in
+        core)          echo "core static_verify forecast" ;;
+        rollback)      echo "rollback" ;;
+        config-import) echo "config_import" ;;
+        lost-host)     echo "upgrade_fails lost_host" ;;
+        admin-lost)    echo "admin_lost" ;;
+        magento-host)  echo "magento_host" ;;
+        handlers)      echo "after_switch handler_fails" ;;
+        *) return 1 ;;
+    esac
+}
+
+cmd_test_core() {
     echo "########## deploy ##########"
     cmd_deploy || die "the deploy failed. bin/docker-suite logs shows what the fakes were asked to do."
     # A second deploy, so there is a superseded release for verify to check is
@@ -703,29 +716,56 @@ cmd_test() {
     set_needs_upgrade "rm -f"
     echo ""
     echo "########## audit trail ##########"
-    cmd_audit || die "the audit trail is incomplete or has been changed." 
+    cmd_audit || die "the audit trail is incomplete or has been changed."
+}
+
+run_shard() {
+    local group
+    for group in $(shard_groups "$1"); do
+        echo ""
+        "cmd_test_${group}"
+    done
+}
+
+cmd_test() {
+    cmd_up || exit 1
+    # `up` on already-running containers is a no-op, so /tmp/build-log and any
+    # leftover lock survive from a previous run. verify-deploy.yml counts log
+    # entries, so a stale log makes it fail on a deploy that was fine.
     echo ""
-    cmd_test_static_verify
-    echo ""
-    cmd_test_forecast
-    echo ""
-    cmd_test_rollback
-    echo ""
-    cmd_test_config_import
-    echo ""
-    cmd_test_upgrade_fails
-    echo ""
-    cmd_test_lost_host
-    echo ""
-    cmd_test_admin_lost
-    echo ""
-    cmd_test_magento_host
-    echo ""
-    cmd_test_after_switch
-    echo ""
-    cmd_test_handler_fails
+    cmd_reset
+    local shard
+    for shard in "${SHARDS[@]}"; do run_shard "${shard}"; done
     echo ""
     echo "All good. Tear down with: bin/docker-suite down"
+}
+
+# One shard alone, on a fleet of its own. Every group after `core` was written
+# to follow the one before it, so it expects a live release with a superseded
+# one behind it; two deploys give it that, and nothing more.
+cmd_test_shard() {
+    local shard="${1:-}"
+    shard_groups "${shard}" >/dev/null || die "no shard named '${shard}'; bin/docker-suite shards lists them."
+    cmd_up || exit 1
+    echo ""
+    cmd_reset
+    if [ "${shard}" != core ]; then
+        echo ""
+        echo "########## a clean fleet with two releases, for the ${shard} shard ##########"
+        cmd_deploy || die "the first setup deploy for the ${shard} shard failed."
+        truncate_logs
+        cmd_deploy || die "the second setup deploy for the ${shard} shard failed."
+        truncate_logs
+    fi
+    run_shard "${shard}"
+    echo ""
+    echo "All good: the ${shard} shard. Tear down with: bin/docker-suite down"
+}
+
+cmd_shards() {
+    local out="" shard
+    for shard in "${SHARDS[@]}"; do out+="${out:+,}\"${shard}\""; done
+    echo "[${out}]"
 }
 
 case "${1:-}" in
@@ -736,6 +776,8 @@ case "${1:-}" in
     verify)  shift; cmd_verify "$@" ;;
     audit)   shift; cmd_audit "$@" ;;
     test)    shift; cmd_test "$@" ;;
+    test-shard) shift; cmd_test_shard "$@" ;;
+    shards)  shift; cmd_shards "$@" ;;
     test-lost-host) shift; cmd_test_lost_host "$@" ;;
     test-admin-lost) shift; cmd_test_admin_lost "$@" ;;
     test-magento-host) shift; cmd_test_magento_host "$@" ;;
@@ -745,5 +787,5 @@ case "${1:-}" in
     shell)   shift; cmd_shell "$@" ;;
     reset)   shift; cmd_reset "$@" ;;
     down)    shift; cmd_down "$@" ;;
-    *) sed -n '3,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *) sed -n '3,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

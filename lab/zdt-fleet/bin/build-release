@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+#
+# build-release LABEL: turn the source tree into one release tarball.
+#
+# Runs inside the `builder` container: PHP 8.4, the source tree read-only at
+# /src, this repository read-only at /playbook (so this script and
+# ../probe-module are reachable beside it), the releases volume writable at
+# /releases, the lab-config volume read-only at /lab-config, no network. It
+# copies /src to a work directory under /tmp (the container's own writable
+# layer, never /playbook or /src) without auth.json, app/etc/env.php, var/,
+# generated/, pub/media/ and pub/static/; for any label other than r0, adds
+# that label's probe-module variant under app/code/ and marks it enabled in
+# app/etc/config.php; compiles DI; turns app/etc/env.php and pub/media into
+# symlinks to the node layout's shared paths; and writes /releases/LABEL.tar.gz.
+#
+# setup:di:compile needs no database: it reads which modules are enabled
+# from app/etc/config.php rather than the setup_module database table,
+# which is why this script edits config.php directly instead of reaching
+# for deploy:mode:set (which does need an installed application) or any
+# other install-time command. setup:static-content:deploy is documented the
+# same way but, verified in local testing against a real 2.4.8-p2 tree,
+# actually needs a default website and a theme registry to resolve asset
+# URLs ("DomainException: The default website isn't defined" otherwise, on
+# ordinary Luma/Blank LESS and JS, not just email templates). Magento's own
+# answer for this, the one pipeline deployments use, is
+# `bin/magento app:config:dump scopes themes`: after a real install it
+# writes the website/store/theme rows straight into app/etc/config.php, and
+# static-content:deploy then reads them from there with no database. So:
+#
+#   - if /lab-config/config.php exists (install-store dumped it after the
+#     first real install), it is used as this release's starting
+#     app/etc/config.php, the label's module is enabled on top of it as
+#     before, and static content IS built.
+#   - if it does not exist yet (nothing has been installed), the release
+#     still gets di:compile and a tarball under the same name, but with no
+#     static content, and this script says so plainly: that release is only
+#     good for the very first install. install-store's own dump, once it
+#     runs, is what makes every later build-release call produce a release
+#     deploy-r0 can actually serve pages from -- every release, r0 included,
+#     needs rebuilding once /lab-config/config.php exists.
+#
+# What it changes: only /releases/LABEL.tar.gz and its own work directory
+# under /tmp, removed before this script exits.
+#
+# To undo: delete /releases/LABEL.tar.gz; nothing else outlives this run.
+#
+# Usage: build-release LABEL, where LABEL is one of r0, r1, r2-additive,
+# r2-breaking. r0 carries no module; r1 is the probe module as
+# ../probe-module/r1 holds it; r2-additive and r2-breaking hold only the files
+# they change, laid over r1. No other setting is
+# read from the environment: the only inputs are the fixed mount points
+# above (including /lab-config) and this one argument.
+#
+# Exit codes: 0 the tarball was written; 1 the source tree failed a guard
+# (no vendor/, auth.json would have shipped) or a build step failed.
+
+set -euo pipefail
+
+die() { echo "build-release: $*" >&2; exit 1; }
+
+[[ $# -eq 1 ]] || die "usage: build-release LABEL (r0, r1, r2-additive, r2-breaking)"
+LABEL="$1"
+case "$LABEL" in
+    r0|r1|r2-additive|r2-breaking) ;;
+    *) die "'$LABEL' is not a release this fleet builds (r0, r1, r2-additive, r2-breaking)" ;;
+esac
+
+HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+PROBE_MODULE_DIR="${ZDT_PROBE_MODULE_DIR:-$HERE/../probe-module}"
+SRC="${ZDT_BUILD_SRC:-/src}"
+RELEASES="${ZDT_BUILD_RELEASES:-/releases}"
+LAB_CONFIG="${ZDT_LAB_CONFIG:-/lab-config}"
+
+[[ -d $SRC ]] || die "no source tree at $SRC"
+[[ -d "$SRC/vendor" ]] || die "$SRC has no vendor/; point ZDT_LAB_SRC (compose) at a tree that already has its dependencies"
+[[ -d $RELEASES ]] || die "no releases directory at $RELEASES"
+
+if [[ $LABEL != r0 ]]; then
+    [[ -d "$PROBE_MODULE_DIR/r1/app/code/Lab/ZdtProbe" && -d "$PROBE_MODULE_DIR/$LABEL/app/code/Lab/ZdtProbe" ]] \
+        || die "no probe-module variant at $PROBE_MODULE_DIR/$LABEL"
+fi
+
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/zdt-build-$LABEL.XXXXXX")"
+cleanup() { rm -rf "$WORKDIR"; }
+trap cleanup EXIT
+
+echo "build-release: copying $SRC -> $WORKDIR (excluding auth.json, env.php, var/, generated/, pub/media/, pub/static/)"
+rsync -a \
+    --exclude='/auth.json' \
+    --exclude='/app/etc/env.php' \
+    --exclude='/var/' \
+    --exclude='/generated/' \
+    --exclude='/pub/media/' \
+    --exclude='/pub/static/' \
+    "$SRC/" "$WORKDIR/"
+
+[[ ! -e "$WORKDIR/auth.json" ]] || die "auth.json made it into the work directory; the exclude did not do its job"
+
+STATIC=1
+if [[ -f "$LAB_CONFIG/config.php" ]]; then
+    echo "build-release: seeding app/etc/config.php from $LAB_CONFIG (carries scopes and themes from the first install)"
+    mkdir -p "$WORKDIR/app/etc"
+    cp "$LAB_CONFIG/config.php" "$WORKDIR/app/etc/config.php"
+else
+    STATIC=0
+    echo "build-release: no $LAB_CONFIG/config.php yet (nothing has been installed) -- this build will have no static content and is for the FIRST install only"
+fi
+
+if [[ $LABEL != r0 ]]; then
+    echo "build-release: adding probe-module variant $LABEL under app/code/"
+    mkdir -p "$WORKDIR/app/code"
+    rsync -a "$PROBE_MODULE_DIR/r1/app/code/" "$WORKDIR/app/code/"
+    rsync -a "$PROBE_MODULE_DIR/$LABEL/app/code/" "$WORKDIR/app/code/"
+
+    echo "build-release: enabling Lab_ZdtProbe in app/etc/config.php"
+    if [[ -f "$WORKDIR/app/etc/config.php" ]]; then
+        # shellcheck disable=SC2016  # single-quoted on purpose: $argv is PHP's, not this shell's.
+        php -r '
+            $f = $argv[1];
+            $config = include $f;
+            if (!isset($config["modules"]) || !is_array($config["modules"])) { $config["modules"] = []; }
+            $config["modules"]["Lab_ZdtProbe"] = 1;
+            file_put_contents($f, "<?php\nreturn " . var_export($config, true) . ";\n");
+        ' "$WORKDIR/app/etc/config.php"
+    else
+        # A fresh vendor-only tree carries no config.php yet: module:enable
+        # writes one from what it finds on disk, which by now includes the
+        # probe module just copied in, and needs no database either.
+        (cd "$WORKDIR" && php bin/magento module:enable --all)
+    fi
+else
+    if [[ ! -f "$WORKDIR/app/etc/config.php" ]]; then
+        (cd "$WORKDIR" && php bin/magento module:enable --all)
+    fi
+fi
+
+echo "build-release: setup:di:compile"
+(cd "$WORKDIR" && php bin/magento setup:di:compile)
+
+if [[ $STATIC -eq 1 ]]; then
+    echo "build-release: setup:static-content:deploy en_US -f --jobs 1"
+    if ! (cd "$WORKDIR" && php bin/magento setup:static-content:deploy en_US -f --jobs 1); then
+        die "static-content:deploy failed even with $LAB_CONFIG/config.php seeded; if the message is 'DomainException: The default website isn't defined' again, that config.php is missing its scopes or themes block (check install-store's app:config:dump ran and copied cleanly)"
+    fi
+else
+    echo "build-release: skipping static-content:deploy (no config.php with scopes/themes yet); $LABEL.tar.gz will only be good for the first install"
+fi
+
+echo "build-release: clearing var/ (compile and static deploy write logs and a composer home into it; var/ is per node, never shipped)"
+rm -rf "${WORKDIR:?}/var"
+
+echo "build-release: linking app/etc/env.php and pub/media to the node's shared paths"
+# pub/static exists even when nothing was deployed into it: setup:install
+# refuses a release whose pub/static it cannot write.
+mkdir -p "$WORKDIR/app/etc" "$WORKDIR/pub/static"
+rm -f "$WORKDIR/app/etc/env.php"
+ln -s /var/www/magento/shared/app/etc/env.php "$WORKDIR/app/etc/env.php"
+rm -rf "$WORKDIR/pub/media"
+ln -s /var/www/magento/shared/pub/media "$WORKDIR/pub/media"
+
+TARBALL="$RELEASES/$LABEL.tar.gz"
+echo "build-release: writing $TARBALL"
+tar -czf "$TARBALL" -C "$WORKDIR" .
+
+if tar -tzf "$TARBALL" | grep -qE '(^|/)auth\.json$'; then
+    rm -f "$TARBALL"
+    die "auth.json ended up in $TARBALL; the tarball was removed"
+fi
+
+size="$(du -h "$TARBALL" | cut -f1)"
+sha="$(sha256sum "$TARBALL" | cut -d' ' -f1)"
+echo "build-release: $TARBALL ($size) sha256:$sha"
+if [[ $STATIC -eq 0 ]]; then
+    echo "build-release: $LABEL.tar.gz has NO static content -- good for install-store's first install only; rebuild it (and every other release) once $LAB_CONFIG/config.php exists"
+fi

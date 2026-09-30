@@ -1,0 +1,12 @@
+[mysqld]
+server_id=2
+log_bin
+binlog_format=ROW
+log_slave_updates=ON
+gtid_strict_mode=ON
+read_only=ON
+innodb_buffer_pool_size=768M
+max_connections=200
+# Magento creates triggers, which binary logging refuses to a non-SUPER user
+# without this.
+log_bin_trust_function_creators=ON

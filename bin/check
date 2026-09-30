@@ -11,8 +11,11 @@
 #   2. bin/check-structure. Catches what --syntax-check cannot: a reintroduced
 #      `roles:`, a notify with no handler, a parent-path reference, a stray
 #      lookup('env', ...).
-#   3. The Python tests for bin/audit-log and bin/zdt-proof. The proof runner's
-#      tests use stand-ins for docker and Kapelos, so no store is needed.
+#   3. The Python tests for bin/audit-log, bin/zdt-proof, bin/zdt-fleet and
+#      bin/zdt-arm. The proof runner's tests use stand-ins for docker and
+#      Kapelos, so no store is needed; the fleet checks' tests use a fake mysql
+#      client, so no database is needed; the arms' tests fake ssh, curl and
+#      rsync as well, so no lab is needed.
 #   4. test.yml -- the eight offline suites, run for real against
 #      inventory/test. No host is contacted; every play is connection: local.
 #   5. yamllint, ansible-lint and shellcheck, where they are available.
@@ -103,6 +106,26 @@ else
 fi
 
 echo ""
+echo "Fleet checks:"
+if output=$("${python:-python3}" -m unittest tests/test_zdt_fleet.py 2>&1); then
+    printf '  ok    bin/zdt-fleet: %s\n' "$(printf '%s\n' "${output}" | grep -oE 'Ran [0-9]+ tests')"
+else
+    echo "  FAIL  bin/zdt-fleet"
+    printf '%s\n' "${output}" | tail -30 | sed 's/^/          /'
+    fail=$((fail + 1))
+fi
+
+echo ""
+echo "Fleet arms:"
+if output=$("${python:-python3}" -m unittest tests/test_zdt_arm.py 2>&1); then
+    printf '  ok    bin/zdt-arm: %s\n' "$(printf '%s\n' "${output}" | grep -oE 'Ran [0-9]+ tests')"
+else
+    echo "  FAIL  bin/zdt-arm"
+    printf '%s\n' "${output}" | tail -30 | sed 's/^/          /'
+    fail=$((fail + 1))
+fi
+
+echo ""
 echo "Offline suites:"
 if output=$(ansible-playbook -i inventory/test test.yml 2>&1); then
     # One line per suite, from the play names, so a green run still says what ran.
@@ -153,12 +176,13 @@ else
     echo "  SKIP  ansible-lint not installed or not working (pip install -r requirements.txt)"
 fi
 
-# The proof runner is the only shell here held to shellcheck.
+# The proof runner, the fleet checks and the fleet arms are the only shell here
+# held to shellcheck.
 if shellcheck --version >/dev/null 2>&1; then
-    if output=$(shellcheck bin/zdt-proof bin/zdt-proof.d/*.sh bin/zdt-proof.d/proofs/*.sh 2>&1); then
-        echo "  ok    shellcheck bin/zdt-proof"
+    if output=$(shellcheck bin/zdt-proof bin/zdt-fleet bin/zdt-arm bin/zdt-proof.d/*.sh bin/zdt-proof.d/proofs/*.sh bin/zdt-arm.d/*.sh 2>&1); then
+        echo "  ok    shellcheck bin/zdt-proof, bin/zdt-fleet, bin/zdt-arm"
     else
-        echo "  FAIL  shellcheck bin/zdt-proof"
+        echo "  FAIL  shellcheck bin/zdt-proof, bin/zdt-fleet, bin/zdt-arm"
         printf '%s\n' "${output}" | tail -30 | sed 's/^/          /'
         fail=$((fail + 1))
     fi

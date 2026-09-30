@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+#
+# replica-seed: bring the lab's replica up to date with the primary and
+# start it following by GTID.
+#
+# What it does: creates (or replaces) a replication user on the primary,
+# clears the replica's own GTID history (see below), takes a consistent
+# mariadb-dump of the lab's schema with the primary's GTID position
+# embedded, loads that dump into the replica, points the replica at the
+# primary with CHANGE MASTER TO ... MASTER_USE_GTID=slave_pos, starts it,
+# and waits up to 120 seconds for both replication threads to run with the
+# lag at zero. It also grants REPLICATION CLIENT and SLAVE MONITOR on the
+# primary and the replica to ZDT_PRIMARY_USER/ZDT_REPLICA_USER, the account
+# bin/zdt-fleet and replica-status read status with, since a database-scoped
+# grant (what MARIADB_USER gets from the primary and replica images) carries
+# neither, and SHOW REPLICA STATUS refuses without SLAVE MONITOR
+# specifically -- on MariaDB 10.5.2 and later REPLICATION CLIENT alone only
+# covers SHOW BINARY LOGS and similar, confirmed against this lab's actual
+# 11.4 server, not assumed from documentation.
+#
+# The replica's container image sets up its own MARIADB_DATABASE and
+# MARIADB_USER on first start, and with log_bin and gtid_strict_mode on
+# (db/replica.cnf) that init writes its own local GTID history. Under
+# gtid_strict_mode that history must not collide with the primary's, so
+# every seed runs RESET MASTER on the replica before loading the primary's
+# dump, which clears the replica's binary log and its gtid_binlog_pos /
+# gtid_current_pos, not only when reseeding after a stopped attempt.
+#
+# What it changes: a user account on the primary (ZDT_REPL_USER, default
+# zdt_repl); the replica's own binary log and GTID position (RESET MASTER);
+# the schema named by ZDT_PRIMARY_DATABASE on the replica, which is dropped
+# table by table and reloaded from the primary's dump; the replica's CHANGE
+# MASTER TO configuration; and a REPLICATION CLIENT plus SLAVE MONITOR grant
+# on both servers for ZDT_PRIMARY_USER/ZDT_REPLICA_USER.
+#
+# To undo: on the replica, STOP SLAVE; RESET SLAVE ALL; and drop the
+# reloaded schema if it should not be there. On the primary,
+# DROP USER IF EXISTS '<ZDT_REPL_USER>'@'%';. The extra grants are harmless
+# to leave in place; REVOKE REPLICATION CLIENT, SLAVE MONITOR ON *.* FROM
+# '<user>'@'%'; removes them on either server if wanted. RESET MASTER itself
+# cannot be undone; it only ever discards binary log history that nothing
+# but this replica's own future replicas would have read.
+#
+# Refuses rather than acting when the replica already replicates: run this
+# on a replica whose IO or SQL thread is already running and it prints the
+# replica's own status and stops, instead of resetting anything under it. A
+# replica that has a stopped, abandoned configuration (both threads No) is
+# reset and reseeded, since nothing live depends on it.
+#
+# Settings come from the environment (lab.env), never from arguments:
+#
+#   ZDT_PRIMARY_HOST / ZDT_PRIMARY_PORT (default 3306)
+#   ZDT_REPLICA_HOST / ZDT_REPLICA_PORT (default 3306)
+#   ZDT_PRIMARY_DATABASE (falls back to ZDT_DB_NAME): the schema to dump
+#     and replicate.
+#   ZDT_PRIMARY_ADMIN_USER (default root) and ZDT_PRIMARY_ADMIN_PASSWORD_FILE
+#     (default /run/secrets/db_root_password): the account used to create
+#     the replication user and take the dump.
+#   ZDT_REPLICA_ADMIN_USER (default root) and ZDT_REPLICA_ADMIN_PASSWORD_FILE
+#     (default /run/secrets/db_root_password): the account used to load the
+#     dump and run CHANGE MASTER TO.
+#   ZDT_REPL_USER (default zdt_repl): the replication account's name.
+#   ZDT_REPL_PASSWORD_FILE (default /run/secrets/db_repl_password): its
+#     password, read from a file and never placed on a command line.
+#   ZDT_PRIMARY_USER / ZDT_REPLICA_USER (optional): the account granted
+#     REPLICATION CLIENT and SLAVE MONITOR so bin/zdt-fleet and
+#     replica-status can read status with it; skipped on a side where the
+#     variable is unset.
+#
+# No password is ever printed or placed in argv. Each MariaDB client call
+# reads its credentials from a --defaults-extra-file written to a private
+# temporary file (mode 600), removed by a trap on exit along with the dump.
+#
+# Exit codes: 0 the replica is live, both threads running, lag zero; 1
+# refused because the replica already replicates; 2 the tool could not
+# finish (missing settings, a client call failed, the wait timed out).
+
+set -euo pipefail
+
+die() { echo "replica-seed: $*" >&2; exit 2; }
+
+MYSQL_BIN="$(command -v mariadb || command -v mysql || true)"
+[[ -n $MYSQL_BIN ]] || die "no mariadb or mysql client on PATH"
+DUMP_BIN="$(command -v mariadb-dump || command -v mysqldump || true)"
+[[ -n $DUMP_BIN ]] || die "no mariadb-dump or mysqldump on PATH"
+
+: "${ZDT_PRIMARY_HOST:?set ZDT_PRIMARY_HOST}"
+: "${ZDT_REPLICA_HOST:?set ZDT_REPLICA_HOST}"
+ZDT_PRIMARY_PORT="${ZDT_PRIMARY_PORT:-3306}"
+ZDT_REPLICA_PORT="${ZDT_REPLICA_PORT:-3306}"
+ZDT_PRIMARY_DATABASE="${ZDT_PRIMARY_DATABASE:-${ZDT_DB_NAME:-}}"
+[[ -n $ZDT_PRIMARY_DATABASE ]] || die "set ZDT_PRIMARY_DATABASE (or ZDT_DB_NAME)"
+ZDT_PRIMARY_ADMIN_USER="${ZDT_PRIMARY_ADMIN_USER:-root}"
+ZDT_PRIMARY_ADMIN_PASSWORD_FILE="${ZDT_PRIMARY_ADMIN_PASSWORD_FILE:-/run/secrets/db_root_password}"
+ZDT_REPLICA_ADMIN_USER="${ZDT_REPLICA_ADMIN_USER:-root}"
+ZDT_REPLICA_ADMIN_PASSWORD_FILE="${ZDT_REPLICA_ADMIN_PASSWORD_FILE:-/run/secrets/db_root_password}"
+ZDT_REPL_USER="${ZDT_REPL_USER:-zdt_repl}"
+ZDT_REPL_PASSWORD_FILE="${ZDT_REPL_PASSWORD_FILE:-/run/secrets/db_repl_password}"
+
+[[ -r $ZDT_PRIMARY_ADMIN_PASSWORD_FILE ]] \
+    || die "cannot read ZDT_PRIMARY_ADMIN_PASSWORD_FILE ($ZDT_PRIMARY_ADMIN_PASSWORD_FILE)"
+[[ -r $ZDT_REPLICA_ADMIN_PASSWORD_FILE ]] \
+    || die "cannot read ZDT_REPLICA_ADMIN_PASSWORD_FILE ($ZDT_REPLICA_ADMIN_PASSWORD_FILE)"
+[[ -r $ZDT_REPL_PASSWORD_FILE ]] \
+    || die "cannot read ZDT_REPL_PASSWORD_FILE ($ZDT_REPL_PASSWORD_FILE)"
+
+primary_admin_password="$(<"$ZDT_PRIMARY_ADMIN_PASSWORD_FILE")"
+replica_admin_password="$(<"$ZDT_REPLICA_ADMIN_PASSWORD_FILE")"
+repl_password="$(<"$ZDT_REPL_PASSWORD_FILE")"
+
+workdir="$(mktemp -d "${TMPDIR:-/tmp}/replica-seed.XXXXXX")"
+cleanup() { rm -rf "$workdir"; }
+trap 'cleanup' EXIT
+umask 077
+primary_cnf="$workdir/primary.cnf"
+replica_cnf="$workdir/replica.cnf"
+dumpfile="$workdir/dump.sql"
+cat >"$primary_cnf" <<CNF
+[client]
+user=$ZDT_PRIMARY_ADMIN_USER
+password="$primary_admin_password"
+host=$ZDT_PRIMARY_HOST
+port=$ZDT_PRIMARY_PORT
+CNF
+cat >"$replica_cnf" <<CNF
+[client]
+user=$ZDT_REPLICA_ADMIN_USER
+password="$replica_admin_password"
+host=$ZDT_REPLICA_HOST
+port=$ZDT_REPLICA_PORT
+CNF
+chmod 600 "$primary_cnf" "$replica_cnf"
+
+# sql_escape doubles a single quote, the way a single-quoted MariaDB string
+# literal escapes one, so a secret that happens to contain one is still a
+# valid literal rather than breaking out of it.
+sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
+
+# The SQL goes on stdin, never -e: two statements carry the replication
+# password, and an argument is visible in ps for as long as the call runs.
+primary_sql() {
+    printf '%s\n' "$1" | "$MYSQL_BIN" --defaults-extra-file="$primary_cnf" --batch --skip-column-names
+}
+replica_sql() {
+    printf '%s\n' "$1" | "$MYSQL_BIN" --defaults-extra-file="$replica_cnf" --batch --skip-column-names
+}
+replica_sql_vertical() {
+    "$MYSQL_BIN" --defaults-extra-file="$replica_cnf" --batch -e "$1\G"
+}
+
+# status_field TEXT NAME...: prints the value of the first NAME present in
+# TEXT (a \G vertical-format block), trimmed of its leading label. Returns 1
+# when none of NAME are present, mirroring bin/zdt-fleet's column fallback
+# for the same MariaDB-vs-MySQL naming split.
+status_field() {
+    local text="$1" name
+    shift
+    for name in "$@"; do
+        if printf '%s\n' "$text" | grep -q "^ *${name}: "; then
+            printf '%s\n' "$text" | sed -n "s/^ *${name}: //p" | head -n1
+            return 0
+        fi
+    done
+    return 1
+}
+
+fetch_replica_status() {
+    local text
+    text="$(replica_sql_vertical "SHOW REPLICA STATUS" 2>/dev/null || true)"
+    [[ -n $text ]] || text="$(replica_sql_vertical "SHOW SLAVE STATUS" 2>/dev/null || true)"
+    printf '%s' "$text"
+}
+
+# Refuse before touching anything if the replica is already live. This has
+# to run before any write below, so a live replica is never reset.
+existing="$(fetch_replica_status)"
+if [[ -n $existing ]]; then
+    io="$(status_field "$existing" Replica_IO_Running Slave_IO_Running || true)"
+    sql="$(status_field "$existing" Replica_SQL_Running Slave_SQL_Running || true)"
+    if [[ $io == Yes || $sql == Yes ]]; then
+        echo "replica-seed: the replica already replicates; refusing to reset it. Its status:" >&2
+        printf '%s\n' "$existing" >&2
+        exit 1
+    fi
+    echo "replica-seed: found a stopped, abandoned replication config; clearing it before reseeding." >&2
+    replica_sql "STOP SLAVE; RESET SLAVE ALL;" >/dev/null
+fi
+
+echo "replica-seed: clearing the replica's own GTID history from its container init."
+replica_sql "RESET MASTER;"
+
+echo "replica-seed: creating the replication user on the primary."
+primary_sql "CREATE OR REPLACE USER '$ZDT_REPL_USER'@'%' IDENTIFIED BY '$(sql_escape "$repl_password")'; GRANT REPLICATION SLAVE ON *.* TO '$ZDT_REPL_USER'@'%';"
+
+# SLAVE MONITOR is what SHOW REPLICA STATUS actually checks for on MariaDB
+# 10.5.2+; REPLICATION CLIENT alone was verified against this lab's own
+# 11.4 server to leave it refused with "Access denied ... SLAVE MONITOR
+# privilege(s)". Both are granted together on each side.
+if [[ -n ${ZDT_PRIMARY_USER:-} ]]; then
+    primary_sql "GRANT REPLICATION CLIENT, SLAVE MONITOR ON *.* TO '$ZDT_PRIMARY_USER'@'%';" \
+        || echo "replica-seed: could not grant status privileges to ZDT_PRIMARY_USER on the primary; SHOW REPLICA STATUS reads with it may fail." >&2
+fi
+if [[ -n ${ZDT_REPLICA_USER:-} ]]; then
+    replica_sql "GRANT REPLICATION CLIENT, SLAVE MONITOR ON *.* TO '$ZDT_REPLICA_USER'@'%';" \
+        || echo "replica-seed: could not grant status privileges to ZDT_REPLICA_USER on the replica; SHOW REPLICA STATUS reads with it may fail." >&2
+fi
+
+echo "replica-seed: taking a consistent dump of $ZDT_PRIMARY_DATABASE with its GTID position."
+"$DUMP_BIN" --defaults-extra-file="$primary_cnf" \
+    --single-transaction --master-data=1 --gtid \
+    --routines --triggers \
+    --databases "$ZDT_PRIMARY_DATABASE" >"$dumpfile"
+
+echo "replica-seed: loading the dump into the replica."
+"$MYSQL_BIN" --defaults-extra-file="$replica_cnf" <"$dumpfile"
+
+echo "replica-seed: pointing the replica at the primary and starting it."
+replica_sql "CHANGE MASTER TO MASTER_HOST='$ZDT_PRIMARY_HOST', MASTER_PORT=$ZDT_PRIMARY_PORT, MASTER_USER='$ZDT_REPL_USER', MASTER_PASSWORD='$(sql_escape "$repl_password")', MASTER_USE_GTID=slave_pos;"
+replica_sql "START SLAVE;"
+
+echo "replica-seed: waiting up to 120 seconds for both threads and zero lag."
+deadline=$((SECONDS + 120))
+status=""
+ok=0
+while (( SECONDS < deadline )); do
+    status="$(fetch_replica_status)"
+    if [[ -n $status ]]; then
+        io="$(status_field "$status" Replica_IO_Running Slave_IO_Running || true)"
+        sql="$(status_field "$status" Replica_SQL_Running Slave_SQL_Running || true)"
+        lag="$(status_field "$status" Seconds_Behind_Source Seconds_Behind_Master || true)"
+        if [[ $io == Yes && $sql == Yes && $lag == 0 ]]; then
+            ok=1
+            break
+        fi
+    fi
+    sleep 2
+done
+
+if [[ $ok -ne 1 ]]; then
+    echo "replica-seed: the replica did not catch up within 120 seconds. Last status:" >&2
+    printf '%s\n' "${status:-<no status>}" >&2
+    exit 2
+fi
+
+echo "replica-seed: done. The replica is live, both threads running, lag 0."

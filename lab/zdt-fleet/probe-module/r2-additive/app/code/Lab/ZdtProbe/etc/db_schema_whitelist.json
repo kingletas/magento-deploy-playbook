@@ -1,0 +1,12 @@
+{
+    "lab_zdt_probe": {
+        "column": {
+            "probe_id": true,
+            "probe_value": true,
+            "probe_extra": true
+        },
+        "constraint": {
+            "PRIMARY": true
+        }
+    }
+}

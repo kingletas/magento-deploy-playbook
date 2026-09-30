@@ -136,11 +136,13 @@ chmod 600 "$primary_cnf" "$replica_cnf"
 # valid literal rather than breaking out of it.
 sql_escape() { printf '%s' "$1" | sed "s/'/''/g"; }
 
+# The SQL goes on stdin, never -e: two statements carry the replication
+# password, and an argument is visible in ps for as long as the call runs.
 primary_sql() {
-    "$MYSQL_BIN" --defaults-extra-file="$primary_cnf" --batch --skip-column-names -e "$1"
+    printf '%s\n' "$1" | "$MYSQL_BIN" --defaults-extra-file="$primary_cnf" --batch --skip-column-names
 }
 replica_sql() {
-    "$MYSQL_BIN" --defaults-extra-file="$replica_cnf" --batch --skip-column-names -e "$1"
+    printf '%s\n' "$1" | "$MYSQL_BIN" --defaults-extra-file="$replica_cnf" --batch --skip-column-names
 }
 replica_sql_vertical() {
     "$MYSQL_BIN" --defaults-extra-file="$replica_cnf" --batch -e "$1\G"

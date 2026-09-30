@@ -807,8 +807,12 @@ lb_put_back() {
             && $(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url/health_check.php" 2>/dev/null) == 200 ]]; then
             say 1 "RUN   control: $ZDT_LB_DRAIN $LB_OUT ready (it answered 200 after ${i}s)"
             # shellcheck disable=SC2086  # as in lb_take_out
-            $ZDT_LB_DRAIN "$LB_OUT" ready && LB_OUT=""
-            lb_downs "$TRAFFIC_LOG.lb-drain-end" || true
+            if $ZDT_LB_DRAIN "$LB_OUT" ready; then
+                LB_OUT=""
+                lb_downs "$TRAFFIC_LOG.lb-drain-end" || true
+            else
+                say 2 "zdt-arm/$ARM_NAME: $LB_OUT answered 200 but could not be put back in the load balancer; the exit trap tries again"
+            fi
             return 0
         fi
         sleep 2

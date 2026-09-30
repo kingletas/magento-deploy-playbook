@@ -27,6 +27,7 @@ them and keep the transcript.
 - [Running the framework proofs on a production store](#running-the-framework-proofs-on-a-production-store)
 - [The fleet checks: `bin/zdt-fleet`](#the-fleet-checks-binzdt-fleet)
 - [The fleet arms: `bin/zdt-arm`](#the-fleet-arms-binzdt-arm)
+- [The results document](#the-results-document)
 
 ## Running the proofs
 
@@ -470,9 +471,11 @@ bin/zdt-fleet replica-check
 {"timestamp": "2026-09-26T18:00:00Z", "binlog_format": "ROW", "catalogue_size": 1984, "binlog_bytes": 490, "seconds_behind": 0, "last_sql_errno": 0, "last_io_errno": 0, "last_sql_error": "", "last_io_error": ""}
 ```
 
-A later arm takes this before and after a migration; the difference in
-`binlog_bytes` is what the upgrade wrote, and `catalogue_size` is what a
-checksum pair is judged against.
+A later arm takes this before its first phase and again after each phase, and
+`catalogue_size` is what a checksum pair is judged against. `binlog_bytes`
+counts everything binlogged between two calls — the migration, the snapshot
+restore that separates two phases, and the traffic's own writes — so the
+difference between two calls is not one upgrade's binary log.
 
 ### `bin/zdt-fleet table-checksums TABLE…`
 
@@ -676,7 +679,18 @@ The replica connection (`ZDT_PRIMARY_*` / `ZDT_REPLICA_*`) belongs to
 
 ### What the run leaves behind
 
-The transcript (every `PLAN`/`RUN` line, secret-free), `traffic-<phase>.log`
+`transcript.log` — the arm writes it itself: the plan the run was confirmed
+against, every `RUN` line as it happens, the banners, the `PASS`/`FAIL`
+verdicts and the printed restore commands, secret-free (every line that could
+carry a secret goes through `redact()` first, and the `-n` plan leaves no file
+at all) — `platform.json` (the facts the results document has to open with:
+Magento edition and version, PHP, database server and version, replication
+mode, the number of web servers; a fact the lab does not answer is `null`
+with the reason in `not_recorded`, never a guess — including the edition,
+which is named only when the release's `composer.json` lists exactly one
+edition package: with two, the run cannot say which platform the lab has, so
+`edition_packages` keeps the raw list and the reason says the list was
+ambiguous)`, `traffic-<phase>.log`
 — one per phase, so no verdict ever counts another phase's lines; each line
 one request: epoch second, target, request type, status, guard flag —
 `replica-before.json` and `replica-after.json` from the gate, `evidence-<leg>/` (arm 3: the saved failure bodies),
@@ -712,4 +726,27 @@ about — runs nothing, a failed snapshot, a failed release placement, a failed
 it report success, the backup precedes every edit and survives the
 `env.php` symlink, the printed restores are right, the rate cap and the
 duration stop hold, a 404 on one route is not read as a refusing target, and
-the transcript never carries a password.
+the transcript never carries a password. The recording gaps have their own
+tests too: a run leaves `transcript.log` holding the `RUN` lines, the
+verdicts and the printed restore commands, a plan (`-n`) and a declined plan
+leave none, a failed run's transcript keeps the `FAIL` and the step that
+died, `platform.json` carries the lab's answers with `null` and a reason when
+one is unreadable (and `null` with an ambiguity reason when the release names
+two edition packages), and the platform probe reaches no `ssh` argv with the
+password.
+
+## The results document
+
+What a run is for is a document that can be read without the run: issue #5's
+results document, one per run, at `docs/results/<date>-<platform>.md`
+([`docs/results/_template.md`](results/_template.md) is the shape). It opens
+with the platform — the facts `platform.json` records — and carries each of
+the five falsifiers as PASS or FAIL with the one output line that decides it.
+
+**The template is not a result.** It is committed so nothing in the document
+has to be invented while a run is fresh; every placeholder is filled from the
+run's own files under `ZDT_RUN_DIR`, and a falsifier with nothing behind it
+reads `NOT RUN — <condition missed>`. A run that missed a condition of
+validity is reported as not run, naming the condition, rather than dropped or
+filled in from a run that met it. Raw output is attached or linked unedited:
+a summary that does not match the transcript is the summary that is wrong.

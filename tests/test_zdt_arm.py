@@ -10,6 +10,7 @@ and, for refused runs, that it did nothing at all.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -102,6 +103,16 @@ if [[ -n ${FAKE_MAINT_EVENTS:-} ]]; then
             printf '%s|%s|%s|%s\\n' "$(date +%s.%N)" "$host" "$kw" "$maint_label" >> "$FAKE_MAINT_EVENTS"
         fi
     done
+fi
+if [[ ${body:-} == *PHP_VERSION* ]]; then
+    # The platform probe, answered by the fake: what a lab node would reply.
+    # Empty by default, so a test can also ask what the arm records when the
+    # lab will not answer at all.
+    printf 'php_version=%s\n' "${FAKE_PLATFORM_PHP:-}"
+    printf 'edition_packages=%s\n' "${FAKE_PLATFORM_PACKAGES:-}"
+    printf 'magento_cli=%s\n' "${FAKE_PLATFORM_MAGENTO:-}"
+    printf 'db_server=%s\n' "${FAKE_PLATFORM_DB:-}"
+    exit 0
 fi
 if [[ -n ${FAKE_SSH_RUN:-} ]]; then
     # Execute mode: run the received command/body locally, each host rooted
@@ -303,6 +314,12 @@ class ZdtArmTest(unittest.TestCase):
                 "ZDT_RATE": "1",
                 "ZDT_TRAFFIC_TAIL": "0",
                 "ZDT_RUN_DIR": str(self.dir / "run"),
+                # The platform probe's answer, as a lab node would give it
+                # (the fake ssh replies from these; see FAKE_SSH).
+                "FAKE_PLATFORM_PHP": "8.3.14",
+                "FAKE_PLATFORM_PACKAGES": "magento/product-community-edition",
+                "FAKE_PLATFORM_MAGENTO": "Magento CLI 2.4.8",
+                "FAKE_PLATFORM_DB": "10.11.14-MariaDB",
             }
         )
         # A live replica for the gate, and matching checksums for falsifier 1.
@@ -1453,6 +1470,193 @@ class ZdtArmTest(unittest.TestCase):
         self.assertIn("101 cart 1/1", lines)
         # ...the 404 is a fact for the log, not a refusal.
         self.assertIn("100 cart 0/1", lines)
+
+    # --------------------------------------------------- recording gaps (issue #5)
+    #
+    # Teresa asked for these two gaps closed before the lab run (2026-09-28):
+    # the arms wrote no transcript — the docs claimed one — and no arm recorded
+    # the platform facts the results document has to open with. Both are facts
+    # of a real run, so what the tests can hold is the machinery: the file is
+    # written where the operator says, it is secret-free, a failed fact read
+    # ends as null with a reason rather than a guessed value, and a plan keeps
+    # nothing.
+
+    def test_run_writes_a_transcript_with_the_commands_and_never_the_password(
+        self,
+    ) -> None:
+        result = self.run_arm("arm1", "-y")
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        log = self.dir / "run" / "transcript.log"
+        self.assertTrue(log.is_file(), "the run must leave a transcript behind")
+        text = log.read_text()
+        # What the docs promised: every RUN line and the verdicts are in the
+        # file the run itself leaves, not only on a terminal.
+        self.assertIn("RUN   ", text)
+        # The plan the run was confirmed against is part of the record too,
+        # not just what happened after it: "every PLAN/RUN line".
+        self.assertIn("PLAN  ", text)
+        self.assertIn("== phase: shared-prefix ==", text)
+        # The most important restore of all — the database, from the snapshot
+        # the run took — is in the file, not only on the terminal. Asserted as
+        # a whole line: snapshot_gate's own "Restore it with: … restore-snapshot"
+        # line is already in the transcript, so a bare substring would pass
+        # even if print_restores' line were missing (one direction isn't a test).
+        self.assertIn("restore-snapshot ", text)
+        self.assertRegex(text, r"(?m)^  bin/zdt-arm restore-snapshot .* -y$")
+        self.assertIn("PASS  falsifier 1", text)
+        self.assertIn("PASS  falsifier 5", text)
+        self.assertIn("summary: 4 pass, 0 fail", text)
+        # The transcript is a file the operator may paste: no secret lands in it.
+        self.assertNotIn("Sup3rSecretPw", text)
+        self.assertIn("***", text)
+
+    def test_transcript_is_the_run_and_a_plan_writes_nothing(self) -> None:
+        # -n reaches no server and must leave no run directory: a plan is not
+        # a run, and a transcript for one would be a record of nothing.
+        result = self.run_arm("arm1", "-n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(
+            (self.dir / "run" / "transcript.log").exists(),
+            "-n must not leave a transcript",
+        )
+
+    def test_declined_plan_writes_no_transcript(self) -> None:
+        result = self.run_arm("arm1", stdin="n\n")
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse((self.dir / "run" / "transcript.log").exists())
+
+    def test_transcript_keeps_the_gate_output_a_failed_check_printed(self) -> None:
+        # The gate's exit 2 ("the check never happened") dies right after
+        # printing the fleet's own explanation, and that output is the only
+        # thing that says WHY the run stopped — a wrong password, an
+        # unreachable host. It has to be in the transcript, not only on the
+        # terminal: it is exactly the text the results document quotes when a
+        # run is reported as not run.
+        count = self.dir / "fleet-count"
+        wrapper = self.dir / "fleet-wrapper"
+        wrapper.write_text(
+            "#!/usr/bin/env bash\n"
+            "n=$(cat \"$FLEET_COUNT\" 2>/dev/null || echo 0); n=$((n + 1))\n"
+            "printf '%s\\n' \"$n\" > \"$FLEET_COUNT\"\n"
+            # The second replica-check is replica_after's, after the gate.
+            "[[ $n -ge 2 ]] && { printf 'zdt-fleet: the replica connection is not configured\\n' >&2; exit 2; }\n"
+            f"exec {ROOT / 'bin' / 'zdt-fleet'} \"$@\"\n"
+        )
+        wrapper.chmod(0o755)
+        result = self.run_arm(
+            "arm1", "-y", ZDT_FLEET_BIN=str(wrapper), FLEET_COUNT=str(count)
+        )
+        self.assertEqual(result.returncode, 2)
+        text = (self.dir / "run" / "transcript.log").read_text()
+        self.assertIn("the replica connection is not configured", text)
+        self.assertIn("could not run after the migration", text)
+
+    def test_transcript_keeps_the_lines_a_failed_run_printed(self) -> None:
+        # The runs that matter most are the ones that fail: the transcript has
+        # to hold the FAIL and the step that died, not just the happy path.
+        result = self.run_arm(
+            "arm1",
+            "-y",
+            ZDT_RATE="7",
+            FAKE_CURL_DOWN="node2.example",
+            FAKE_LB_TAKEN_OUT="node2",
+        )
+        self.assertEqual(result.returncode, 1)
+        text = (self.dir / "run" / "transcript.log").read_text()
+        self.assertIn("FAIL  falsifier 5", text)
+        self.assertIn("RUN   ", text)
+
+    def test_platform_facts_are_recorded_from_the_lab(self) -> None:
+        result = self.run_arm(
+            "arm1",
+            "-y",
+            FAKE_PLATFORM_PHP="8.3.14",
+            FAKE_PLATFORM_MAGENTO="Magento CLI 2.4.8",
+            FAKE_PLATFORM_DB="10.11.14-MariaDB",
+            FAKE_PLATFORM_PACKAGES="mage-os/product-community-edition",
+        )
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        facts = json.loads((self.dir / "run" / "platform.json").read_text())
+        self.assertEqual(facts["php_version"], "8.3.14")
+        self.assertEqual(facts["magento_version"], "2.4.8")
+        self.assertEqual(facts["magento_edition"], "Mage-OS")
+        self.assertEqual(facts["db_server"], "10.11.14-MariaDB")
+        # The replication mode comes from the gate's own fact, already on disk.
+        self.assertEqual(facts["replication_mode"], "ROW")
+        self.assertEqual(facts["web_node_count"], 3)
+        self.assertEqual(facts["not_recorded"], None)
+
+    def test_platform_facts_identify_open_source(self) -> None:
+        result = self.run_arm(
+            "arm1",
+            "-y",
+            FAKE_PLATFORM_MAGENTO="Magento CLI 2.4.8",
+            FAKE_PLATFORM_PACKAGES="magento/product-community-edition",
+        )
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        facts = json.loads((self.dir / "run" / "platform.json").read_text())
+        self.assertEqual(facts["magento_edition"], "Open Source")
+
+    def test_platform_facts_identify_commerce(self) -> None:
+        # The Commerce package on its own names the edition too: a licence the
+        # lab holds is still a platform the document has to state.
+        result = self.run_arm(
+            "arm1",
+            "-y",
+            FAKE_PLATFORM_MAGENTO="Magento CLI 2.4.8",
+            FAKE_PLATFORM_PACKAGES="magento/product-enterprise-edition",
+        )
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        facts = json.loads((self.dir / "run" / "platform.json").read_text())
+        self.assertEqual(facts["magento_edition"], "Commerce")
+        self.assertEqual(facts["not_recorded"], None)
+
+    def test_two_edition_packages_are_null_not_a_guessed_label(self) -> None:
+        # A composer.json naming both Community and Commerce says nothing about
+        # which platform the lab runs. Naming one of them would put a platform
+        # in the results document that the run cannot support, so the fact is
+        # null, the raw list is kept, and the reason says it was ambiguous
+        # rather than "did not name a known edition package".
+        both = "magento/product-community-edition,magento/product-enterprise-edition"
+        result = self.run_arm("arm1", "-y", FAKE_PLATFORM_PACKAGES=both)
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        facts = json.loads((self.dir / "run" / "platform.json").read_text())
+        self.assertIsNone(facts["magento_edition"])
+        self.assertEqual(facts["edition_packages"], both)
+        self.assertIn("more than one edition package", facts["not_recorded"])
+        self.assertIn(both, facts["not_recorded"])
+        self.assertIn("WARN  platform", (self.dir / "run" / "transcript.log").read_text())
+
+    def test_unreadable_platform_facts_are_null_with_a_reason(self) -> None:
+        # A fact the lab will not answer is recorded as null and named in
+        # not_recorded — never guessed. The run goes on: a missing header line
+        # is not a reason to lose the run that took an hour.
+        result = self.run_arm(
+            "arm1",
+            "-y",
+            FAKE_PLATFORM_PHP="",
+            FAKE_PLATFORM_MAGENTO="",
+            FAKE_PLATFORM_DB="",
+            FAKE_PLATFORM_PACKAGES="",
+        )
+        self.assertEqual(result.returncode, 0, f"{result.stdout}{result.stderr}")
+        facts = json.loads((self.dir / "run" / "platform.json").read_text())
+        self.assertIsNone(facts["php_version"])
+        self.assertIsNone(facts["magento_edition"])
+        self.assertIsNone(facts["db_server"])
+        self.assertIn("PHP_VERSION", facts["not_recorded"])
+        self.assertIn("WARN  platform", (self.dir / "run" / "transcript.log").read_text())
+
+    def test_platform_probe_reaches_no_argv_with_the_password(self) -> None:
+        # The probe reads the DB version with the password; it travels inside
+        # the script body over stdin, as the snapshot's does, never in argv.
+        self.run_arm("arm1", "-y", FAKE_PLATFORM_DB="10.11.14-MariaDB")
+        for line in self.calls().splitlines():
+            if line.startswith("SSH|"):
+                argv_field = "|".join(line.split("|")[0:3])
+                self.assertNotIn("Sup3rSecretPw", argv_field)
+        text = (self.dir / "run" / "transcript.log").read_text()
+        self.assertNotIn("Sup3rSecretPw", text)
 
     def test_arm4_lists_and_help(self) -> None:
         listing = self.run_arm("list")

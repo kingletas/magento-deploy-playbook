@@ -7,14 +7,6 @@ Entries say what changed for somebody using this, not what the diff did.
 First public release. Everything below is what it contains rather than what
 changed, because there's nothing before it.
 
-### Added
-
-- A lab fleet for the zero-downtime arms in `lab/zdt-fleet`: three real Magento Open Source 2.4.8-p2 web nodes reached over ssh, HAProxy with a health check that looks the nodes' names up again while it runs, so a node recreated on a new address is still the one its name says, a MariaDB primary with a replica following it by GTID, OpenSearch, Valkey, and a control container the arms run from. Every container has a CPU and memory limit, and only the load balancer publishes a port, on `127.0.0.1`. Its scripts build releases without a database, install the store, seed the replica and prove it keeps up, and put the first release on every node.
-- The zero-downtime arms reload PHP-FPM on every node after they edit or restore `env.php`, with the command set in `ZDT_FPM_RELOAD`, which every arm now requires. On a host whose OPcache never rechecks a file, as a zero-downtime host is set up, an edited `env.php` otherwise never reaches a request, and the arm would measure the settings it started with. The lab fleet runs PHP-FPM as `deploy` and ships the command as `zdtfleet-fpm-reload`.
-- The arms' traffic runs until a minute after each migration step ends (`ZDT_TRAFFIC_TAIL`, default 60 seconds), not only for `ZDT_DURATION`, so a migration slower than the window is still watched through the change and after it. An arm that stops early stops its traffic at once.
-- The arms judge falsifier 5 by HAProxy's own count of the times it took each node out of rotation during a phase, read from its stats page before and after the traffic, not by one health check of their own: HAProxy's fall setting is what takes a node out, and a single slow probe is not a node leaving. Every arm now requires `ZDT_LB_STATS_URL`, whose server names must be the names in `ZDT_WEB_HOSTS`, and prints each phase's nodes taken out on an `lb:` line. The lab's HAProxy serves the page on port 8404, on the fleet network only.
-- Arms 1 to 3 can take the new node out of the load balancer while it migrates: with `ZDT_LB_DRAIN` set to a command that sets a node's state, the node leaves once traffic starts and before its release lands, and goes back once it answers 200 again after the migration. The exit trap puts it back on every other path. The lab ships the command as `lab/zdt-fleet/bin/lb-state`, which uses HAProxy's runtime API on the fleet network.
-
 ### Fixed
 
 - The zero-downtime arms run `setup:upgrade --keep-generated`, as the deploy does. A plain `setup:upgrade` in production mode deletes the new release's compiled code and deployed static files, so the new node served 500s and stalled while it rebuilt them on live requests, and falsifier 5 measured the arm's command rather than the deploy.
@@ -154,6 +146,35 @@ changed, because there's nothing before it.
 
 ### Added
 
+- A lab fleet for the zero-downtime arms in `lab/zdt-fleet`: three real Magento Open Source 2.4.8-p2 web nodes reached over ssh, HAProxy with a health check that looks the nodes' names up again while it runs, so a node recreated on a new address is still the one its name says, a MariaDB primary with a replica following it by GTID, OpenSearch, Valkey, and a control container the arms run from. Every container has a CPU and memory limit, and only the load balancer publishes a port, on `127.0.0.1`. Its scripts build releases without a database, install the store, seed the replica and prove it keeps up, and put the first release on every node.
+- The zero-downtime arms reload PHP-FPM on every node after they edit or restore `env.php`, with the command set in `ZDT_FPM_RELOAD`, which every arm now requires. On a host whose OPcache never rechecks a file, as a zero-downtime host is set up, an edited `env.php` otherwise never reaches a request, and the arm would measure the settings it started with. The lab fleet runs PHP-FPM as `deploy` and ships the command as `zdtfleet-fpm-reload`.
+- The arms' traffic runs until a minute after each migration step ends (`ZDT_TRAFFIC_TAIL`, default 60 seconds), not only for `ZDT_DURATION`, so a migration slower than the window is still watched through the change and after it. An arm that stops early stops its traffic at once.
+- The arms judge falsifier 5 by HAProxy's own count of the times it took each node out of rotation during a phase, read from its stats page before and after the traffic, not by one health check of their own: HAProxy's fall setting is what takes a node out, and a single slow probe is not a node leaving. Every arm now requires `ZDT_LB_STATS_URL`, whose server names must be the names in `ZDT_WEB_HOSTS`, and prints each phase's nodes taken out on an `lb:` line. The lab's HAProxy serves the page on port 8404, on the fleet network only.
+- Arms 1 to 3 can take the new node out of the load balancer while it migrates: with `ZDT_LB_DRAIN` set to a command that sets a node's state, the node leaves once traffic starts and before its release lands, and goes back once it answers 200 again after the migration. The exit trap puts it back on every other path. The lab ships the command as `lab/zdt-fleet/bin/lb-state`, which uses HAProxy's runtime API on the fleet network.
+- `docs/results/_template.md` is the shape of the results document issue #5
+  asks for: the platform facts the run records as its header, the three
+  conditions a run has to meet to count, and one section per falsifier, each
+  opening at `NOT RUN — <condition missed>`. It is committed so nothing in the
+  document has to be invented while a run is fresh, and it says of itself that
+  it is not a result. The filled `docs/results/<date>-<platform>.md` follows a
+  real run, from that run's own files under `ZDT_RUN_DIR`.
+- The fleet arms record what a run has to carry into a results document.
+  Each arm now writes `transcript.log` into its run directory — the plan it
+  was confirmed against, every `RUN` line as it happens, the banners, the
+  `PASS`/`FAIL` verdicts and the printed restore commands — secret-free, and
+  only for a run (a `-n` plan leaves no file). Until now those lines went to
+  stderr and existed in a file only if the operator redirected them, while
+  `docs/zero-downtime-proofs.md` described a transcript the code did not
+  write. Each arm also records `platform.json`: Magento edition and version,
+  PHP, the database server and its version, the replication mode and the
+  number of web servers — the facts issue #5's results document has to open
+  with, which nothing recorded before, so its header came from memory. A fact
+  the lab does not answer is `null`, with the reason in `not_recorded` and a
+  `WARN` in the transcript: the run goes on and the document says what could
+  not be read rather than a guess. An edition is named only when the release's
+  `composer.json` lists exactly one edition package — with two, the run cannot
+  say which platform the lab has, so the fact stays `null` and the raw list
+  and the reason are recorded instead of one of the two labels.
 - `bin/zdt-arm arm4`, the outage arm of issue #5: the breaking release
   (`ZDT_RELEASE_BREAKING` / `ZDT_LABEL_BREAKING`) rolls out twice — once
   with no maintenance mode, old servers serving while the migration runs,

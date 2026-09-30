@@ -930,10 +930,11 @@ how people find out the hard way:
   seconds rolled out with the old release still serving. Across releases that
   only added to the schema, the old release refused nothing: every refusal was
   the node carrying the new code answering *Please upgrade your database* until
-  `setup:upgrade` finished. Taken out of the load balancer until it served
-  again, that node refused none of 310 requests. A release that renames or
-  drops a column still breaks the old release while it serves, so it goes out
-  in two steps: add the new column, then drop the old one a release later. This
+  `setup:upgrade` finished. With that node taken out of the load balancer until
+  it served again, none of 310 requests through the load balancer was refused.
+  The renamed column broke the old release while it served. The usual answer,
+  not measured here, is to ship such a change in two steps: add the new column,
+  then drop the old one a release later. This
   playbook neither rolls out behind a serving old release nor takes a node out
   of the load balancer: it takes the window, and every host flips at once. The
   runs, and what they could not test, are in

@@ -229,6 +229,8 @@ make audit-verify environment=staging
 make evidence environment=staging release=20260915_1789512159_staging
 ```
 
+**The log also times the deploy.** Each phase writes a record when it starts and another when it ends, and `maintenance.disabled` is written once every web host is out of maintenance, so how long the build, the upload, the cutover and `setup:upgrade` took, and how long the store was down, are read from the log itself: `bin/audit-log phases --path FILE --release ID`, or the same table in a release's evidence. [The ledger page](docs/ledger.md#how-long-each-phase-took) says what the numbers are and are not.
+
 A release's evidence bundle holds its records, its place in the chain, a summary
 and `SHA256SUMS`. The chain shows tampering; it cannot prevent it, so set
 `forward` to something that ships each record somewhere nobody here can rewrite.

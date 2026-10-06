@@ -9,6 +9,7 @@ The settings that turn it on are in the [README](../README.md#controls-approvals
 - [The envelope every record carries](#the-envelope-every-record-carries)
 - [Who did it](#who-did-it)
 - [The events, and what each one adds](#the-events-and-what-each-one-adds)
+- [How long each phase took](#how-long-each-phase-took)
 - [A record, whole](#a-record-whole)
 - [What a reader may assume](#what-a-reader-may-assume)
 - [Adding a field](#adding-a-field)
@@ -21,7 +22,7 @@ Every line has these nine keys, whatever the event. The first five are the tool'
 |---|---|---|
 | `schema` | integer | The record format's version. `1` today |
 | `seq` | integer | Its position in the file, from 1. A line whose `seq` is not its line number breaks the chain |
-| `recorded_at` | string | When the record was written, UTC, `YYYY-MM-DDTHH:MM:SSZ`. **This is when the log was written, not when the step began** |
+| `recorded_at` | string | When the record was written, UTC, `YYYY-MM-DDTHH:MM:SSZ`. **This is when the log was written, not when the step began**, which is why a phase has a record at its start and another at its end. See [How long each phase took](#how-long-each-phase-took) |
 | `prev_hash` | string | The previous record's `hash`. Sixty-four zeros on the first record |
 | `hash` | string | SHA-256 of this record's canonical JSON with `hash` left out: keys sorted, no spaces, UTF-8 |
 | `event` | string | Which step this is. The table below lists them |
@@ -46,18 +47,24 @@ Every line has these nine keys, whatever the event. The first five are the tool'
 
 ## The events, and what each one adds
 
-Seventeen event names, in the order a deploy writes them, then the two only `make rollback` writes. **One deploy writes at most eleven**, because a backup either succeeds or fails, a release either passes its health check or is rolled back, and a deploy that stops writes fewer. Each row's fields are in addition to the envelope.
+The event names, in the order a deploy writes them, then the one only `make rollback` writes. **No deploy writes all of them**, because a backup either succeeds or fails, a release either passes its health check or is rolled back, a release with no database work takes no window, and a deploy that stops writes fewer. Each row's fields are in addition to the envelope.
 
 | Event | Written when | Extra fields |
 |---|---|---|
 | `deploy.started` | the deploy begins, once the release id exists | `branch`, `reused_release`, `goes_live`, `playbook_commit` |
 | `approval.verified` | a signed tag on the built commit checks out, and `approval.required` is on | `commit`, `tag`, `signer`, `signing_key` |
+| `build.started` | the build play begins on the builder, before the checkout is synced | none |
 | `build.succeeded` | the release archive is built and checksummed | `commit`, `artefact_sha256`, `builder` |
+| `upload.started` | the web hosts begin receiving the archive | none |
+| `upload.succeeded` | every web host that began the deploy has the release unpacked | none |
 | `cutover.started` | the hosts begin switching over | `maintenance_window`, `artefact_sha256`, `magento_host` |
 | `forecast.completed` | the `setup:upgrade` rehearsal ran, which it does only when `lock_forecast.enabled` is on and the release has database work | `finished`, `statements`, `blocking`, `narrowing`, `patches` |
 | `backup.succeeded` | the backup command exits 0 and names something | `backup_id`, `reason` |
 | `backup.failed` | the backup command fails, and the deploy stops | `reason`, `error` |
 | `maintenance.enabled` | the maintenance page goes up in the incoming release | none |
+| `upgrade.started` | the cache is flushed on the new release and `setup:upgrade` is about to run | `magento_host` |
+| `upgrade.succeeded` | `setup:upgrade` returned without an error | `magento_host` |
+| `maintenance.disabled` | `maint:disable` has run on every web host, in a deploy that opened a window | none |
 | `upgrade.failed` | `setup:upgrade` failed after the cutover; the site stays in maintenance and the lock is released | `error`, `magento_host`, `backup_id` |
 | `health.failed` | an app host did not answer 2xx on a health check path after the cutover | `hosts`, `paths`, `rollback` |
 | `rollback.refused` | the release being rolled back to does not fit the database, so it was not put back | `from_release`, `to_release`, `reasons`, and `backup_id` after a deploy |
@@ -106,6 +113,46 @@ What each extra field means:
 | `has_mark` | boolean | Whether the release being gone back to recorded the database it went live with. Without one, the guard compares patches by class name, which also lists patches of modules removed long ago |
 | `upgrade_expected` | boolean | What the verification was told to expect, so a reader knows which assertions ran |
 
+## How long each phase took
+
+**A phase is the stretch from the record that opens it to the first record after it that closes it**, so a deploy's timings come from its own records and nothing else:
+
+| Phase | Opens with | Closes with |
+|---|---|---|
+| deploy | `deploy.started` | `deploy.finished`, or `deploy.failed` |
+| build | `build.started` | `build.succeeded` |
+| upload | `upload.started` | `upload.succeeded` |
+| cutover | `cutover.started` | `cutover.succeeded` |
+| setup:upgrade | `upgrade.started` | `upgrade.succeeded`, or `upgrade.failed` |
+| maintenance | `maintenance.enabled` | `maintenance.disabled` |
+
+**The maintenance phase is the store's downtime**: the page goes up before the switch and `maintenance.disabled` is written only once every web host is out of it.
+
+```bash
+bin/audit-log phases --path ~/.local/state/magento-deploy-playbook/staging.audit.jsonl --release 20260915_1789512159_staging
+```
+
+```text
+release 20260915_1789512159_staging
+phase          started               ended                 seconds
+deploy         2026-09-15T02:00:00Z  2026-09-15T02:02:58Z  178
+build          2026-09-15T02:00:02Z  2026-09-15T02:01:37Z  95
+upload         2026-09-15T02:01:38Z  2026-09-15T02:01:58Z  20
+cutover        2026-09-15T02:02:01Z  2026-09-15T02:02:49Z  48
+setup:upgrade  2026-09-15T02:02:07Z  2026-09-15T02:02:38Z  31
+maintenance    2026-09-15T02:02:05Z  2026-09-15T02:02:43Z  38
+```
+
+`--json` prints the same as one object, for another program. `make evidence` puts the table in the release's `summary.md`, with the window's length on its own row.
+
+What the numbers are, and are not:
+
+- **They are when each record was written on the control node, to the second.** A phase shorter than a second reads 0, and the control node's clock is the only clock.
+- **A phase with a start and no end was not closed**: the deploy stopped inside it, or, for maintenance, the store was left in maintenance, as after a failed `setup:upgrade`. The table says `not closed`.
+- **A phase with nothing recorded did not happen in that deploy**, or the deploy ran on a playbook from before these events existed. A release with no database work has no `setup:upgrade` and no maintenance phase.
+- **A release deployed twice is timed by its last run**: the records from its last `deploy.started` on.
+- **One kind of downtime is not in it.** When a failed release cannot be rolled back, the playbook puts the store in maintenance on purpose and records `rollback.refused`, not `maintenance.enabled`. That outage ends when a person ends it, and no record says when.
+
 ## A record, whole
 
 ```json
@@ -123,6 +170,7 @@ jq -r '[.seq, .event, .recorded_at, .actor.git_email] | @tsv' ~/.local/state/mag
 ## What a reader may assume
 
 - **An absent field is not a zero.** `maintenance.enabled` missing means the page never went up; a missing `backup_id` means no backup was taken. Neither means the step failed.
+- **`maintenance.enabled` with no `maintenance.disabled` after it in the same deploy** means that deploy did not take the page down again, or that it ran on a playbook from before `maintenance.disabled` existed. A `cutover.succeeded` after it tells the two apart.
 - **An absent event is not a failure either.** Approval, backup and the warm-up are per-environment settings, so their records are missing wherever they are off.
 - **A deploy is the records between one `deploy.started` and the next.** `deploy.verified` is written by a separate run and can arrive much later, or never.
 - **Order is the file's order.** `recorded_at` has one-second resolution and several records can share a second, so read `seq` rather than sorting by time.

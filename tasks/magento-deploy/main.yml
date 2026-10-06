@@ -215,6 +215,17 @@
              | map(attribute='item') | join(', ') }} could not be reached during "Flush magento cache".
       run_once: true
       when: magento_cache_flushed.results | default([]) | selectattr('unreachable', 'defined') | selectattr('unreachable') | list | length > 0
+
+    # Here rather than beside the command: the block that runs setup:upgrade answers
+    # every failure in it as a database that may be part migrated, which a record
+    # that could not be written is not.
+    - name: "Audit: record the setup:upgrade start"
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: upgrade.started
+        audit_detail:
+          magento_host: "{{ magento_host }}"
+      when: upgrade_needed | bool
   rescue:
     - name: Stop, and say what is left
       ansible.builtin.include_tasks: tasks/magento-deploy/after-switch-failed.yml
@@ -288,6 +299,14 @@
 
 - name: Finish the cutover, and stop cleanly when a step fails
   block:
+    - name: "Audit: record the finished setup:upgrade"
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: upgrade.succeeded
+        audit_detail:
+          magento_host: "{{ magento_host }}"
+      when: upgrade_needed | bool
+
     - name: Flush and enforce cache
       ansible.builtin.command: "php bin/magento {{ item }}"
       args:
@@ -361,6 +380,20 @@
              | selectattr('1.failed', 'defined') | selectattr('1.failed') | map('first') | list }}
       run_once: true
       when: failed_hosts | length > 0
+
+    # Only for a window this deploy opened, and only once every web host is out of
+    # it, so the time from maintenance.enabled to here is the store's downtime.
+    - name: "DORA: record maintenance mode off"
+      ansible.builtin.include_tasks: tasks/dora-event.yml
+      vars:
+        dora_phase: maintenance.disabled
+      when: upgrade_needed | bool
+
+    - name: "Audit: record maintenance mode off"
+      ansible.builtin.include_tasks: tasks/audit/record.yml
+      vars:
+        audit_event: maintenance.disabled
+      when: upgrade_needed | bool
 
     - name: Reset the indexers, which killing PHP leaves marked running
       ansible.builtin.command: "php bin/magento ind:reset"

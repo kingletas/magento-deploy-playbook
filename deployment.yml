@@ -56,6 +56,11 @@
   pre_tasks:
     - name: Build the release, and stop cleanly when it fails
       block:
+        - name: "Audit: record the build start"
+          ansible.builtin.include_tasks: tasks/audit/record.yml
+          vars:
+            audit_event: build.started
+
         - name: Sync the repository checkout
           ansible.builtin.import_tasks: tasks/packaging/git.yml
 
@@ -143,6 +148,21 @@
     - name: Playbook handlers
       ansible.builtin.import_tasks: handlers/main.yml
   tasks:
+    # The two records that time the upload sit in blocks of their own: one that
+    # cannot be written, with audit.required on, stops the deploy like any step
+    # before the switch, with the lock released.
+    - name: Say the upload has started, and stop cleanly when that cannot be recorded
+      block:
+        - name: "Audit: record the upload start"
+          ansible.builtin.include_tasks: tasks/audit/record.yml
+          vars:
+            audit_event: upload.started
+      rescue:
+        - name: Stop, releasing the lock
+          ansible.builtin.include_tasks: tasks/release-lock/stopped-before-live.yml
+          vars:
+            stopped_phase: upload
+
     # No block here: a host that fails its upload drops out of the play, and the
     # fleet check below names it and releases the lock, as for a lost host.
     - name: Upload the release archive to the host
@@ -157,6 +177,18 @@
       ansible.builtin.include_tasks: tasks/fleet/intact.yml
       vars:
         fleet_phase: upload
+
+    - name: Say the upload is done, and stop cleanly when that cannot be recorded
+      block:
+        - name: "Audit: record the upload"
+          ansible.builtin.include_tasks: tasks/audit/record.yml
+          vars:
+            audit_event: upload.succeeded
+      rescue:
+        - name: Stop, releasing the lock
+          ansible.builtin.include_tasks: tasks/release-lock/stopped-before-live.yml
+          vars:
+            stopped_phase: upload
 
 - name: Deploy Magento to the web hosts (includes admin & cron)
   hosts: "web"

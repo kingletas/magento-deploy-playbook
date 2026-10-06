@@ -440,6 +440,10 @@ cmd_test_upgrade_fails() {
     set_marker "rm -f" magento-fake-upgrade-fails
     set_needs_upgrade "rm -f"
     has_event_since "${lines}" upgrade.failed || die "the failed setup:upgrade left no upgrade.failed record."
+    has_event_since "${lines}" upgrade.started || die "the failed setup:upgrade has no upgrade.started record to time it from."
+    for event in upgrade.succeeded maintenance.disabled; do
+        has_event_since "${lines}" "${event}" && die "a deploy whose setup:upgrade failed still recorded ${event}."
+    done
     docker exec mdp-builder sh -c 'ls /tmp/*.lock 2>/dev/null' && die "the failed setup:upgrade left the build lock behind."
     for host in "${APP_CONTAINERS[@]}"; do
         [ "$(storefront_status "${host}")" = 503 ] || die "${host} is not in maintenance after setup:upgrade failed."
@@ -551,7 +555,7 @@ cmd_test_after_switch() {
     record="$(tail -n +"$(( lines + 1 ))" "${AUDIT_LOG_PATH}" | grep '"event": "deploy.failed"')"
     grep -q '"phase": "after-switch"' <<< "${record}" || die "the failed step left no deploy.failed record at after-switch."
     grep -q 'web2' <<< "${record}" || die "the deploy.failed record does not name web2."
-    for event in cutover.succeeded deploy.finished; do
+    for event in maintenance.disabled cutover.succeeded deploy.finished; do
         has_event_since "${lines}" "${event}" && die "a deploy whose maint:disable failed still recorded ${event}."
     done
     docker exec mdp-builder sh -c 'ls /tmp/*.lock 2>/dev/null' && die "the failed step left the build lock behind."
@@ -676,6 +680,45 @@ print(finished[-1]['release'] if finished else '')
 # The whole suite, in shards so CI can run them side by side. This list is the
 # suite: `test` runs every shard, in this order, on one fleet, and CI builds its
 # matrix from `shards`, so a group added here is run everywhere or nowhere.
+# The phases of the last finished deploy, read back from the ledger by the tool a
+# person would use. <window> is yes for a deploy that took a maintenance window.
+phase_times_assert() {  # phase_times_assert <window: yes|no>
+    local release
+    release=$(python3 -c "
+import json, sys
+finished = [r for r in map(json.loads, open(sys.argv[1])) if r.get('event') == 'deploy.finished']
+print(finished[-1]['release'] if finished else '')
+" "${AUDIT_LOG_PATH}")
+    [ -n "${release}" ] || die "no finished deploy in ${AUDIT_LOG_PATH} to read phases from."
+    "${PLAYBOOK_DIR}/bin/audit-log" phases --path "${AUDIT_LOG_PATH}" --release "${release}" --json \
+        | python3 -c '
+import json, sys
+window = sys.argv[1] == "yes"
+spans = {s["phase"]: s for s in json.load(sys.stdin)["phases"]}
+problems = []
+for name in ("deploy", "build", "upload", "cutover"):
+    s = spans[name]
+    if s["started"] is None or s["ended"] is None or s["seconds"] is None or s["seconds"] < 0:
+        problems.append(f"{name} has no start and end in the ledger: {s}")
+for name in ("setup:upgrade", "maintenance"):
+    s = spans[name]
+    if window and (s["ended"] is None or s["seconds"] is None or s["seconds"] < 0):
+        problems.append(f"{name} was not closed in the ledger: {s}")
+    if not window and s["started"] is not None:
+        problems.append(f"{name} is recorded for a deploy that took no window: {s}")
+if window:
+    if spans["maintenance"]["ended_by"] != "maintenance.disabled":
+        problems.append("the maintenance window was not closed by maintenance.disabled")
+    if spans["setup:upgrade"]["seconds"] > spans["maintenance"]["seconds"]:
+        problems.append("setup:upgrade is recorded as longer than the window it ran in")
+    if spans["maintenance"]["seconds"] > spans["cutover"]["seconds"]:
+        problems.append("the maintenance window is recorded as longer than the cutover around it")
+print("\n".join(problems))
+sys.exit(1 if problems else 0)
+' "$1" || die "the ledger does not time the phases of the last deploy."
+    "${PLAYBOOK_DIR}/bin/audit-log" phases --path "${AUDIT_LOG_PATH}" --release "${release}"
+}
+
 SHARDS=(core rollback config-import lost-host admin-lost magento-host handlers)
 
 shard_groups() {
@@ -703,6 +746,9 @@ cmd_test_core() {
     echo ""
     echo "########## verify ##########"
     cmd_verify -e expect_reuse=true || die "the deploy completed but verification failed."
+    echo ""
+    echo "########## the ledger times each phase of a deploy that took no window ##########"
+    phase_times_assert no
     # A third deploy whose status commands report work to do, so the maintenance
     # window and setup:upgrade are exercised as well as skipped.
     echo ""
@@ -714,6 +760,9 @@ cmd_test_core() {
     echo "########## verify the upgrade deploy ##########"
     cmd_verify -e expect_upgrade=true -e expect_reuse=true || die "the upgrade deploy completed but verification failed."
     set_needs_upgrade "rm -f"
+    echo ""
+    echo "########## the ledger times each phase, setup:upgrade and the maintenance window ##########"
+    phase_times_assert yes
     echo ""
     echo "########## audit trail ##########"
     cmd_audit || die "the audit trail is incomplete or has been changed."

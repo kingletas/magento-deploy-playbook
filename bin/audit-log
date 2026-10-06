@@ -7,6 +7,7 @@ or reordering any line breaks every hash after it and `verify` says where.
   bin/audit-log append --path FILE [--forward "CMD ARG..."]   a record on stdin
   bin/audit-log verify --path FILE
   bin/audit-log evidence --path FILE --release ID --out DIR
+  bin/audit-log phases --path FILE --release ID [--json]      how long each phase took
 
 The chain proves the log has not been changed since it was written. It does not
 stop someone with write access from replacing the whole file, so forward each
@@ -27,6 +28,18 @@ from pathlib import Path
 
 GENESIS = "0" * 64
 SCHEMA = 1
+STAMP = "%Y-%m-%dT%H:%M:%SZ"
+
+# A phase is the stretch from the record that opens it to the first record after it that
+# closes it, so a deploy's timings are read from its own records and nothing else.
+PHASES = (
+    ("deploy", "deploy.started", ("deploy.finished", "deploy.failed")),
+    ("build", "build.started", ("build.succeeded",)),
+    ("upload", "upload.started", ("upload.succeeded",)),
+    ("cutover", "cutover.started", ("cutover.succeeded",)),
+    ("setup:upgrade", "upgrade.started", ("upgrade.succeeded", "upgrade.failed")),
+    ("maintenance", "maintenance.enabled", ("maintenance.disabled",)),
+)
 
 
 class ChainError(Exception):
@@ -84,7 +97,7 @@ def append(path: Path, payload: dict, forward: str) -> dict:
         record = {
             "schema": SCHEMA,
             "seq": len(chain) + 1,
-            "recorded_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "recorded_at": dt.datetime.now(dt.timezone.utc).strftime(STAMP),
             "prev_hash": chain[-1]["hash"] if chain else GENESIS,
             **payload,
         }
@@ -100,12 +113,86 @@ def append(path: Path, payload: dict, forward: str) -> dict:
     return record
 
 
-def write_evidence(path: Path, release: str, out: Path) -> Path:
-    """Write the release's records, the chain position and a summary to out."""
+def release_records(path: Path, release: str) -> tuple[list[dict], list[dict]]:
+    """The verified chain, and the records in it that belong to the release."""
     chain = read_chain(path)
     selected = [r for r in chain if r.get("release") == release]
     if not selected:
         raise LookupError(f"no records for release {release!r} in {path}")
+    return chain, selected
+
+
+def last_run(selected: list[dict]) -> list[dict]:
+    """The release's records from its last deploy.started on: a release deployed twice is timed by its last run."""
+    starts = [i for i, r in enumerate(selected) if r.get("event") == "deploy.started"]
+    return selected[starts[-1]:] if starts else selected
+
+
+def seconds_between(start: dict, end: dict) -> int | None:
+    """Whole seconds from one record to another, or None when either time cannot be read."""
+    try:
+        began = dt.datetime.strptime(start["recorded_at"], STAMP).replace(tzinfo=dt.timezone.utc)
+        ended = dt.datetime.strptime(end["recorded_at"], STAMP).replace(tzinfo=dt.timezone.utc)
+    except (KeyError, TypeError, ValueError):
+        return None
+    return int((ended - began).total_seconds())
+
+
+def phase_spans(selected: list[dict]) -> list[dict]:
+    """Each phase of the release's last run: when it started, when it ended, and the seconds between.
+
+    A phase the run never opened has no times. One it opened and never closed has a start and no
+    end, which is what a deploy that stopped there, or a store still in maintenance, looks like.
+    """
+    run = last_run(selected)
+    spans = []
+    for name, opens, closes in PHASES:
+        start = next((r for r in run if r.get("event") == opens), None)
+        end = None
+        if start is not None:
+            end = next((r for r in run if r["seq"] > start["seq"] and r.get("event") in closes), None)
+        spans.append({
+            "phase": name,
+            "started": start.get("recorded_at") if start else None,
+            "ended": end.get("recorded_at") if end else None,
+            "ended_by": end.get("event") if end else None,
+            "seconds": seconds_between(start, end) if start and end else None,
+        })
+    return spans
+
+
+def phases_text(release: str, spans: list[dict]) -> str:
+    """The spans as a table for a terminal."""
+    lines = [f"release {release}", f"{'phase':<15}{'started':<22}{'ended':<22}seconds"]
+    for span in spans:
+        if span["started"] is None:
+            lines.append(f"{span['phase']:<15}not recorded")
+        elif span["ended"] is None:
+            lines.append(f"{span['phase']:<15}{span['started']:<22}{'not closed':<22}-")
+        else:
+            seconds = "?" if span["seconds"] is None else span["seconds"]
+            lines.append(f"{span['phase']:<15}{span['started']:<22}{span['ended']:<22}{seconds}")
+    return "\n".join(lines) + "\n"
+
+
+def maintenance_words(selected: list[dict], spans: list[dict]) -> str:
+    """What the summary says about the maintenance window, from the records alone."""
+    window = next(span for span in spans if span["phase"] == "maintenance")
+    if window["started"] is None:
+        return "no"
+    if window["ended"] is not None:
+        return f"yes, {window['seconds']} s, from {window['started']} to {window['ended']}"
+    run = last_run(selected)
+    if any(r.get("event") in ("cutover.succeeded", "deploy.finished") for r in run):
+        # A deploy that went on to succeed did take the page down; a playbook from before
+        # maintenance.disabled existed just never wrote when.
+        return f"yes, from {window['started']}; its end was not recorded"
+    return f"yes, from {window['started']}, and no end is recorded: the store may still be in maintenance"
+
+
+def write_evidence(path: Path, release: str, out: Path) -> Path:
+    """Write the release's records, the chain position and a summary to out."""
+    chain, selected = release_records(path, release)
     out.mkdir(parents=True, exist_ok=True)
     files = {
         "audit.jsonl": "".join(json.dumps(r, sort_keys=True, ensure_ascii=False) + "\n" for r in selected),
@@ -140,6 +227,7 @@ def summary_markdown(release: str, selected: list[dict]) -> str:
     def first(event: str) -> dict:
         return next((r for r in selected if r.get("event") == event), {})
 
+    spans = phase_spans(selected)
     started = first("deploy.started")
     build = first("build.succeeded")
     approval = first("approval.verified")
@@ -156,17 +244,27 @@ def summary_markdown(release: str, selected: list[dict]) -> str:
         ("Artefact SHA-256", build.get("artefact_sha256", "not recorded")),
         ("Approved by", f"{approval.get('signer')} (tag {approval.get('tag')})" if approval else "no approval recorded"),
         ("Backup", backup.get("backup_id", "none taken")),
-        ("Maintenance window", "yes" if first("maintenance.enabled") else "no"),
+        ("Maintenance window", maintenance_words(selected, spans)),
         ("Finished", finished.get("recorded_at", "not recorded: the deploy did not complete")),
         ("Verified", verified.get("recorded_at", "not recorded: verify-deploy.yml has not passed")),
     ]
     table = "\n".join(f"| {k} | {v} |" for k, v in rows)
     events = "\n".join(f"- `{r['recorded_at']}` {r.get('event')}" for r in selected)
+    phases = "\n".join(
+        f"| {s['phase']} | {s['started'] or 'not recorded'} | "
+        f"{s['ended'] or ('not closed' if s['started'] else '')} | "
+        f"{'' if s['seconds'] is None else s['seconds']} |"
+        for s in spans
+    )
     return (
         f"# Release {release}\n\n"
         "Built from the audit log records for this release. `SHA256SUMS` covers every file here, "
         "and `chain.txt` places each record in the full log.\n\n"
-        f"| | |\n|---|---|\n{table}\n\n## Events\n\n{events}\n"
+        f"| | |\n|---|---|\n{table}\n\n"
+        "## Phases\n\n"
+        "From the release's last run. Times are when each record was written, to the second.\n\n"
+        f"| Phase | Started | Ended | Seconds |\n|---|---|---|---|\n{phases}\n\n"
+        f"## Events\n\n{events}\n"
     )
 
 
@@ -182,6 +280,10 @@ def main(argv: list[str] | None = None) -> int:
     bundle.add_argument("--path", required=True)
     bundle.add_argument("--release", required=True)
     bundle.add_argument("--out", required=True)
+    timings = sub.add_parser("phases", help="how long each phase of one release's last run took")
+    timings.add_argument("--path", required=True)
+    timings.add_argument("--release", required=True)
+    timings.add_argument("--json", action="store_true", help="the spans as JSON, for another program")
     args = parser.parse_args(argv)
     path = Path(args.path).expanduser()
 
@@ -198,6 +300,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{path}: no records")
                 return 0
             print(f"{path}: {len(chain)} records, chain intact, head {chain[-1]['hash']}")
+        elif args.command == "phases":
+            spans = phase_spans(release_records(path, args.release)[1])
+            if args.json:
+                print(json.dumps({"release": args.release, "phases": spans}, sort_keys=True))
+            else:
+                print(phases_text(args.release, spans), end="")
         else:
             out = write_evidence(path, args.release, Path(args.out).expanduser())
             print(f"evidence for {args.release}: {out}")

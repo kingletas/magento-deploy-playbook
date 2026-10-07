@@ -10,6 +10,7 @@ The settings that turn it on are in the [README](../README.md#controls-approvals
 - [Who did it](#who-did-it)
 - [The events, and what each one adds](#the-events-and-what-each-one-adds)
 - [How long each phase took](#how-long-each-phase-took)
+- [Closing a maintenance window by hand](#closing-a-maintenance-window-by-hand)
 - [A record, whole](#a-record-whole)
 - [What a reader may assume](#what-a-reader-may-assume)
 - [Adding a field](#adding-a-field)
@@ -64,7 +65,7 @@ The event names, in the order a deploy writes them, then the one only `make roll
 | `maintenance.enabled` | the maintenance page goes up in the incoming release | none |
 | `upgrade.started` | the cache is flushed on the new release and `setup:upgrade` is about to run | `magento_host` |
 | `upgrade.succeeded` | `setup:upgrade` returned without an error | `magento_host` |
-| `maintenance.disabled` | `maint:disable` has run on every web host, in a deploy that opened a window | none |
+| `maintenance.disabled` | `maint:disable` has run on every web host, in a deploy that opened a window. A person appends it after a deploy that left the store in maintenance: see [Closing a maintenance window by hand](#closing-a-maintenance-window-by-hand) | none from a deploy; `by_hand`, `note` from a person |
 | `upgrade.failed` | `setup:upgrade` failed after the cutover; the site stays in maintenance and the lock is released | `error`, `magento_host`, `backup_id` |
 | `health.failed` | an app host did not answer 2xx on a health check path after the cutover | `hosts`, `paths`, `rollback` |
 | `rollback.refused` | the release being rolled back to does not fit the database, so it was not put back | `from_release`, `to_release`, `reasons`, and `backup_id` after a deploy |
@@ -98,6 +99,8 @@ What each extra field means:
 | `requested`, `ok` | integer | Pages the warm-up asked for, and pages that answered |
 | `percent` | number | `ok` as a percentage of `requested` |
 | `outcome` | string | `success` or `rolled_back` on `deploy.finished`, `passed` on `deploy.verified` |
+| `by_hand` | boolean | True on a record a person appended after the deploy ended. No deploy writes it |
+| `note` | string | A person's own words on a record appended by hand: what happened, and when if the record was written late |
 | `finished` | boolean | Whether the `setup:upgrade` rehearsal ran to the end. When it did not, its other fields are empty |
 | `statements` | integer | Schema statements the rehearsed `setup:upgrade` sent, triggers included |
 | `blocking` | list | Tables a statement would rebuild with a copy that blocks writes, over `lock_forecast.stop_on_rows` |
@@ -153,6 +156,38 @@ What the numbers are, and are not:
 - **A release deployed twice is timed by its last run**: the records from its last `deploy.started` on.
 - **One kind of downtime is not in it.** When a failed release cannot be rolled back, the playbook puts the store in maintenance on purpose and records `rollback.refused`, not `maintenance.enabled`. That outage ends when a person ends it, and no record says when.
 
+## Closing a maintenance window by hand
+
+**A deploy that fails inside `setup:upgrade` leaves the store in maintenance and ends there.** Its last records are `upgrade.failed` and `deploy.failed`, and the window it opened has no end. Someone then fixes the store and runs `bin/magento maintenance:disable` on every web host, and nothing records that: the phase table goes on saying `not closed`, and the release's summary says the store may still be in maintenance, for good.
+
+**Append one record when the page comes down on the last web host**, from the control node, with the failed release's id:
+
+```bash
+release=20260915_1789512159_staging
+printf '{"event":"maintenance.disabled","env_name":"staging","release":"%s","actor":{"git_email":"%s","os_user":"%s","remote_user":"deploy","control_host":"%s"},"by_hand":true,"note":"setup:upgrade failed; fixed, and maintenance:disable run on every web host"}\n' "$release" "$(git config user.email)" "$USER" "$(hostname)" | bin/audit-log append --path ~/.local/state/magento-deploy-playbook/staging.audit.jsonl
+```
+
+Where the environment forwards its records (`audit.forward`), give `append` the same command with `--forward`, so the copy nobody can rewrite has this record too.
+
+The window is then closed, in the table and in the next `make evidence`:
+
+```bash
+bin/audit-log phases --path ~/.local/state/magento-deploy-playbook/staging.audit.jsonl --release 20260915_1789512159_staging
+```
+
+```text
+maintenance    2026-09-15T02:02:05Z  2026-09-15T02:31:40Z  1775
+```
+
+Four things to hold to:
+
+1. **Write it when it happens.** `recorded_at` is set by the tool as the record is appended and cannot be set by hand, which is what the chain is for. A record appended an hour late makes the window an hour too long; say the real time in `note`, which a person reads and the table does not.
+2. **Copy the release id from the failed deploy's own records.** `append` takes any id. A record with a mistyped one closes nothing, and it stays in the chain for good.
+3. **Only once every web host is out of maintenance**, the rule the playbook's own record keeps.
+4. **Keep `by_hand`.** It is how a reader tells a person's record from a deploy's.
+
+**It closes a window a deploy opened, and nothing else.** When a failed release cannot be rolled back, the playbook records `rollback.refused` and no `maintenance.enabled`, so the table has no window for this record to close. Appended there, it still tells a person reading the file when that outage ended.
+
 ## A record, whole
 
 ```json
@@ -172,6 +207,7 @@ jq -r '[.seq, .event, .recorded_at, .actor.git_email] | @tsv' ~/.local/state/mag
 - **An absent field is not a zero.** `maintenance.enabled` missing means the page never went up; a missing `backup_id` means no backup was taken. Neither means the step failed.
 - **`maintenance.enabled` with no `maintenance.disabled` after it in the same deploy** means that deploy did not take the page down again, or that it ran on a playbook from before `maintenance.disabled` existed. A `cutover.succeeded` after it tells the two apart.
 - **An absent event is not a failure either.** Approval, backup and the warm-up are per-environment settings, so their records are missing wherever they are off.
+- **A `maintenance.disabled` with `by_hand` true was appended by a person after the deploy ended.** Its time is when they wrote it, which is the end of the window only if they wrote it as the page came down.
 - **A deploy is the records between one `deploy.started` and the next.** `deploy.verified` is written by a separate run and can arrive much later, or never.
 - **Order is the file's order.** `recorded_at` has one-second resolution and several records can share a second, so read `seq` rather than sorting by time.
 - **A record with no `deploy.started` before it belongs to no deploy.** The warm-up suite writes such records on its own.

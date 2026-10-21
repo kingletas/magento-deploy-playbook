@@ -776,7 +776,7 @@ bin/zdt-arm             the fleet arms: issue #5's arms 1, 2, 3 and 4, run
 bin/zdt-arm.d/          their library and arm scripts
 docker/                 the local fleet's image, fakes and fixtures
 docs/                   from-nothing.md, design.md, ledger.md, compliance.md,
-                        zero-downtime-proofs.md
+                        zero-downtime-proofs.md, command-traps.md
 docs/results/           the fleet runs' results documents: _template.md is the
                         shape, <date>-<platform>.md holds a filled one
 ```

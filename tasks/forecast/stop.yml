@@ -25,8 +25,8 @@
       ({{ lock_forecast.stop_on_rows }}). Nothing has gone live. Split the change,
       or deploy it in a window with stop_on_rows raised for that run.
   vars:
-    # Built here rather than inside msg: an indented continuation line in a
-    # folded scalar keeps its line break, which put a newline in the message.
+    # Built here rather than inside msg, because an indented continuation line
+    # in a folded scalar keeps its line break.
     forecast_blocking_tables: >-
       {{ forecast_blocking | map(attribute='table') | zip(forecast_blocking | map(attribute='rows'))
          | map('join', ' at ') | map('regex_replace', '$', ' rows') | join('; ') }}

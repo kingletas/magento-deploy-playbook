@@ -1,0 +1,118 @@
+---
+###
+# tasks/forecast/stop.yml under tasks/release-lock/stopped-before-live.yml, the
+# way a deploy runs them: what the person reading the failure actually sees.
+#
+#   ansible-playbook -i inventory/test tests/test-stop-messages.yml
+###
+- name: The stop messages
+  hosts: builder
+  connection: local
+  gather_facts: false
+  vars:
+    release_lock_file: /tmp/test_stop_messages.lock
+    stopped_phase: before-switch
+    # The audit record is tested in test-controls.yml; here it would need a log.
+    audit_failure_recorded: true
+    lock_forecast: {required: true, stop_on_rows: 1000000}
+    forecast_failed: false
+    forecast_blocking: []
+    forecast_narrowing: []
+    forecast_accepted_narrowing: []
+    said_live: '(?i)nothing (?:has gone|went) live'
+  tasks:
+    - name: Two blocking tables
+      block:
+        - name: Stop on the forecast, and release the lock
+          block:
+            - name: The forecast's stops
+              ansible.builtin.import_tasks: tasks/forecast/stop.yml
+              vars:
+                forecast_blocking:
+                  - {table: example_order_grid, rows: 4200000}
+                  - {table: example_quote_item, rows: 1900000}
+          rescue:
+            - name: The response that releases the lock
+              ansible.builtin.import_tasks: tasks/release-lock/stopped-before-live.yml
+        - name: Should not reach here
+          ansible.builtin.fail:
+            msg: Two tables over stop_on_rows did not stop the deploy.
+      rescue:
+        - name: Assert the message names each table's rows once, on one line
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search('example_order_grid at 4200000 rows; example_quote_item at 1900000 rows, over')
+              - ansible_failed_result.msg is search('stop_on_rows \(1000000\)\.')
+              - "'\n' not in ansible_failed_result.msg"
+              - ansible_failed_result.msg | regex_findall(said_live) | length == 1
+              - ansible_failed_result.msg is search('The build lock is released\.$')
+            fail_msg: "Got: {{ ansible_failed_result.msg | default('(none)') | to_json }}"
+
+    - name: A rehearsal that did not finish
+      block:
+        - name: Stop on the forecast, and release the lock
+          block:
+            - name: The forecast's stops
+              ansible.builtin.import_tasks: tasks/forecast/stop.yml
+              vars:
+                forecast_failed: true
+          rescue:
+            - name: The response that releases the lock
+              ansible.builtin.import_tasks: tasks/release-lock/stopped-before-live.yml
+        - name: Should not reach here
+          ansible.builtin.fail:
+            msg: A required rehearsal that failed did not stop the deploy.
+      rescue:
+        - name: Assert it says once that nothing went live
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search('rehearsal did not finish')
+              - ansible_failed_result.msg | regex_findall(said_live) | length == 1
+              - ansible_failed_result.msg is search('The build lock is released\.$')
+            fail_msg: "Got: {{ ansible_failed_result.msg | default('(none)') | to_json }}"
+
+    - name: A narrowed column nobody accepted
+      block:
+        - name: Stop on the forecast, and release the lock
+          block:
+            - name: The forecast's stops
+              ansible.builtin.import_tasks: tasks/forecast/stop.yml
+              vars:
+                forecast_narrowing: [example_customer.example_note varchar(255) to varchar(64)]
+          rescue:
+            - name: The response that releases the lock
+              ansible.builtin.import_tasks: tasks/release-lock/stopped-before-live.yml
+        - name: Should not reach here
+          ansible.builtin.fail:
+            msg: An unaccepted narrowing did not stop the deploy.
+      rescue:
+        - name: Assert it says once that nothing went live
+          ansible.builtin.assert:
+            that:
+              - ansible_failed_result.msg is search('example_note varchar\(255\) to varchar\(64\)')
+              - ansible_failed_result.msg | regex_findall(said_live) | length == 1
+              - ansible_failed_result.msg is search('The build lock is released\.$')
+            fail_msg: "Got: {{ ansible_failed_result.msg | default('(none)') | to_json }}"
+
+    # A step that knows nothing of going live still gets the whole sentence.
+    - name: A step that does not say it
+      block:
+        - name: Stop on a plain failure, and release the lock
+          block:
+            - name: A step that fails on its own terms
+              ansible.builtin.fail:
+                msg: The example bundle could not be uploaded.
+          rescue:
+            - name: The response that releases the lock
+              ansible.builtin.import_tasks: tasks/release-lock/stopped-before-live.yml
+        - name: Should not reach here
+          ansible.builtin.fail:
+            msg: A failed step did not stop the deploy.
+      rescue:
+        - name: Assert the response says nothing went live
+          ansible.builtin.assert:
+            that:
+              - >-
+                ansible_failed_result.msg == 'The example bundle could not be uploaded.
+                Nothing went live, and the build lock is released.'
+            fail_msg: "Got: {{ ansible_failed_result.msg | default('(none)') | to_json }}"

@@ -35,3 +35,6 @@
 
 - name: Which file changes move which build fingerprint, against a real git repository
   ansible.builtin.import_playbook: tests/test-build-skip.yml
+
+- name: What a stop before the cutover says, once
+  ansible.builtin.import_playbook: tests/test-stop-messages.yml

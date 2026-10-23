@@ -154,7 +154,7 @@
          {{ forecast.statements | default([]) | map(attribute='class') | community.general.counter | dictsort | map('join', ' ') | join(', ') }}."
       - "Blocking table copies: {{ forecast.statements | default([]) | selectattr('class', 'equalto', 'copy')
           | map(attribute='table') | zip(forecast.statements | default([]) | selectattr('class', 'equalto', 'copy') | map(attribute='rows'))
-          | map('join', ' at ') | join('; ') or 'none' }} rows."
+          | map('join', ' at ') | map('regex_replace', '$', ' rows') | join('; ') or 'none' }}."
       - "Columns narrowed, which can cut data silently: {{ forecast_narrowing | join('; ') or 'none' }}."
       - "{{ forecast.patches_applied | default([]) | length }} data patches and {{ forecast.data_statements | default(0) }} data statements, not costed: they ran on empty tables."
       - "Pending patches name these tables, whose rows production kept to itself, so those patches ran on them empty:
@@ -174,37 +174,5 @@
       narrowing: "{{ forecast_narrowing }}"
       patches: "{{ forecast.patches_applied | default([]) }}"
 
-- name: Stop before the cutover when the rehearsal could not finish
-  ansible.builtin.fail:
-    msg: >-
-      The setup:upgrade rehearsal did not finish, and lock_forecast.required is
-      on, so nothing has gone live. Its output is above.
-  run_once: true
-  when:
-    - forecast_failed | bool
-    - lock_forecast.required | bool
-
-- name: Stop before the cutover on a blocking copy of a large table
-  ansible.builtin.fail:
-    msg: >-
-      setup:upgrade would rebuild these tables with a copy that blocks writes:
-      {{ forecast_blocking | map(attribute='table') | zip(forecast_blocking | map(attribute='rows'))
-         | map('join', ' at ') | join('; ') }} rows, over lock_forecast.stop_on_rows
-      ({{ lock_forecast.stop_on_rows }}). Nothing has gone live. Split the change,
-      or deploy it in a window with stop_on_rows raised for that run.
-  run_once: true
-  when:
-    - lock_forecast.stop_on_rows | int > 0
-    - forecast_blocking | length > 0
-
-- name: Stop before the cutover on a narrowed column nobody accepted
-  ansible.builtin.fail:
-    msg: >-
-      setup:upgrade would narrow these columns, and Magento does not refuse data
-      that does not fit: it cuts it. {{ forecast_narrowing | join('; ') }}.
-      Nothing has gone live. Check the data, then pass
-      forecast_accept_narrowing with exactly these entries, separated by ";".
-  run_once: true
-  when:
-    - forecast_narrowing | length > 0
-    - (forecast_narrowing | sort) != (forecast_accepted_narrowing | sort)
+- name: Stop before the cutover when the forecast says so
+  ansible.builtin.import_tasks: tasks/forecast/stop.yml

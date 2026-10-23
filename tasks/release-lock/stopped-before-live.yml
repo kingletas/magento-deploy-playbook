@@ -40,9 +40,14 @@
   delegate_to: "{{ groups.builder | first }}"
   run_once: true
 
+# A step's message that already says nothing went live gets only the lock's
+# half, so the deploy never says it twice.
 - name: Stop with the step's own message
   ansible.builtin.fail:
-    msg: >-
-      {{ stopped_message }}{{ '' if stopped_message is search('lock is released')
+    msg: "{{ stopped_message }}{{ stopped_suffix }}"
+  vars:
+    stopped_suffix: >-
+      {{ '' if stopped_message is search('lock is released')
+      else ' The build lock is released.' if stopped_message is search('(?i)nothing (has gone|went) live')
       else ' Nothing went live, and the build lock is released.' }}
   run_once: true

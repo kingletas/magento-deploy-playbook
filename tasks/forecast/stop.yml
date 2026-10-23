@@ -1,0 +1,48 @@
+---
+###
+# The three stops the lock forecast can call before the cutover. Each says that
+# nothing has gone live, so the response that releases the lock
+# (release-lock/stopped-before-live.yml) adds only that the lock is released.
+#
+#   forecast_failed, forecast_blocking, forecast_narrowing,
+#   forecast_accepted_narrowing   set by forecast/run.yml.
+###
+- name: Stop before the cutover when the rehearsal could not finish
+  ansible.builtin.fail:
+    msg: >-
+      The setup:upgrade rehearsal did not finish, and lock_forecast.required is
+      on, so nothing has gone live. Its output is above.
+  run_once: true
+  when:
+    - forecast_failed | bool
+    - lock_forecast.required | bool
+
+- name: Stop before the cutover on a blocking copy of a large table
+  ansible.builtin.fail:
+    msg: >-
+      setup:upgrade would rebuild these tables with a copy that blocks writes:
+      {{ forecast_blocking_tables }}, over lock_forecast.stop_on_rows
+      ({{ lock_forecast.stop_on_rows }}). Nothing has gone live. Split the change,
+      or deploy it in a window with stop_on_rows raised for that run.
+  vars:
+    # Built here rather than inside msg: an indented continuation line in a
+    # folded scalar keeps its line break, which put a newline in the message.
+    forecast_blocking_tables: >-
+      {{ forecast_blocking | map(attribute='table') | zip(forecast_blocking | map(attribute='rows'))
+         | map('join', ' at ') | map('regex_replace', '$', ' rows') | join('; ') }}
+  run_once: true
+  when:
+    - lock_forecast.stop_on_rows | int > 0
+    - forecast_blocking | length > 0
+
+- name: Stop before the cutover on a narrowed column nobody accepted
+  ansible.builtin.fail:
+    msg: >-
+      setup:upgrade would narrow these columns, and Magento does not refuse data
+      that does not fit: it cuts it. {{ forecast_narrowing | join('; ') }}.
+      Nothing has gone live. Check the data, then pass
+      forecast_accept_narrowing with exactly these entries, separated by ";".
+  run_once: true
+  when:
+    - forecast_narrowing | length > 0
+    - (forecast_narrowing | sort) != (forecast_accepted_narrowing | sort)

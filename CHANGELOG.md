@@ -9,6 +9,7 @@ changed, because there's nothing before it.
 
 ### Fixed
 
+- A deploy stopped by the lock forecast says once that nothing went live. The step's own message already said it, and the lock's release added it again. A stop on blocking table copies prints on one line, with the rows after every table rather than only the last, and the forecast's summary no longer reads "none rows" when nothing blocks.
 - The zero-downtime arms run `setup:upgrade --keep-generated`, as the deploy does. A plain `setup:upgrade` in production mode deletes the new release's compiled code and deployed static files, so the new node served 500s and stalled while it rebuilt them on live requests, and falsifier 5 measured the arm's command rather than the deploy.
 - A deploy that stops no longer leaves the build lock behind for someone to find. One that stops before anything goes live releases it and records `deploy.failed` with the phase and step. One that stops after the switch in a state a person must see first, a web host lost at the switch or a failed health check left live or in maintenance, keeps it and writes why into it. The lock now says who took it and for which release, and the next deploy is refused with whatever it says. A prune that fails at the end still releases it.
 - A failure after the switch no longer ends the run with the lock held and no

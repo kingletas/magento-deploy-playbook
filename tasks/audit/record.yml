@@ -39,3 +39,35 @@
     audit_failure_recorded: true
   run_once: true
   when: audit_event is search('\\.(failed|refused)$')
+
+# A record that can end a run badly also (re)writes the release's postmortem
+# draft, so the last such record leaves the fullest one. audit-log writes
+# nothing for a run that went well, and a draft that cannot be written never
+# stops the deploy: the records it is built from are already in the log.
+- name: "Audit: draft the postmortem after {{ audit_event }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ audit_tool }}"
+      - postmortem
+      - --path
+      - "{{ audit.path }}"
+      - --release
+      - "{{ release_id }}"
+      - --out
+      - "{{ audit_postmortem_dir }}/{{ release_id }}.md"
+  register: audit_postmortem
+  delegate_to: localhost
+  run_once: true
+  become: false
+  changed_when: audit_postmortem.stdout is search('^postmortem draft')
+  failed_when: false
+  when:
+    - audit_append is succeeded
+    - release_id | default('') | length > 0
+    - audit_event in audit_postmortem_events
+
+- name: "Audit: say where the postmortem draft is"
+  ansible.builtin.debug:
+    msg: "{{ audit_postmortem.stdout if audit_postmortem.rc == 0 else 'The postmortem draft was not written: ' ~ (audit_postmortem.stderr | trim) }}"
+  run_once: true
+  when: audit_postmortem is changed or (audit_postmortem.rc | default(0)) != 0

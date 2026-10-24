@@ -11,6 +11,7 @@ The settings that turn it on are in the [README](../README.md#controls-approvals
 - [The events, and what each one adds](#the-events-and-what-each-one-adds)
 - [How long each phase took](#how-long-each-phase-took)
 - [Closing a maintenance window by hand](#closing-a-maintenance-window-by-hand)
+- [A postmortem draft for a run that went wrong](#a-postmortem-draft-for-a-run-that-went-wrong)
 - [A record, whole](#a-record-whole)
 - [What a reader may assume](#what-a-reader-may-assume)
 - [Adding a field](#adding-a-field)
@@ -187,6 +188,29 @@ Four things to hold to:
 4. **Keep `by_hand`.** It is how a reader tells a person's record from a deploy's.
 
 **It closes a window a deploy opened, and nothing else.** When a failed release cannot be rolled back, the playbook records `rollback.refused` and no `maintenance.enabled`, so the table has no window for this record to close. Appended there, it still tells a person reading the file when that outage ended.
+
+## A postmortem draft for a run that went wrong
+
+**Every deploy that goes wrong leaves a postmortem draft beside its audit log**, in a `postmortems/` folder next to the file `audit.path` names, one Markdown file per release. Nobody has to ask for it: each record that can end a run badly (`backup.failed`, `upgrade.failed`, `health.failed`, `rollback.refused`, `deploy.rolled_back`, `deploy.failed`, and `deploy.finished`) writes it again, so the last one leaves the fullest draft. A run that went well gets none.
+
+The draft holds only what the records hold, from the release's last run:
+
+- who ran it, when it started, the commit, the backup, and how long the store was in maintenance, or that no end is recorded;
+- what went wrong, one sentence per failure record, from that record's own fields;
+- the timeline, one line per record with the fields its event adds;
+- the phase table, as `bin/audit-log phases` prints it.
+
+**Why it happened, what we change, and who follows up are empty headings.** The log cannot know them, so the draft does not guess.
+
+**A draft stays when a later run of the same release succeeds**, because the failure still happened. It describes the run it was written for, as that run's records stood, so read its `Started` row before its maintenance line: a retry that went well writes no new draft and leaves this one as it was.
+
+A draft that cannot be written never stops a deploy, because the records it is built from are already in the log. Write one by hand, for any release, the same way:
+
+```bash
+bin/audit-log postmortem --path ~/.local/state/magento-deploy-playbook/staging.audit.jsonl --release 20260915_1789512159_staging --out postmortem.md
+```
+
+It exits 0 and writes nothing for a release whose last run went well, 1 for a release the log does not hold, and 2 for a log whose chain is broken, which it refuses to summarise.
 
 ## A record, whole
 

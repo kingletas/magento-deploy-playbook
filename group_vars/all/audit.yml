@@ -10,3 +10,17 @@
 audit_tool: >-
   {{ (playbook_dir ~ '/bin/audit-log') if (playbook_dir ~ '/bin/audit-log') is exists
      else (playbook_dir | dirname) ~ '/bin/audit-log' }}
+
+# Where a failed or rolled-back release's postmortem draft goes: a folder
+# beside the environment's audit log, one file per release. The records that
+# may end a run badly each (re)write it; deploy.finished is there for the run
+# whose only sign is outcome rolled_back.
+audit_postmortem_dir: "{{ audit.path | dirname }}/postmortems"
+audit_postmortem_events:
+  - backup.failed
+  - upgrade.failed
+  - health.failed
+  - rollback.refused
+  - deploy.rolled_back
+  - deploy.failed
+  - deploy.finished

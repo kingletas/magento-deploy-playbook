@@ -179,8 +179,8 @@ class Clock(dt.datetime):
         return cls.moment
 
 
-class PhaseTimesTest(unittest.TestCase):
-    """How long each phase took, and how long the store was down, read from the records alone."""
+class TimedLog(unittest.TestCase):
+    """A log in a folder of its own, whose records land seconds apart on purpose."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -204,6 +204,10 @@ class PhaseTimesTest(unittest.TestCase):
             ("maintenance.disabled", 5), ("cutover.succeeded", 6), ("deploy.finished", 9),
         ]:
             self.record(event, after, release)
+
+
+class PhaseTimesTest(TimedLog):
+    """How long each phase took, and how long the store was down, read from the records alone."""
 
     def spans(self, release: str = "r1") -> dict[str, dict]:
         code, out, _ = run_cli("phases", "--path", str(self.path), "--release", release, "--json")
@@ -323,6 +327,116 @@ class PhaseTimesTest(unittest.TestCase):
         code, _, err = run_cli("phases", "--path", str(self.path), "--release", "r1")
         self.assertEqual(code, 2)
         self.assertIn("chain broken", err)
+
+
+class PostmortemTest(TimedLog):
+    """A draft for every run that went wrong, built only from its records; none for a run that went well."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.out = Path(self.tmp.name) / "postmortems" / "r1.md"
+
+    def draft(self, release: str = "r1") -> tuple[int, str, str | None]:
+        code, out, _ = run_cli("postmortem", "--path", str(self.path), "--release", release, "--out", str(self.out))
+        return code, out, self.out.read_text(encoding="utf-8") if self.out.exists() else None
+
+    def section(self, text: str, heading: str) -> str:
+        return text.split(f"## {heading}\n\n", 1)[1].split("\n\n## ", 1)[0]
+
+    def test_a_deploy_that_went_well_gets_no_draft(self) -> None:
+        self.deploy_with_a_window()
+        code, out, text = self.draft()
+        self.assertEqual((code, text), (0, None))
+        self.assertIn("no postmortem", out)
+
+    def test_a_deploy_that_stopped_before_going_live(self) -> None:
+        self.record("deploy.started", 0, actor={"git_email": "deployer@example.invalid", "os_user": "ci",
+                                                "control_host": "runner"})
+        self.record("build.started", 2)
+        self.record("deploy.failed", 40, phase="build", step="Install Composer packages",
+                    error="composer could not resolve a package")
+        code, out, text = self.draft()
+        self.assertEqual(code, 0)
+        self.assertIn(str(self.out), out)
+        self.assertIn("stopped in its build phase at the step 'Install Composer packages': "
+                      "composer could not resolve a package", self.section(text, "What went wrong, as recorded"))
+        self.assertIn("| Maintenance window | no |", text)
+        self.assertIn("deployer@example.invalid as ci from runner", text)
+
+    def test_a_failed_backup(self) -> None:
+        for event, after in [("deploy.started", 0), ("cutover.started", 5)]:
+            self.record(event, after)
+        self.record("backup.failed", 12, reason="window", error="the dump command exited 1")
+        _, _, text = self.draft()
+        self.assertIn("The backup failed, so the deploy stopped: the dump command exited 1", text)
+
+    def test_a_failed_setup_upgrade_says_the_store_may_still_be_down(self) -> None:
+        for event, after in [("deploy.started", 0), ("cutover.started", 5), ("maintenance.enabled", 2),
+                             ("upgrade.started", 1)]:
+            self.record(event, after)
+        self.record("upgrade.failed", 40, magento_host="web1", error="SQLSTATE[42S01]", backup_id="dump-0114")
+        _, _, text = self.draft()
+        self.assertIn("setup:upgrade failed on web1 after the switch, and the store was left in maintenance: "
+                      "SQLSTATE[42S01]", text)
+        self.assertIn("no end is recorded: the store may still be in maintenance", text)
+
+    def test_a_health_check_that_rolled_back(self) -> None:
+        self.deploy_with_a_window()
+        self.record("deploy.started", 600)
+        self.record("cutover.started", 10)
+        self.record("health.failed", 20, hosts=["web1"], paths=["/health_check.php"], rollback="auto")
+        self.record("deploy.rolled_back", 8, from_release="r1", to_release="r0", trigger="health_check",
+                    recovered=True, notes=[])
+        self.record("deploy.finished", 3, outcome="rolled_back")
+        _, _, text = self.draft()
+        wrong = self.section(text, "What went wrong, as recorded")
+        self.assertIn("The health check failed on web1 for /health_check.php; rollback was auto", wrong)
+        self.assertIn("r0 is live again (trigger: health_check), and it passed its health check", wrong)
+        self.assertIn("| Ended | rolled_back |", text)
+        timeline = self.section(text, "Timeline").splitlines()
+        self.assertEqual(len(timeline), 5, "the last run only, one line a record")
+        self.assertTrue(timeline[0].startswith("- `2026-01-14T02:12:58Z` deploy.started"), timeline[0])
+
+    def test_a_refused_rollback(self) -> None:
+        self.record("deploy.started", 0)
+        self.record("health.failed", 30, hosts=["web1", "web2"], paths=["/"], rollback="auto")
+        self.record("rollback.refused", 2, from_release="r1", to_release="r0",
+                    reasons=["r0 does not know the column a patch added"])
+        _, _, text = self.draft()
+        self.assertIn("Going back to r0 was refused: r0 does not know the column a patch added", text)
+
+    def test_an_older_log_whose_only_sign_is_the_outcome(self) -> None:
+        for event in ("deploy.started", "cutover.started"):
+            self.record(event, 5)
+        self.record("deploy.finished", 5, outcome="rolled_back")
+        _, _, text = self.draft()
+        self.assertIn("No failure record; `deploy.finished` says the deploy was rolled back.", text)
+
+    def test_only_the_last_run_counts(self) -> None:
+        self.record("deploy.started", 0)
+        self.record("deploy.failed", 30, phase="upload", error="web2 dropped out")
+        self.deploy_with_a_window()
+        self.assertIsNone(self.draft()[2])
+
+    def test_every_timeline_line_is_a_record_and_the_person_s_sections_are_empty(self) -> None:
+        self.record("deploy.started", 0, branch="main")
+        self.record("deploy.failed", 9, phase="preflight", step="Check the lock", error="locked")
+        _, _, text = self.draft()
+        self.assertEqual(self.section(text, "Timeline").splitlines(), [
+            '- `2026-01-14T02:00:00Z` deploy.started  branch: "main"',
+            '- `2026-01-14T02:00:09Z` deploy.failed  error: "locked", phase: "preflight", step: "Check the lock"',
+        ])
+        self.assertTrue(text.endswith("## Why it happened\n\n## What we change\n\n## Who follows up, and by when\n"))
+
+    def test_a_broken_chain_or_an_unknown_release_writes_nothing(self) -> None:
+        self.record("deploy.started", 0)
+        self.record("deploy.failed", 9, phase="build", error="x")
+        self.assertEqual(run_cli("postmortem", "--path", str(self.path), "--release", "r9",
+                                 "--out", str(self.out))[0], 1)
+        lines = self.path.read_text(encoding="utf-8").splitlines()
+        self.path.write_text(lines[1] + "\n" + lines[0] + "\n", encoding="utf-8")
+        self.assertEqual(self.draft()[0], 2)
+        self.assertFalse(self.out.exists())
 
 
 if __name__ == "__main__":

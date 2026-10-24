@@ -8,6 +8,7 @@ or reordering any line breaks every hash after it and `verify` says where.
   bin/audit-log verify --path FILE
   bin/audit-log evidence --path FILE --release ID --out DIR
   bin/audit-log phases --path FILE --release ID [--json]      how long each phase took
+  bin/audit-log postmortem --path FILE --release ID --out FILE  a draft, when the last run failed
 
 The chain proves the log has not been changed since it was written. It does not
 stop someone with write access from replacing the whole file, so forward each
@@ -268,6 +269,105 @@ def summary_markdown(release: str, selected: list[dict]) -> str:
     )
 
 
+# The records that say a run went wrong. A run with none of them gets no postmortem.
+FAILURES = ("backup.failed", "upgrade.failed", "health.failed", "rollback.refused", "deploy.rolled_back",
+            "deploy.failed")
+# The envelope every record carries; a timeline line shows only what the event adds.
+ENVELOPE = {"schema", "seq", "recorded_at", "prev_hash", "hash", "event", "env_name", "release", "actor"}
+
+
+def what_went_wrong(record: dict) -> str:
+    """One failure record as a sentence, from its own fields only."""
+    event = record.get("event")
+    if event == "backup.failed":
+        return f"The backup failed, so the deploy stopped: {record.get('error', 'no error recorded')}"
+    if event == "upgrade.failed":
+        return (f"setup:upgrade failed on {record.get('magento_host', 'a host not recorded')} after the switch, "
+                f"and the store was left in maintenance: {record.get('error', 'no error recorded')}")
+    if event == "health.failed":
+        return (f"The health check failed on {', '.join(record.get('hosts') or ['hosts not recorded'])} "
+                f"for {', '.join(record.get('paths') or ['paths not recorded'])}; rollback was "
+                f"{record.get('rollback', 'not recorded')}")
+    if event == "rollback.refused":
+        return (f"Going back to {record.get('to_release', 'a release not recorded')} was refused: "
+                + "; ".join(record.get("reasons") or ["no reason recorded"]))
+    if event == "deploy.rolled_back":
+        recovered = {True: "passed", False: "did not pass"}.get(record.get("recovered"), "has no recorded result for")
+        return (f"{record.get('to_release', 'The release before')} is live again "
+                f"(trigger: {record.get('trigger', 'not recorded')}), and it {recovered} its health check")
+    step = f" at the step '{record['step']}'" if record.get("step") else ""
+    return (f"The deploy stopped in its {record.get('phase', 'unrecorded')} phase{step}: "
+            f"{record.get('error', 'no error recorded')}")
+
+
+def postmortem_markdown(release: str, selected: list[dict]) -> str | None:
+    """A postmortem draft of the release's last run, or None when nothing in it went wrong.
+
+    Every line comes from a record. What the records cannot say, the cause and
+    what to change, is left as headings for a person.
+    """
+    run = last_run(selected)
+    failures = [r for r in run if r.get("event") in FAILURES]
+    finished = next((r for r in reversed(run) if r.get("event") == "deploy.finished"), {})
+    if not failures and finished.get("outcome") != "rolled_back":
+        return None
+    spans = phase_spans(selected)
+    started = next((r for r in run if r.get("event") == "deploy.started"), {})
+    build = next((r for r in run if r.get("event") == "build.succeeded"), {})
+    backup = next((r for r in run if r.get("event") == "backup.succeeded"), {})
+    actor = started.get("actor", {})
+    rows = [
+        ("Environment", started.get("env_name", run[0].get("env_name", "not recorded"))),
+        ("Deployed by", (f"{actor.get('git_email', 'unknown')} as {actor.get('os_user', 'unknown')} "
+                         f"from {actor.get('control_host', 'unknown')}")),
+        ("Started", started.get("recorded_at", "not recorded")),
+        ("Last record", run[-1].get("recorded_at", "not recorded")),
+        ("Commit", build.get("commit", "not recorded")),
+        ("Backup", backup.get("backup_id", "none taken")),
+        ("Maintenance window", maintenance_words(selected, spans)),
+        ("Ended", finished.get("outcome", "no deploy.finished: the run stopped before its end")),
+    ]
+    table = "\n".join(f"| {k} | {v} |" for k, v in rows)
+    wrong = "\n".join(f"- `{r['recorded_at']}` {what_went_wrong(r)}" for r in failures) or \
+        "- No failure record; `deploy.finished` says the deploy was rolled back."
+
+    def detail(record: dict) -> str:
+        extra = {k: v for k, v in record.items() if k not in ENVELOPE}
+        return ("  " + ", ".join(f"{k}: {json.dumps(v, ensure_ascii=False)}" for k, v in sorted(extra.items()))) \
+            if extra else ""
+
+    timeline = "\n".join(f"- `{r['recorded_at']}` {r.get('event')}{detail(r)}" for r in run)
+    phases = "\n".join(
+        f"| {s['phase']} | {s['started'] or 'not recorded'} | "
+        f"{s['ended'] or ('not closed' if s['started'] else '')} | "
+        f"{'' if s['seconds'] is None else s['seconds']} |"
+        for s in spans
+    )
+    return (
+        f"# Postmortem draft: release {release}\n\n"
+        "Written by `bin/audit-log postmortem` from the audit log's records for this release's last run, "
+        "and from nothing else. Times are when each record was written, in UTC. The last three sections "
+        "are for a person.\n\n"
+        f"| | |\n|---|---|\n{table}\n\n"
+        f"## What went wrong, as recorded\n\n{wrong}\n\n"
+        f"## Timeline\n\n{timeline}\n\n"
+        f"## Phases\n\n| Phase | Started | Ended | Seconds |\n|---|---|---|---|\n{phases}\n\n"
+        "## Why it happened\n\n"
+        "## What we change\n\n"
+        "## Who follows up, and by when\n"
+    )
+
+
+def write_postmortem(path: Path, release: str, out: Path) -> Path | None:
+    """Write the draft to OUT when the release's last run went wrong; return OUT, or None when it did not."""
+    text = postmortem_markdown(release, release_records(path, release)[1])
+    if text is None:
+        return None
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -284,6 +384,10 @@ def main(argv: list[str] | None = None) -> int:
     timings.add_argument("--path", required=True)
     timings.add_argument("--release", required=True)
     timings.add_argument("--json", action="store_true", help="the spans as JSON, for another program")
+    draft = sub.add_parser("postmortem", help="a postmortem draft of one release's last run, when it failed")
+    draft.add_argument("--path", required=True)
+    draft.add_argument("--release", required=True)
+    draft.add_argument("--out", required=True)
     args = parser.parse_args(argv)
     path = Path(args.path).expanduser()
 
@@ -306,6 +410,10 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps({"release": args.release, "phases": spans}, sort_keys=True))
             else:
                 print(phases_text(args.release, spans), end="")
+        elif args.command == "postmortem":
+            out = write_postmortem(path, args.release, Path(args.out).expanduser())
+            print(f"postmortem draft for {args.release}: {out}" if out
+                  else f"no postmortem: nothing in the last run of {args.release} went wrong")
         else:
             out = write_evidence(path, args.release, Path(args.out).expanduser())
             print(f"evidence for {args.release}: {out}")

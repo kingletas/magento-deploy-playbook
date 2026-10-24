@@ -7,6 +7,10 @@ Entries say what changed for somebody using this, not what the diff did.
 First public release. Everything below is what it contains rather than what
 changed, because there's nothing before it.
 
+### Added
+
+- Every deploy that fails or is rolled back leaves a postmortem draft beside its audit log: who ran it, what went wrong, the timeline and the phase times, built only from its records, with empty headings for the cause and the follow-ups. `bin/audit-log postmortem` writes one for any release by hand.
+
 ### Fixed
 
 - A deploy stopped by the lock forecast says once that nothing went live. The step's own message already said it, and the lock's release added it again. A stop on blocking table copies prints on one line, with the rows after every table rather than only the last, and the forecast's summary no longer reads "none rows" when nothing blocks.

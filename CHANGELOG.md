@@ -7,6 +7,10 @@ Entries say what changed for somebody using this, not what the diff did.
 First public release. Everything below is what it contains rather than what
 changed, because there's nothing before it.
 
+### Added
+
+- Every deploy that fails or is rolled back leaves a postmortem draft beside its audit log: who ran it, what went wrong, the timeline and the phase times, built only from its records, with empty headings for the cause and the follow-ups. `bin/audit-log postmortem` writes one for any release by hand.
+
 ### Fixed
 
 - The zero-downtime arms run `setup:upgrade --keep-generated`, as the deploy does. A plain `setup:upgrade` in production mode deletes the new release's compiled code and deployed static files, so the new node served 500s and stalled while it rebuilt them on live requests, and falsifier 5 measured the arm's command rather than the deploy.

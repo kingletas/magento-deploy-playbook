@@ -202,6 +202,8 @@ The draft holds only what the records hold, from the release's last run:
 
 **Why it happened, what we change, and who follows up are empty headings.** The log cannot know them, so the draft does not guess.
 
+**A draft stays when a later run of the same release succeeds**, because the failure still happened. It describes the run it was written for, as that run's records stood, so read its `Started` row before its maintenance line: a retry that went well writes no new draft and leaves this one as it was.
+
 A draft that cannot be written never stops a deploy, because the records it is built from are already in the log. Write one by hand, for any release, the same way:
 
 ```bash

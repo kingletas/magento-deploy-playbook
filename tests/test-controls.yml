@@ -182,6 +182,16 @@
           - lookup('file', audit.path).splitlines() | select('search', 'backup.failed') | list | length == 2
         fail_msg: "Expected two backup.failed records."
 
+    - name: Assert each failed backup also left a postmortem draft, with no hand step
+      ansible.builtin.assert:
+        that:
+          - draft is search('# Postmortem draft: release ' ~ release_id)
+          - draft is search('The backup failed, so the deploy stopped')
+          - draft is search('## Why it happened')
+        fail_msg: "Expected a postmortem draft beside the audit log naming the failed backup."
+      vars:
+        draft: "{{ lookup('file', (audit.path | dirname) ~ '/postmortems/' ~ release_id ~ '.md', errors='ignore') | default('', true) }}"
+
     ###
     # Approval: a signed tag from an allowed approver who is not the deployer.
     ###

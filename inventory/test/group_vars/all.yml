@@ -21,7 +21,8 @@ env_name: test
 # ^[0-9]{8}_[0-9]{10}_test_suffix$.
 suffix: test_suffix
 
-# branch_name - never checked out; the suites do not run the git tasks.
+# branch_name - never checked out; tests/test-summary-file.yml, the one suite
+# that runs the git tasks, sets its own and puts this one back.
 branch_name: develop
 
 # php_version - what the lower environments run. test-bundler.yml also asserts

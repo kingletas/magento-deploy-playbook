@@ -33,6 +33,11 @@
 - name: The audit, integrity, backup and approval controls
   ansible.builtin.import_playbook: tests/test-controls.yml
 
+# Before the suites below on purpose: they run after it in the same process,
+# so they prove it hands back the values it replaced.
+- name: The release summary, against real git repositories with and without pub/
+  ansible.builtin.import_playbook: tests/test-summary-file.yml
+
 - name: Which file changes move which build fingerprint, against a real git repository
   ansible.builtin.import_playbook: tests/test-build-skip.yml
 

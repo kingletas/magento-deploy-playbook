@@ -726,13 +726,15 @@ verify-deploy.yml       asserts on the filesystem after a deploy
 audit.yml               checks the audit chain, writes an evidence bundle
 unlock.yml              clears a stale build lock
 rollback.yml            puts an earlier release back, under the guard
-test.yml                imports the nine offline suites
+test.yml                imports the eleven offline suites
 tests/                  the suites, plus four symlinks -- see below
     test-vars-contract.yml  test-bundler.yml
     test-release-lock.yml   test-release-prune.yml
     test-outgoing-maintenance.yml  test-upgrade-gate.yml
     test-warmup.yml               test-controls.yml
     test-build-skip.yml           build-skip-case.yml
+    test-summary-file.yml         summary-file-case.yml
+    test-stop-messages.yml
     test_audit_log.py             (python, run by bin/check)
     test_zdt_proof.py             (python, run by bin/check)
     group_vars -> ../group_vars   tasks -> ../tasks
@@ -844,7 +846,7 @@ evaluating it templates the values. Every suite imports preflight first.
 ## What the checks cover, and what they don't
 
 ```bash
-make check         # syntax, inventories, structure, the audit tool, the proof runner, nine offline suites, lint
+make check         # syntax, inventories, structure, the audit tool, the proof runner, eleven offline suites, lint
 make docker-test   # the real thing, against six containers
 make docker-demo   # the same, building real Magento from GitHub
 make docker-down   # afterwards

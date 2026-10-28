@@ -51,6 +51,15 @@
                    ~ '...' ~ branch_name ~ ' failed)', true) }}
     cacheable: true
 
+# A store that leaves pub/ to composer has none until composer install, which
+# runs after this. mkdir rather than the file module, which would want a mode:
+# a new pub/ gets the umask composer would have given it, and one the
+# repository tracks is never touched.
+- name: Make sure pub/ exists for the summary
+  ansible.builtin.command:
+    argv: [mkdir, -p, "{{ wdir }}/pub"]
+    creates: "{{ wdir }}/pub"
+
 - name: Create summary file
   ansible.builtin.copy:
     dest: "{{ wdir }}/pub/summary.txt"

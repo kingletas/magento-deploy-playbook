@@ -1,0 +1,80 @@
+---
+###
+# One row of tests/test-summary-file.yml: make a store repository with a main
+# branch and a release branch one commit past it, check it out through
+# tasks/packaging/git.yml into an empty directory, and read pub/summary.txt.
+###
+- name: "Point the checkout at the store {{ sf_case.name }}"
+  ansible.builtin.set_fact:
+    sf_source: "{{ sf_root }}/{{ sf_case.name }}/source"
+    wdir: "{{ sf_root }}/{{ sf_case.name }}/build"
+    git: "{{ git | combine({'repo': sf_root ~ '/' ~ sf_case.name ~ '/source'}) }}"
+    branch_name: release
+    regular_base_branch: "{{ sf_case.base }}"
+
+- name: Create the store's folders
+  ansible.builtin.file:
+    path: "{{ sf_source }}/{{ item }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ ['.', 'pub'] if sf_case.tracks_pub else ['.'] }}"
+
+- name: Write composer.json
+  ansible.builtin.copy:
+    content: '{"name": "acme/store", "require": {}}'
+    dest: "{{ sf_source }}/composer.json"
+    mode: "0644"
+
+- name: Write a tracked file under pub/
+  ansible.builtin.copy:
+    content: "<?php // the store's own front controller\n"
+    dest: "{{ sf_source }}/pub/index.php"
+    mode: "0644"
+  when: sf_case.tracks_pub
+
+# -b main, never the machine's init.defaultBranch: a store whose default is
+# master is how a branch_name that names main fails, and it must not decide this.
+- name: Commit main, then the release branch one commit past it
+  ansible.builtin.shell:
+    cmd: >-
+      git init -q -b main &&
+      git add -A &&
+      git -c user.email=suite@example.invalid -c user.name=suite commit -qm "Start the store" &&
+      git checkout -q -b release &&
+      git -c user.email=suite@example.invalid -c user.name=suite commit -q --allow-empty
+      -m "{{ sf_subject }}" &&
+      git checkout -q main
+    chdir: "{{ sf_source }}"
+  changed_when: true
+
+- name: Check out the store the way a build does
+  ansible.builtin.import_tasks: tasks/packaging/git.yml
+
+- name: Read the summary
+  ansible.builtin.slurp:
+    src: "{{ wdir }}/pub/summary.txt"
+  register: sf_summary
+
+- name: Assert the summary carries the changelog, or says why it cannot
+  ansible.builtin.assert:
+    that: >-
+      (sf_summary.content | b64decode) is search('^- \([0-9a-f]+\) ' ~ sf_subject ~ '$', multiline=true)
+      if sf_case.base == 'main' else
+      (sf_summary.content | b64decode) is search('changelog unavailable: git log develop\.\.\.release failed')
+    fail_msg: "The {{ sf_case.name }} summary reads: {{ sf_summary.content | b64decode }}"
+
+- name: Read the tracked file in the store and in the checkout
+  ansible.builtin.stat:
+    path: "{{ item }}/pub/index.php"
+    checksum_algorithm: sha256
+  loop: ["{{ sf_source }}", "{{ wdir }}"]
+  register: sf_index
+  when: sf_case.tracks_pub
+
+- name: Assert the tracked file came through byte for byte
+  ansible.builtin.assert:
+    that:
+      - sf_index.results[1].stat.exists
+      - sf_index.results[0].stat.checksum == sf_index.results[1].stat.checksum
+    fail_msg: "pub/index.php changed in the checkout of the {{ sf_case.name }} store."
+  when: sf_case.tracks_pub

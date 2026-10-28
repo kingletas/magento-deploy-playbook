@@ -140,7 +140,7 @@ unlock:
 check:
 	@bin/check
 
-## test: run the eight offline suites only (what check runs as its fourth layer)
+## test: run the eleven offline suites only (what check runs as its fourth layer)
 test:
 	$(ANSIBLE_PLAYBOOK) -i inventory/test test.yml $(EXTRA)
 

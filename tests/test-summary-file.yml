@@ -1,0 +1,54 @@
+---
+###
+# tasks/packaging/git.yml, run for real against temporary git repositories: the
+# checkout has to end with pub/summary.txt holding the changelog, whether the
+# store tracks pub/ or leaves it to composer, as a composer-only store does.
+# Each case clones into an empty directory, because a builder that has built
+# before already has a pub/ and only a first build shows whether one is made.
+#
+#   ansible-playbook -i inventory/test tests/test-summary-file.yml
+###
+- name: The release summary
+  hosts: builder
+  connection: local
+  gather_facts: false
+  vars:
+    sf_root: "/tmp/magento-deploy-playbook-summary-test"
+    sf_subject: "Raise the cart limit to forty lines"
+    cases:
+      - {name: no-pub, tracks_pub: false, base: main}
+      - {name: tracked-pub, tracks_pub: true, base: main}
+      # A base branch the clone does not have: the summary says so instead.
+      - {name: no-base, tracks_pub: false, base: develop}
+  tasks:
+    # Facts, not play vars: test.yml runs the suites in one process, and an
+    # earlier suite's set_fact would outrank a play var here. Kept first so the
+    # suites after this one get the same values back.
+    - name: Keep the values this suite replaces
+      ansible.builtin.set_fact:
+        sf_saved:
+          git: "{{ git }}"
+          branch_name: "{{ branch_name }}"
+          regular_base_branch: "{{ regular_base_branch }}"
+
+    - name: Start from nothing
+      ansible.builtin.file:
+        path: "{{ sf_root }}"
+        state: absent
+
+    - name: Check out each fixture store and read its summary
+      ansible.builtin.include_tasks: summary-file-case.yml
+      loop: "{{ cases }}"
+      loop_control:
+        loop_var: sf_case
+
+    - name: Put back the values this suite replaced
+      ansible.builtin.set_fact:
+        git: "{{ sf_saved.git }}"
+        branch_name: "{{ sf_saved.branch_name }}"
+        regular_base_branch: "{{ sf_saved.regular_base_branch }}"
+
+    - name: Remove the fixture repositories
+      ansible.builtin.file:
+        path: "{{ sf_root }}"
+        state: absent

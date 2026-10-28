@@ -16,7 +16,7 @@
 #      Kapelos, so no store is needed; the fleet checks' tests use a fake mysql
 #      client, so no database is needed; the arms' tests fake ssh, curl and
 #      rsync as well, so no lab is needed.
-#   4. test.yml -- the eight offline suites, run for real against
+#   4. test.yml -- the eleven offline suites, run for real against
 #      inventory/test. No host is contacted; every play is connection: local.
 #   5. yamllint, ansible-lint and shellcheck, where they are available.
 #

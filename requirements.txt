@@ -32,7 +32,7 @@ cffi==2.1.1
 click==8.5.0
 cryptography==50.0.1
 distro==1.9.0
-filelock==4.0.4
+filelock==4.2.1
 jsonschema-specifications==2025.9.1
 jsonschema==4.26.0
 mypy_extensions==1.1.0

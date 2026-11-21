@@ -47,4 +47,4 @@ rpds-py==2026.6.3
 ruamel.yaml.clib==0.2.15
 ruamel.yaml==0.19.1
 subprocess-tee==0.4.2
-wcmatch==11.0.1
+wcmatch==11.2
